@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+mod market_scoring;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
