@@ -207,6 +207,25 @@ pub fn detect_execution_master(
     }
 }
 
+/// Detects wallets with very high win rate but occasional catastrophic losses.
+/// These look great on paper but will eventually blow up.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_tail_risk_seller(
+    win_rate: f64,
+    max_loss_vs_avg_win: f64,
+    min_win_rate_threshold: f64,
+    loss_multiplier_threshold: f64,
+) -> Option<ExclusionReason> {
+    if win_rate > min_win_rate_threshold && max_loss_vs_avg_win > loss_multiplier_threshold {
+        Some(ExclusionReason::TailRiskSeller {
+            win_rate,
+            max_loss_ratio: max_loss_vs_avg_win,
+        })
+    } else {
+        None
+    }
+}
+
 /// Detect the Patient Accumulator persona: long holds, low trading frequency.
 /// Returns Some(PatientAccumulator) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -720,6 +739,40 @@ mod tests {
     fn test_execution_master_boundary_at_threshold() {
         // Exactly at 0.70 — should NOT trigger (> not >=)
         let result = detect_execution_master(0.70, 0.70);
+        assert_eq!(result, None);
+    }
+
+    // --- Task 9: Tail Risk Seller ---
+
+    #[test]
+    fn test_detect_tail_risk_seller() {
+        // 85% win rate but max single loss is 8x average win
+        let result = detect_tail_risk_seller(0.85, 8.0, 0.80, 5.0);
+        assert_eq!(
+            result,
+            Some(ExclusionReason::TailRiskSeller {
+                win_rate: 0.85,
+                max_loss_ratio: 8.0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_not_tail_risk_seller_low_win_rate() {
+        let result = detect_tail_risk_seller(0.55, 8.0, 0.80, 5.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_not_tail_risk_seller_small_losses() {
+        let result = detect_tail_risk_seller(0.85, 2.0, 0.80, 5.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_tail_risk_seller_boundary_at_thresholds() {
+        // Exactly at both thresholds — should NOT trigger (> not >=)
+        let result = detect_tail_risk_seller(0.80, 5.0, 0.80, 5.0);
         assert_eq!(result, None);
     }
 }
