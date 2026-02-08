@@ -1,11 +1,11 @@
-#![allow(dead_code)]
-
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct WScoreWeights {
     pub edge_weight: f64,
     pub consistency_weight: f64,
 }
 
+#[allow(dead_code)]
 impl Default for WScoreWeights {
     fn default() -> Self {
         Self {
@@ -15,6 +15,7 @@ impl Default for WScoreWeights {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct WalletScoreInput {
     /// Total paper ROI over the scoring window, percent (e.g. +12.3).
@@ -23,22 +24,26 @@ pub struct WalletScoreInput {
     pub daily_return_stdev_pct: f64,
 }
 
+#[allow(dead_code)]
 fn clamp01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }
 
+#[allow(dead_code)]
 fn edge_score(paper_roi_pct: f64) -> f64 {
     // Normalize ROI into [0, 1], treating <=0 as 0.
     // In early MVP we cap at +20% => 1.0.
     clamp01(paper_roi_pct.max(0.0) / 20.0)
 }
 
+#[allow(dead_code)]
 fn consistency_score(daily_return_stdev_pct: f64) -> f64 {
     // Normalize stdev into [0, 1] where 0% stdev => 1.0 and >=10% => 0.0.
     let max_stdev = 10.0;
     clamp01(1.0 - (daily_return_stdev_pct / max_stdev))
 }
 
+#[allow(dead_code)]
 pub fn compute_wscore(input: &WalletScoreInput, w: &WScoreWeights) -> f64 {
     let e = edge_score(input.paper_roi_pct);
     let c = consistency_score(input.daily_return_stdev_pct);

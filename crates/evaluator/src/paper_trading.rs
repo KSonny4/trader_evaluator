@@ -1,15 +1,15 @@
-#![allow(dead_code)]
-
 use anyhow::Result;
 use common::db::Database;
 use rusqlite::OptionalExtension;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Buy,
     Sell,
 }
 
+#[allow(dead_code)]
 impl Side {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -19,16 +19,19 @@ impl Side {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MirrorDecision {
     pub inserted: bool,
     pub reason: Option<String>,
 }
 
+#[allow(dead_code)]
 fn clamp01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }
 
+#[allow(dead_code)]
 fn apply_slippage(entry_price: f64, side: Side, slippage_pct: f64) -> (f64, f64) {
     let factor = slippage_pct / 100.0;
     let adjusted = match side {
@@ -38,6 +41,7 @@ fn apply_slippage(entry_price: f64, side: Side, slippage_pct: f64) -> (f64, f64)
     (clamp01(adjusted), slippage_pct)
 }
 
+#[allow(dead_code)]
 fn market_exposure_usdc(db: &Database, condition_id: &str) -> Result<f64> {
     let v: Option<f64> = db.conn.query_row(
         "SELECT SUM(total_size_usdc) FROM paper_positions WHERE condition_id = ?1",
@@ -47,6 +51,7 @@ fn market_exposure_usdc(db: &Database, condition_id: &str) -> Result<f64> {
     Ok(v.unwrap_or(0.0))
 }
 
+#[allow(dead_code)]
 fn wallet_exposure_usdc(db: &Database, proxy_wallet: &str, strategy: &str) -> Result<f64> {
     let v: Option<f64> = db.conn.query_row(
         "SELECT SUM(total_size_usdc) FROM paper_positions WHERE proxy_wallet = ?1 AND strategy = ?2",
@@ -56,6 +61,7 @@ fn wallet_exposure_usdc(db: &Database, proxy_wallet: &str, strategy: &str) -> Re
     Ok(v.unwrap_or(0.0))
 }
 
+#[allow(dead_code)]
 fn realized_pnl_usdc(db: &Database, strategy: &str) -> Result<f64> {
     let v: Option<f64> = db.conn.query_row(
         "SELECT SUM(pnl) FROM paper_trades WHERE strategy = ?1 AND status != 'open'",
@@ -65,6 +71,7 @@ fn realized_pnl_usdc(db: &Database, strategy: &str) -> Result<f64> {
     Ok(v.unwrap_or(0.0))
 }
 
+#[allow(dead_code)]
 fn today_trade_count(db: &Database, strategy: &str) -> Result<u32> {
     let v: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM paper_trades WHERE strategy = ?1 AND date(created_at) = date('now')",
@@ -74,6 +81,7 @@ fn today_trade_count(db: &Database, strategy: &str) -> Result<u32> {
     Ok(v as u32)
 }
 
+#[allow(dead_code)]
 fn upsert_position(
     db: &Database,
     proxy_wallet: &str,
@@ -132,6 +140,7 @@ fn upsert_position(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn mirror_trade_to_paper(
     db: &Database,
     proxy_wallet: &str,
