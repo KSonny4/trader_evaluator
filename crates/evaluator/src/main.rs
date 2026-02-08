@@ -9,6 +9,7 @@ mod metrics;
 mod paper_trading;
 mod scheduler;
 mod wallet_discovery;
+mod wallet_features;
 mod wallet_scoring;
 
 #[tokio::main]
