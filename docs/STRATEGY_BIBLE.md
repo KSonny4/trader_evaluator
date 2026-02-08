@@ -155,7 +155,7 @@ Paper trading is a **proof system**, not a game. Every paper trade must answer: 
 | Aspect | What We Do | Why |
 |--------|-----------|-----|
 | **Slippage** | Apply estimated slippage to entry price | We won't get their exact price |
-| **Fees** | Quartic taker fee: `price * 0.25 * (price * (1-price))^2` | Real cost on Polymarket |
+| **Fees** | Conditional: quartic for 15m crypto, zero for everything else | Real cost on Polymarket (most markets = zero) |
 | **Fill probability** | Check orderbook at detection time (when available) | Don't paper-trade fills that couldn't happen |
 | **Detection delay** | Record time delta: their trade timestamp vs our detection | Measure realistic lag |
 | **Copy fidelity** | Track: trades_we_copied / trades_they_made | If < 80%, paper PnL diverges from reality |
