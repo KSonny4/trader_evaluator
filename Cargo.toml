@@ -27,3 +27,22 @@ askama = "0.15"
 tower-http = { version = "0.6", features = ["fs"] }
 tower = { version = "0.5", features = ["util"] }
 base64 = "0.22"
+
+# === Workspace-wide lint configuration ===
+# These lints enforce clean architecture. Run `cargo clippy` to check.
+# Lints here interact with `-- -D warnings` in make test, so only
+# enable lints the codebase already passes.
+[workspace.lints.clippy]
+too_many_lines = "warn"           # threshold in clippy.toml (250, ratchet to 100)
+type_complexity = "warn"
+large_enum_variant = "warn"
+module_inception = "warn"
+needless_pass_by_value = "warn"
+# TODO: Enable after cleanup sprints:
+# cognitive_complexity = "warn"               # 1 function exceeds threshold (31/25)
+# redundant_closure_for_method_calls = "warn" # 5 violations
+# unwrap_used = "warn"                        # 200+ violations
+# expect_used = "warn"                        # 3 violations
+
+[workspace.lints.rust]
+unused_must_use = "deny"

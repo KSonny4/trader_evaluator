@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean
+.PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean check-file-length
 
 # === Local enforcement ===
 setup-hooks:
@@ -31,11 +31,49 @@ worktree-clean:
 	git branch -D feature/$(NAME) 2>/dev/null || true
 	@echo "Cleaned up worktree and branch for $(NAME)"
 
+# === Architecture enforcement ===
+MAX_FILE_LINES ?= 500
+# Files that currently exceed the limit — each must have a tracking issue to split them.
+# Remove entries as files are refactored below the threshold.
+OVERLENGTH_ALLOWLIST := \
+	crates/evaluator/src/jobs.rs \
+	crates/web/src/main.rs \
+	crates/web/src/queries.rs \
+	crates/evaluator/src/ingestion.rs \
+	crates/evaluator/src/persona_classification.rs \
+	crates/common/src/db.rs
+
+check-file-length:
+	@echo "=== Checking .rs files for >$(MAX_FILE_LINES) lines ==="
+	@fail=0; \
+	for f in $$(find crates/ -name '*.rs' -not -path '*/target/*'); do \
+		lines=$$(wc -l < "$$f"); \
+		if [ "$$lines" -gt $(MAX_FILE_LINES) ]; then \
+			allowed=0; \
+			for a in $(OVERLENGTH_ALLOWLIST); do \
+				if [ "$$f" = "$$a" ]; then allowed=1; break; fi; \
+			done; \
+			if [ "$$allowed" -eq 1 ]; then \
+				echo "WARN: $$f has $$lines lines (allowlisted — needs refactoring)"; \
+			else \
+				echo "FAIL: $$f has $$lines lines (max $(MAX_FILE_LINES))"; \
+				fail=1; \
+			fi; \
+		fi; \
+	done; \
+	if [ "$$fail" -eq 1 ]; then \
+		echo ""; \
+		echo "Files exceed $(MAX_FILE_LINES) line limit. Split them into modules."; \
+		echo "If this is a known issue, add to OVERLENGTH_ALLOWLIST in Makefile."; \
+		exit 1; \
+	fi
+	@echo "OK: all files within $(MAX_FILE_LINES) line limit (or allowlisted)"
+
 # === Build ===
 build:
 	cargo build --release
 
-test: skills-sync
+test: skills-sync check-file-length
 	cargo test --all
 	cargo clippy --all-targets -- -D warnings
 	cargo fmt --check
