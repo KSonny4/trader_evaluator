@@ -147,6 +147,8 @@ if [ ${#errors[@]} -gt 0 ]; then
     echo "  ### Issues"
     echo "  ### Assessment"
     echo ""
+    echo "NO PR WITHOUT CODE REVIEW SKILL"
+    echo ""
     echo "Run the requesting-code-review skill before creating your PR."
     exit 1
 fi
