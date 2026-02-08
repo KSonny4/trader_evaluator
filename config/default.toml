@@ -65,3 +65,7 @@ prometheus_port = 9094                 # different from trading bots (9091-9093)
 data_api_url = "https://data-api.polymarket.com"
 gamma_api_url = "https://gamma-api.polymarket.com"
 
+[web]
+port = 8080
+host = "0.0.0.0"
+

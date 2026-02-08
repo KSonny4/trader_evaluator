@@ -157,12 +157,19 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    // Default DB path — will be configurable in Task 13
-    let db_path = PathBuf::from("data/evaluator.db");
+    // Load config — use [web] section if present, otherwise defaults
+    let config = common::config::Config::load()?;
+    let db_path = PathBuf::from(&config.database.path);
+    let web_port = config.web.as_ref().map_or(8080, |w| w.port);
+    let web_host = config
+        .web
+        .as_ref()
+        .map_or("0.0.0.0".to_string(), |w| w.host.clone());
+
     let state = Arc::new(AppState { db_path });
 
     let app = create_router_with_state(state);
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let addr: SocketAddr = format!("{}:{}", web_host, web_port).parse()?;
     tracing::info!("dashboard listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

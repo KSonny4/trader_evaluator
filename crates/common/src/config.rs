@@ -14,6 +14,7 @@ pub struct Config {
     pub wallet_scoring: WalletScoring,
     pub observability: Observability,
     pub polymarket: Polymarket,
+    pub web: Option<Web>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +104,12 @@ pub struct Polymarket {
     pub gamma_api_url: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct Web {
+    pub port: u16,
+    pub host: String,
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let content = std::fs::read_to_string("config/default.toml")?;
@@ -132,5 +139,88 @@ mod tests {
         assert_eq!(config.general.mode, "paper");
         assert!(config.risk.max_exposure_per_market_pct > 0.0);
         assert!(config.ingestion.trades_poll_interval_secs > 0);
+    }
+
+    #[test]
+    fn test_web_config_section() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let web = config.web.expect("web section should be present");
+        assert_eq!(web.port, 8080);
+        assert_eq!(web.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_web_config_optional() {
+        // Config without [web] section should still parse
+        let toml = r#"
+[general]
+mode = "paper"
+log_level = "info"
+
+[database]
+path = "data/evaluator.db"
+
+[risk]
+max_exposure_per_market_pct = 10.0
+max_exposure_per_wallet_pct = 5.0
+max_daily_trades = 100
+slippage_pct = 1.0
+no_chase_adverse_move_pct = 5.0
+portfolio_stop_drawdown_pct = 15.0
+paper_bankroll_usdc = 10000.0
+
+[market_scoring]
+top_n_markets = 20
+min_liquidity_usdc = 1000.0
+min_daily_volume_usdc = 5000.0
+min_daily_trades = 20
+min_unique_traders = 10
+max_days_to_expiry = 90
+min_days_to_expiry = 1
+refresh_interval_secs = 86400
+weights_liquidity = 0.25
+weights_volume = 0.25
+weights_density = 0.20
+weights_whale_concentration = 0.15
+weights_time_to_expiry = 0.15
+
+[wallet_discovery]
+min_total_trades = 5
+max_wallets_per_market = 100
+holders_per_market = 20
+refresh_interval_secs = 86400
+
+[ingestion]
+trades_poll_interval_secs = 3600
+activity_poll_interval_secs = 21600
+positions_poll_interval_secs = 86400
+holders_poll_interval_secs = 86400
+rate_limit_delay_ms = 200
+max_retries = 3
+backoff_base_ms = 1000
+
+[paper_trading]
+strategies = ["mirror"]
+mirror_delay_secs = 0
+position_size_usdc = 100.0
+
+[wallet_scoring]
+windows_days = [7, 30, 90]
+min_trades_for_score = 10
+edge_weight = 0.30
+consistency_weight = 0.25
+market_skill_weight = 0.20
+timing_skill_weight = 0.15
+behavior_quality_weight = 0.10
+
+[observability]
+prometheus_port = 9094
+
+[polymarket]
+data_api_url = "https://data-api.polymarket.com"
+gamma_api_url = "https://gamma-api.polymarket.com"
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert!(config.web.is_none());
     }
 }
