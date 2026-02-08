@@ -1,0 +1,24 @@
+[Unit]
+Description=Polymarket Trader Evaluator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=evaluator
+Group=evaluator
+WorkingDirectory=/opt/evaluator
+ExecStart=/opt/evaluator/evaluator
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Hardening
+ProtectSystem=strict
+ReadWritePaths=/opt/evaluator/data
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+
