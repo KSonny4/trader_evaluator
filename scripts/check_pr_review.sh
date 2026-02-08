@@ -76,7 +76,10 @@ line ~ /^#+ / {
     section = ""
     next
 }
-# Non-empty line in a tracked section
+# Skip HTML comments and bare list markers (template placeholders)
+/^[[:space:]]*<!--.*-->/ { next }
+/^[[:space:]]*-[[:space:]]*$/ { next }
+# Non-empty line in a tracked section (real content only)
 section != "" && /[^ \t]/ {
     if (section == "strengths") strengths_content = 1
     if (section == "issues") issues_content = 1
@@ -93,8 +96,20 @@ END {
 }
 ')
 
-# Parse awk output into bash variables
-eval "$result"
+# Parse awk output into bash variables (no eval — defense-in-depth)
+has_code_review=0; has_strengths=0; strengths_content=0
+has_issues=0; issues_content=0; has_assessment=0; assessment_content=0
+while IFS='=' read -r key value; do
+    case "$key" in
+        has_code_review)   has_code_review="$value" ;;
+        has_strengths)     has_strengths="$value" ;;
+        strengths_content) strengths_content="$value" ;;
+        has_issues)        has_issues="$value" ;;
+        issues_content)    issues_content="$value" ;;
+        has_assessment)    has_assessment="$value" ;;
+        assessment_content) assessment_content="$value" ;;
+    esac
+done <<< "$result"
 
 errors=()
 

@@ -188,6 +188,66 @@ None
 ## Assessment
 OK"
 
+# --- Template / HTML comment bypass ---
+echo ""
+echo "--- Template bypass prevention ---"
+
+assert_fail "Unfilled template (HTML comments only)" "## Summary
+
+<!-- Describe what this PR does and why -->
+
+## Changes
+
+<!-- List the key changes -->
+- 
+
+## Testing
+
+<!-- How was this tested? -->
+- [ ] cargo test passes
+
+## Code Review
+
+<!-- Run the requesting-code-review skill -->
+
+### Strengths
+<!-- What's good about this code? -->
+- 
+
+### Issues
+<!-- What problems were found? -->
+- 
+
+### Assessment
+<!-- Overall verdict -->"
+
+assert_fail "HTML comments as sole section content" "## Code Review
+### Strengths
+<!-- placeholder -->
+### Issues
+<!-- placeholder -->
+### Assessment
+<!-- placeholder -->"
+
+assert_fail "Bare dashes as sole section content" "## Code Review
+### Strengths
+- 
+### Issues
+- 
+### Assessment
+- "
+
+assert_pass "Real content mixed with HTML comments" "## Code Review
+### Strengths
+<!-- What's good? -->
+- Clean separation of concerns
+### Issues
+<!-- problems? -->
+- No issues found
+### Assessment
+<!-- verdict -->
+Ready to merge"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
