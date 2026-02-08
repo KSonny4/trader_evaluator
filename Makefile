@@ -26,8 +26,9 @@ DB_CMD = ssh $(SERVER) 'sqlite3 $(DB)'
 
 deploy: test build-linux
 	scp target/x86_64-unknown-linux-musl/release/evaluator $(SERVER):$(REMOTE_DIR)/evaluator.new
+	scp target/x86_64-unknown-linux-musl/release/web $(SERVER):$(REMOTE_DIR)/web.new
 	scp config/default.toml $(SERVER):$(REMOTE_DIR)/config/default.toml
-	ssh $(SERVER) 'mv $(REMOTE_DIR)/evaluator.new $(REMOTE_DIR)/evaluator && sudo systemctl restart evaluator'
+	ssh $(SERVER) 'mv $(REMOTE_DIR)/evaluator.new $(REMOTE_DIR)/evaluator && mv $(REMOTE_DIR)/web.new $(REMOTE_DIR)/web && sudo systemctl restart evaluator && sudo systemctl restart web'
 	@echo "Deployed. Waiting 10s for startup..."
 	@sleep 10
 	$(MAKE) check

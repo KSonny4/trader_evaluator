@@ -1,0 +1,23 @@
+[Unit]
+Description=Trader Evaluator Dashboard
+After=network-online.target evaluator.service
+Wants=network-online.target evaluator.service
+
+[Service]
+Type=simple
+User=evaluator
+Group=evaluator
+WorkingDirectory=/opt/evaluator
+ExecStart=/opt/evaluator/web
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Hardening
+ProtectSystem=strict
+ReadOnlyPaths=/opt/evaluator/data
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
