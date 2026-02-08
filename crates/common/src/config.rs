@@ -14,6 +14,8 @@ pub struct Config {
     pub wallet_scoring: WalletScoring,
     pub observability: Observability,
     pub polymarket: Polymarket,
+    pub personas: Personas,
+    pub anomaly: Anomaly,
     pub web: Option<Web>,
 }
 
@@ -37,6 +39,15 @@ pub struct Risk {
     pub no_chase_adverse_move_pct: f64,
     pub portfolio_stop_drawdown_pct: f64,
     pub paper_bankroll_usdc: f64,
+    // Two-level risk: per-wallet
+    pub per_wallet_daily_loss_pct: f64,
+    pub per_wallet_weekly_loss_pct: f64,
+    pub per_wallet_max_drawdown_pct: f64,
+    pub per_wallet_max_slippage_vs_edge: f64,
+    // Two-level risk: portfolio
+    pub portfolio_daily_loss_pct: f64,
+    pub portfolio_weekly_loss_pct: f64,
+    pub max_concurrent_positions: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +91,13 @@ pub struct PaperTrading {
     pub strategies: Vec<String>,
     pub mirror_delay_secs: u64,
     pub position_size_usdc: f64,
+    // Copy fidelity and risk
+    pub bankroll_usd: f64,
+    pub max_total_exposure_pct: f64,
+    pub max_daily_loss_pct: f64,
+    pub min_copy_fidelity_pct: f64,
+    pub per_trade_size_usd: f64,
+    pub slippage_default_cents: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +127,49 @@ pub struct Web {
     pub port: u16,
     pub host: String,
     pub auth_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Personas {
+    // Stage 1 fast filters
+    pub stage1_min_wallet_age_days: u32,
+    pub stage1_min_total_trades: u32,
+    pub stage1_max_inactive_days: u32,
+    // Informed Specialist
+    pub specialist_max_markets: u32,
+    pub specialist_min_win_rate: f64,
+    // Consistent Generalist
+    pub generalist_min_markets: u32,
+    pub generalist_min_win_rate: f64,
+    pub generalist_max_win_rate: f64,
+    pub generalist_max_drawdown: f64,
+    pub generalist_min_sharpe: f64,
+    // Patient Accumulator
+    pub accumulator_min_hold_hours: f64,
+    pub accumulator_max_trades_per_week: f64,
+    // Execution Master (exclusion)
+    pub execution_master_pnl_ratio: f64,
+    // Tail Risk Seller (exclusion)
+    pub tail_risk_min_win_rate: f64,
+    pub tail_risk_loss_multiplier: f64,
+    // Noise Trader (exclusion)
+    pub noise_max_trades_per_week: f64,
+    pub noise_max_abs_roi: f64,
+    // Sniper/Insider (exclusion)
+    pub sniper_max_age_days: u32,
+    pub sniper_min_win_rate: f64,
+    pub sniper_max_trades: u32,
+    // Trust multipliers
+    pub trust_30_90_multiplier: f64,
+    pub obscurity_bonus_multiplier: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Anomaly {
+    pub win_rate_drop_pct: f64,
+    pub max_weekly_drawdown_pct: f64,
+    pub frequency_change_multiplier: f64,
+    pub size_change_multiplier: f64,
 }
 
 impl Config {
@@ -152,6 +213,47 @@ mod tests {
     }
 
     #[test]
+    fn test_persona_config_loads() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        assert_eq!(config.personas.stage1_min_wallet_age_days, 30);
+        assert_eq!(config.personas.stage1_min_total_trades, 10);
+        assert!(config.personas.specialist_min_win_rate > 0.0);
+        assert!(config.personas.generalist_min_sharpe > 0.0);
+        assert!(config.personas.execution_master_pnl_ratio > 0.0);
+        assert!(config.personas.trust_30_90_multiplier > 0.0);
+        assert!(config.personas.obscurity_bonus_multiplier > 1.0);
+    }
+
+    #[test]
+    fn test_risk_v2_config_loads() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        assert!(config.risk.per_wallet_daily_loss_pct > 0.0);
+        assert!(config.risk.per_wallet_weekly_loss_pct > 0.0);
+        assert!(config.risk.per_wallet_max_drawdown_pct > 0.0);
+        assert!(config.risk.portfolio_daily_loss_pct > 0.0);
+        assert!(config.risk.portfolio_weekly_loss_pct > 0.0);
+        assert!(config.risk.max_concurrent_positions > 0);
+    }
+
+    #[test]
+    fn test_copy_fidelity_config_loads() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        assert!(config.paper_trading.min_copy_fidelity_pct > 0.0);
+        assert!(config.paper_trading.bankroll_usd > 0.0);
+        assert!(config.paper_trading.max_total_exposure_pct > 0.0);
+        assert!(config.paper_trading.max_daily_loss_pct > 0.0);
+    }
+
+    #[test]
+    fn test_anomaly_config_loads() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        assert!(config.anomaly.win_rate_drop_pct > 0.0);
+        assert!(config.anomaly.max_weekly_drawdown_pct > 0.0);
+        assert!(config.anomaly.frequency_change_multiplier > 1.0);
+        assert!(config.anomaly.size_change_multiplier > 1.0);
+    }
+
+    #[test]
     fn test_web_config_optional() {
         // Config without [web] section should still parse
         let toml = r#"
@@ -170,6 +272,13 @@ slippage_pct = 1.0
 no_chase_adverse_move_pct = 5.0
 portfolio_stop_drawdown_pct = 15.0
 paper_bankroll_usdc = 10000.0
+per_wallet_daily_loss_pct = 2.0
+per_wallet_weekly_loss_pct = 5.0
+per_wallet_max_drawdown_pct = 15.0
+per_wallet_max_slippage_vs_edge = 1.0
+portfolio_daily_loss_pct = 3.0
+portfolio_weekly_loss_pct = 8.0
+max_concurrent_positions = 20
 
 [market_scoring]
 top_n_markets = 20
@@ -205,6 +314,12 @@ backoff_base_ms = 1000
 strategies = ["mirror"]
 mirror_delay_secs = 0
 position_size_usdc = 100.0
+bankroll_usd = 1000.0
+max_total_exposure_pct = 15.0
+max_daily_loss_pct = 3.0
+min_copy_fidelity_pct = 80.0
+per_trade_size_usd = 25.0
+slippage_default_cents = 1.0
 
 [wallet_scoring]
 windows_days = [7, 30, 90]
@@ -221,6 +336,36 @@ prometheus_port = 9094
 [polymarket]
 data_api_url = "https://data-api.polymarket.com"
 gamma_api_url = "https://gamma-api.polymarket.com"
+
+[personas]
+stage1_min_wallet_age_days = 30
+stage1_min_total_trades = 10
+stage1_max_inactive_days = 30
+specialist_max_markets = 10
+specialist_min_win_rate = 0.60
+generalist_min_markets = 20
+generalist_min_win_rate = 0.52
+generalist_max_win_rate = 0.60
+generalist_max_drawdown = 15.0
+generalist_min_sharpe = 1.0
+accumulator_min_hold_hours = 48.0
+accumulator_max_trades_per_week = 5.0
+execution_master_pnl_ratio = 0.70
+tail_risk_min_win_rate = 0.80
+tail_risk_loss_multiplier = 5.0
+noise_max_trades_per_week = 50.0
+noise_max_abs_roi = 0.02
+sniper_max_age_days = 30
+sniper_min_win_rate = 0.85
+sniper_max_trades = 20
+trust_30_90_multiplier = 0.8
+obscurity_bonus_multiplier = 1.2
+
+[anomaly]
+win_rate_drop_pct = 15.0
+max_weekly_drawdown_pct = 20.0
+frequency_change_multiplier = 3.0
+size_change_multiplier = 10.0
 "#;
         let config = Config::from_toml_str(toml).unwrap();
         assert!(config.web.is_none());
