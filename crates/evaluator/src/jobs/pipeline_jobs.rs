@@ -101,6 +101,15 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
 }
 
 pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    struct ScoreRow {
+        proxy_wallet: String,
+        window_days: i64,
+        wscore: f64,
+        edge_score: f64,
+        consistency_score: f64,
+        roi_pct: f64,
+    }
+
     let today = chrono::Utc::now().date_naive().to_string();
 
     let w = WScoreWeights {
@@ -148,15 +157,6 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         .await?;
 
     // Compute scores in Rust (no DB needed).
-    struct ScoreRow {
-        proxy_wallet: String,
-        window_days: i64,
-        wscore: f64,
-        edge_score: f64,
-        consistency_score: f64,
-        roi_pct: f64,
-    }
-
     let mut score_rows = Vec::with_capacity(pnl_data.len());
     for (wallet, window_days, pnl) in &pnl_data {
         let roi_pct = if bankroll > 0.0 {
@@ -224,10 +224,6 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
     pager: &P,
     cfg: &Config,
 ) -> Result<u64> {
-    let mut offset = 0_u32;
-    let limit = 100_u32;
-    let mut all: Vec<MarketCandidate> = Vec::new();
-
     // Extra fields from GammaMarket for the full DB upsert (not in MarketCandidate).
     #[derive(Clone)]
     struct MarketDbRow {
@@ -241,6 +237,10 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
         category: Option<String>,
         event_slug: Option<String>,
     }
+
+    let mut offset = 0_u32;
+    let limit = 100_u32;
+    let mut all: Vec<MarketCandidate> = Vec::new();
 
     // Build server-side filter from config to avoid fetching thousands of dead markets.
     let tomorrow = (chrono::Utc::now() + chrono::Duration::days(1))

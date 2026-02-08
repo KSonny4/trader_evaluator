@@ -74,6 +74,7 @@ cast_lossless = "warn"
 redundant_closure_for_method_calls = "warn"
 map_unwrap_or = "warn"
 manual_let_else = "warn"
+items_after_statements = "warn"
 
 [workspace.lints.rust]
 unused_must_use = "deny"
