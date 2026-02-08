@@ -1,6 +1,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+use crate::wallet_features::WalletFeatures;
+
 #[allow(dead_code)] // Wired into scheduler in Task 21
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExclusionReason {
@@ -136,6 +138,55 @@ pub fn record_exclusion(
         ],
     )?;
     Ok(())
+}
+
+#[allow(dead_code)] // Wired into scheduler in Task 21
+#[derive(Debug, Clone, PartialEq)]
+pub enum Persona {
+    InformedSpecialist,
+    ConsistentGeneralist,
+    PatientAccumulator,
+}
+
+#[allow(dead_code)] // Wired into scheduler in Task 21
+impl Persona {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InformedSpecialist => "INFORMED_SPECIALIST",
+            Self::ConsistentGeneralist => "CONSISTENT_GENERALIST",
+            Self::PatientAccumulator => "PATIENT_ACCUMULATOR",
+        }
+    }
+
+    pub fn follow_mode(&self) -> &'static str {
+        match self {
+            Self::InformedSpecialist => "mirror_with_delay",
+            Self::ConsistentGeneralist => "mirror",
+            Self::PatientAccumulator => "mirror_slow",
+        }
+    }
+}
+
+/// Detect the Informed Specialist persona: few markets, high win rate.
+/// Returns Some(InformedSpecialist) if criteria are met, None otherwise.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_informed_specialist(
+    features: &WalletFeatures,
+    max_markets: u32,
+    min_win_rate: f64,
+) -> Option<Persona> {
+    if features.unique_markets > max_markets {
+        return None;
+    }
+    let total_resolved = features.win_count + features.loss_count;
+    if total_resolved == 0 {
+        return None;
+    }
+    let win_rate = features.win_count as f64 / total_resolved as f64;
+    if win_rate < min_win_rate {
+        return None;
+    }
+    Some(Persona::InformedSpecialist)
 }
 
 #[cfg(test)]
@@ -349,5 +400,85 @@ mod tests {
             .reason_str(),
             "SNIPER_INSIDER"
         );
+    }
+
+    fn make_features(unique_markets: u32, win_count: u32, loss_count: u32) -> WalletFeatures {
+        WalletFeatures {
+            proxy_wallet: "0xabc".to_string(),
+            window_days: 30,
+            trade_count: win_count + loss_count,
+            win_count,
+            loss_count,
+            total_pnl: 500.0,
+            avg_position_size: 200.0,
+            unique_markets,
+            avg_hold_time_hours: 24.0,
+            max_drawdown_pct: 8.0,
+            trades_per_week: 10.0,
+            sharpe_ratio: 1.5,
+        }
+    }
+
+    #[test]
+    fn test_detect_informed_specialist() {
+        let features = make_features(5, 28, 12); // 5 markets, 70% win rate
+        let persona = detect_informed_specialist(&features, 10, 0.60);
+        assert_eq!(persona, Some(Persona::InformedSpecialist));
+    }
+
+    #[test]
+    fn test_not_specialist_too_many_markets() {
+        let features = make_features(25, 28, 12); // 25 markets > 10
+        let persona = detect_informed_specialist(&features, 10, 0.60);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_specialist_low_win_rate() {
+        let features = make_features(5, 10, 30); // 25% win rate < 60%
+        let persona = detect_informed_specialist(&features, 10, 0.60);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_specialist_zero_resolved_trades() {
+        let features = make_features(5, 0, 0); // no wins or losses
+        let persona = detect_informed_specialist(&features, 10, 0.60);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_specialist_boundary_exact_max_markets() {
+        let features = make_features(10, 28, 12); // exactly 10 markets = max
+        let persona = detect_informed_specialist(&features, 10, 0.60);
+        assert_eq!(persona, Some(Persona::InformedSpecialist));
+    }
+
+    #[test]
+    fn test_specialist_boundary_exact_min_win_rate() {
+        // 60% win rate = exactly at threshold (3/5)
+        let features = make_features(5, 3, 2);
+        let persona = detect_informed_specialist(&features, 10, 0.60);
+        assert_eq!(persona, Some(Persona::InformedSpecialist));
+    }
+
+    #[test]
+    fn test_persona_as_str() {
+        assert_eq!(Persona::InformedSpecialist.as_str(), "INFORMED_SPECIALIST");
+        assert_eq!(
+            Persona::ConsistentGeneralist.as_str(),
+            "CONSISTENT_GENERALIST"
+        );
+        assert_eq!(Persona::PatientAccumulator.as_str(), "PATIENT_ACCUMULATOR");
+    }
+
+    #[test]
+    fn test_persona_follow_mode() {
+        assert_eq!(
+            Persona::InformedSpecialist.follow_mode(),
+            "mirror_with_delay"
+        );
+        assert_eq!(Persona::ConsistentGeneralist.follow_mode(), "mirror");
+        assert_eq!(Persona::PatientAccumulator.follow_mode(), "mirror_slow");
     }
 }
