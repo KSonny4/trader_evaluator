@@ -29,7 +29,7 @@
 - [ ] Task 11: Sniper/Insider Detector
 - [ ] Task 12: Persona Classification Orchestrator + Stage 2 Job
 - [ ] Task 13: Paper Trade Settlement
-- [ ] Task 14: Quartic Taker Fee
+- [ ] Task 14: Conditional Taker Fee (Quartic for Crypto, Zero for Everything Else)
 - [ ] Task 15: Copy Fidelity Tracking
 - [ ] Task 16: Two-Level Risk Management (Per-Wallet + Portfolio)
 - [ ] Task 17: Follower Slippage Tracking
@@ -37,6 +37,9 @@
 - [ ] Task 19: Weekly Re-evaluation + Anomaly Detection
 - [ ] Task 20: MScore — Real Inputs (density, whale concentration)
 - [ ] Task 21: Wire New Jobs into Scheduler
+- [ ] Task 22: CLOB API Client + `book_snapshots` Table
+- [ ] Task 23: WebSocket Book Streaming + Recording
+- [ ] Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)
 
 ---
 
@@ -1777,12 +1780,13 @@ git commit -am "feat: paper trade settlement — settle open trades when markets
 
 ---
 
-## Task 14: Quartic Taker Fee
+## Task 14: Conditional Taker Fee (Quartic for Crypto, Zero for Everything Else)
 
-The Strategy Bible specifies: `fee = price * 0.25 * (price * (1 - price))^2`. Currently not applied.
+**IMPORTANT CONTEXT:** Most Polymarket markets have **zero trading fees**. The quartic taker fee formula (`fee = price * 0.25 * (price * (1 - price))^2`) applies **ONLY to 15-minute crypto markets** (BTC, ETH price prediction markets). Political, sports, weather, and all other event markets have zero fees. See: https://docs.polymarket.com/polymarket-learn/trading/fees
 
 **Files:**
 - Modify: `crates/evaluator/src/paper_trading.rs`
+- Modify: `crates/common/src/db.rs` (add `is_crypto_15m` column to `markets` table)
 
 **Step 1: Write the failing test**
 
@@ -1808,6 +1812,27 @@ fn test_quartic_taker_fee_at_extremes() {
     let fee_mid = quartic_taker_fee(0.50);
     assert!((fee_mid - 0.0078125).abs() < 0.0001);
 }
+
+#[test]
+fn test_compute_fee_conditional() {
+    // Political market: zero fee
+    let fee_political = compute_taker_fee(0.60, false);
+    assert!((fee_political - 0.0).abs() < 0.0001);
+
+    // Crypto 15m market: quartic fee
+    let fee_crypto = compute_taker_fee(0.60, true);
+    assert!((fee_crypto - 0.00864).abs() < 0.0001);
+}
+
+#[test]
+fn test_detect_crypto_15m_market() {
+    // BTC 15-minute markets have slugs like "will-btc-go-above-100000-by-15m"
+    // or titles containing "15 min" / "15m" + crypto asset names
+    assert!(is_crypto_15m_market("Will BTC go above $100,000 by 15 min?", "btc-15m-above-100k"));
+    assert!(is_crypto_15m_market("Will ETH be above $4,000 at 3:15 PM?", "eth-15m-above-4000"));
+    assert!(!is_crypto_15m_market("Will Trump win the 2024 election?", "trump-2024-election"));
+    assert!(!is_crypto_15m_market("Will Bitcoin reach $200k by 2026?", "bitcoin-200k-2026")); // not 15m
+}
 ```
 
 **Step 2: Run test to verify it fails**
@@ -1820,23 +1845,55 @@ Expected: FAIL
 ```rust
 /// Quartic taker fee on Polymarket.
 /// fee = price * 0.25 * (price * (1 - price))^2
-/// Max ~1.44% at p≈0.60, approaches zero near p=0 or p=1.
+/// Max ~1.56% at p=0.50, approaches zero near p=0 or p=1.
+/// ONLY applies to 15-minute crypto markets. All other markets have zero fees.
 pub fn quartic_taker_fee(price: f64) -> f64 {
     let p = price.clamp(0.0, 1.0);
     p * 0.25 * (p * (1.0 - p)).powi(2)
 }
+
+/// Compute the taker fee for a trade. Returns 0.0 for non-crypto markets.
+pub fn compute_taker_fee(price: f64, is_crypto_15m: bool) -> f64 {
+    if is_crypto_15m {
+        quartic_taker_fee(price)
+    } else {
+        0.0
+    }
+}
+
+/// Detect if a market is a 15-minute crypto price prediction market.
+/// These are the ONLY markets that charge taker fees on Polymarket.
+pub fn is_crypto_15m_market(title: &str, slug: &str) -> bool {
+    let text = format!("{} {}", title.to_lowercase(), slug.to_lowercase());
+    let is_crypto = text.contains("btc") || text.contains("eth") || text.contains("bitcoin") || text.contains("ethereum");
+    let is_15m = text.contains("15m") || text.contains("15 min") || text.contains("15-min");
+    is_crypto && is_15m
+}
 ```
 
-Then update `mirror_trade_to_paper` to apply the fee to the entry price:
+Then update `mirror_trade_to_paper` to use `compute_taker_fee`:
 
 ```rust
+// Look up whether this market is a 15m crypto market
+let is_crypto_15m: bool = conn.query_row(
+    "SELECT COALESCE(is_crypto_15m, 0) FROM markets WHERE condition_id = ?1",
+    rusqlite::params![condition_id],
+    |row| row.get::<_, bool>(0),
+).unwrap_or(false);
+
 // After slippage calculation, before inserting:
-let fee = quartic_taker_fee(adjusted_price);
+let fee = compute_taker_fee(adjusted_price, is_crypto_15m);
 let entry_price_with_fee = if side == Side::Buy {
     adjusted_price + fee  // buying costs more
 } else {
     adjusted_price - fee  // selling gets less
 };
+```
+
+Also add `is_crypto_15m` column to `markets` table and populate during market scoring:
+
+```sql
+ALTER TABLE markets ADD COLUMN is_crypto_15m BOOLEAN DEFAULT 0;
 ```
 
 **Step 4: Run tests**
@@ -1847,7 +1904,7 @@ Expected: ALL PASS (update existing tests if entry prices shifted slightly due t
 **Step 5: Commit**
 
 ```bash
-git commit -am "feat: quartic taker fee applied to paper trades"
+git commit -am "feat: conditional taker fee — quartic for crypto 15m markets, zero for everything else"
 ```
 
 ---
@@ -2604,9 +2661,777 @@ git commit -am "feat: wire persona classification, settlement, anomaly detection
 
 ---
 
+## Task 22: CLOB API Client + `book_snapshots` Table
+
+**Context:** Orderbook/depth data is completely missing from the system. `book_snapshots` is referenced in CLAUDE.md and the Makefile but never implemented. This task adds the REST API client for fetching orderbook snapshots and the database table to store them. Task 23 adds WebSocket streaming on top.
+
+**API Reference:**
+- `GET https://clob.polymarket.com/book?token_id={token_id}` — NO AUTH REQUIRED (public)
+- `POST https://clob.polymarket.com/books` — batch endpoint, up to 500 tokens per request
+- Rate limits: `/book` = 1500 req/10s, `/books` = 500 req/10s
+- Response: `{ bids: [{price, size}], asks: [{price, size}], market: condition_id, asset_id: token_id, hash, timestamp }`
+
+**Key mapping:** Book endpoints use `token_id` (outcome token), NOT `condition_id` (market). Each market has 2 tokens (Yes/No). We need to map condition_id → token_ids via the Gamma API `tokens` array, which is already fetched during market discovery.
+
+**Files:**
+- Modify: `crates/common/src/polymarket.rs` — add CLOB client methods
+- Modify: `crates/common/src/db.rs` — add `book_snapshots` table + token_id columns on `markets`
+- Modify: `crates/common/src/types.rs` — add orderbook response types
+- Modify: `crates/common/src/config.rs` — add `[clob]` config section
+- Modify: `config/default.toml` — add CLOB config
+
+**Step 1: Write the failing test**
+
+```rust
+// In crates/common/src/types.rs tests
+#[test]
+fn test_deserialize_book_response() {
+    let json = r#"{
+        "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
+        "asset_id": "65818619657568813474341868652308942079804919287380422192892211131408793125422",
+        "bids": [
+            {"price": "0.48", "size": "30"},
+            {"price": "0.49", "size": "20"},
+            {"price": "0.50", "size": "15"}
+        ],
+        "asks": [
+            {"price": "0.52", "size": "25"},
+            {"price": "0.53", "size": "60"},
+            {"price": "0.54", "size": "10"}
+        ],
+        "hash": "0xabc123",
+        "timestamp": "1700000000000"
+    }"#;
+    let book: BookResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(book.bids.len(), 3);
+    assert_eq!(book.asks.len(), 3);
+    assert_eq!(book.bids[0].price, "0.48");
+    assert_eq!(book.bids[0].size, "30");
+}
+
+// In crates/common/src/db.rs tests
+#[test]
+fn test_book_snapshots_schema() {
+    let db = Database::open(":memory:").unwrap();
+    db.run_migrations().unwrap();
+    db.conn.execute(
+        "INSERT INTO book_snapshots (condition_id, token_id, best_bid, best_ask, bid_depth_usd, ask_depth_usd, spread_cents, mid_price, levels_json, snapshot_at)
+         VALUES ('0xm1', 'token1', 0.48, 0.52, 65.0, 95.0, 4.0, 0.50, '{}', datetime('now'))",
+        [],
+    ).unwrap();
+    let count: i64 = db.conn.query_row("SELECT COUNT(*) FROM book_snapshots", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1);
+}
+
+// Integration test: hit real CLOB API
+#[tokio::test]
+async fn test_fetch_orderbook_live() {
+    // Use a known active market token_id
+    // First, get a market from Gamma API to find its token_ids
+    let client = PolymarketClient::new(&config);
+    let markets = client.fetch_markets(1, 0).await.unwrap();
+    let market = &markets[0];
+    // Extract first token_id from market.tokens
+    let token_id = &market.tokens[0].token_id;
+    let book = client.fetch_orderbook(token_id).await.unwrap();
+    assert!(!book.bids.is_empty() || !book.asks.is_empty());
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p common test_deserialize_book`
+Expected: FAIL — `BookResponse` doesn't exist
+
+**Step 3: Implement**
+
+Add types:
+
+```rust
+// crates/common/src/types.rs
+#[derive(Debug, Deserialize, Clone)]
+pub struct OrderLevel {
+    pub price: String,
+    pub size: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BookResponse {
+    pub market: Option<String>,   // condition_id
+    pub asset_id: Option<String>, // token_id
+    pub bids: Vec<OrderLevel>,
+    pub asks: Vec<OrderLevel>,
+    pub hash: Option<String>,
+    pub timestamp: Option<String>,
+}
+
+impl BookResponse {
+    /// Best bid price, parsed to f64
+    pub fn best_bid(&self) -> Option<f64> {
+        self.bids.iter().filter_map(|l| l.price.parse::<f64>().ok()).max_by(|a, b| a.partial_cmp(b).unwrap())
+    }
+
+    /// Best ask price, parsed to f64
+    pub fn best_ask(&self) -> Option<f64> {
+        self.asks.iter().filter_map(|l| l.price.parse::<f64>().ok()).min_by(|a, b| a.partial_cmp(b).unwrap())
+    }
+
+    /// Mid price = (best_bid + best_ask) / 2
+    pub fn mid_price(&self) -> Option<f64> {
+        match (self.best_bid(), self.best_ask()) {
+            (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
+            _ => None,
+        }
+    }
+
+    /// Spread in cents = (best_ask - best_bid) * 100
+    pub fn spread_cents(&self) -> Option<f64> {
+        match (self.best_bid(), self.best_ask()) {
+            (Some(bid), Some(ask)) => Some((ask - bid) * 100.0),
+            _ => None,
+        }
+    }
+
+    /// Total bid depth in USD (sum of price * size for all bid levels)
+    pub fn bid_depth_usd(&self) -> f64 {
+        self.bids.iter()
+            .filter_map(|l| {
+                let price = l.price.parse::<f64>().ok()?;
+                let size = l.size.parse::<f64>().ok()?;
+                Some(price * size)
+            })
+            .sum()
+    }
+
+    /// Total ask depth in USD (sum of price * size for all ask levels)
+    pub fn ask_depth_usd(&self) -> f64 {
+        self.asks.iter()
+            .filter_map(|l| {
+                let price = l.price.parse::<f64>().ok()?;
+                let size = l.size.parse::<f64>().ok()?;
+                Some(price * size)
+            })
+            .sum()
+    }
+}
+```
+
+Add CLOB client methods:
+
+```rust
+// crates/common/src/polymarket.rs
+const CLOB_BASE_URL: &str = "https://clob.polymarket.com";
+
+impl PolymarketClient {
+    /// Fetch orderbook for a single token_id (outcome token).
+    pub async fn fetch_orderbook(&self, token_id: &str) -> Result<BookResponse> {
+        let url = format!("{}/book?token_id={}", CLOB_BASE_URL, token_id);
+        let resp = self.client.get(&url).send().await?.json::<BookResponse>().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await; // conservative, rate limit is generous
+        Ok(resp)
+    }
+
+    /// Fetch orderbooks for multiple token_ids in a single request (max 500).
+    pub async fn fetch_orderbooks(&self, token_ids: &[String]) -> Result<Vec<BookResponse>> {
+        let url = format!("{}/books", CLOB_BASE_URL);
+        // POST body: array of token_ids
+        let resp = self.client.post(&url)
+            .json(token_ids)
+            .send().await?
+            .json::<Vec<BookResponse>>().await?;
+        Ok(resp)
+    }
+}
+```
+
+Add `book_snapshots` table:
+
+```sql
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    condition_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    best_bid REAL,
+    best_ask REAL,
+    bid_depth_usd REAL,
+    ask_depth_usd REAL,
+    spread_cents REAL,
+    mid_price REAL,
+    levels_json TEXT,   -- full bid/ask levels as JSON for replay
+    snapshot_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_book_snapshots_condition ON book_snapshots(condition_id, snapshot_at);
+CREATE INDEX IF NOT EXISTS idx_book_snapshots_token ON book_snapshots(token_id, snapshot_at);
+```
+
+Add token_id columns to `markets` table:
+
+```sql
+ALTER TABLE markets ADD COLUMN yes_token_id TEXT;
+ALTER TABLE markets ADD COLUMN no_token_id TEXT;
+```
+
+Populate `yes_token_id` and `no_token_id` during market discovery from the Gamma API `tokens` array.
+
+Add config:
+
+```toml
+[clob]
+base_url = "https://clob.polymarket.com"
+book_poll_interval_secs = 60       # REST fallback, WebSocket is primary
+batch_size = 50                    # tokens per /books request
+```
+
+**Step 4: Run tests**
+
+Run: `cargo test --all`
+Expected: ALL PASS
+
+**Step 5: Commit**
+
+```bash
+git commit -am "feat: CLOB API client + book_snapshots table — orderbook data infrastructure"
+```
+
+---
+
+## Task 23: WebSocket Book Streaming + Recording
+
+**Context:** User chose WebSocket over REST polling from the start. The CLOB WebSocket Market Channel provides real-time book updates. This is a public channel — NO authentication required.
+
+**WebSocket Reference:**
+- URL: `wss://ws-subscriptions-clob.polymarket.com/ws/market` (inferred from docs, verify at runtime)
+- Subscribe: `{ "type": "MARKET", "assets_ids": ["token_id_1", "token_id_2", ...] }`
+- Dynamic subscribe/unsubscribe: `{ "assets_ids": [...], "operation": "subscribe" }` / `{ ..., "operation": "unsubscribe" }`
+- No auth needed for market channel
+
+**Messages we receive:**
+- `book` — full L2 orderbook snapshot (on subscribe + after each trade)
+- `price_change` — incremental updates (new order placed, order cancelled)
+- `last_trade_price` — trade events with price/size/side
+- `market_resolved` — market resolution events (with `custom_feature_enabled: true`)
+
+**Strategy:** We primarily care about `book` messages (full snapshots). We can also process `price_change` to maintain a local book between full snapshots, but the MVP just records `book` messages.
+
+**Dependencies:** `tokio-tungstenite` for WebSocket, `futures-util` for stream handling.
+
+**Files:**
+- Create: `crates/evaluator/src/book_stream.rs` — WebSocket connection + message handling
+- Modify: `crates/evaluator/src/main.rs` — spawn book stream task
+- Modify: `crates/common/src/config.rs` — add WebSocket config
+- Modify: `config/default.toml` — add WebSocket config
+- Modify: `Cargo.toml` (evaluator) — add `tokio-tungstenite`, `futures-util` deps
+
+**Step 1: Write the failing test**
+
+```rust
+#[test]
+fn test_parse_book_ws_message() {
+    let msg = r#"{
+        "event_type": "book",
+        "asset_id": "65818619657568813474341868652308942079804919287380422192892211131408793125422",
+        "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
+        "bids": [{"price": ".48", "size": "30"}, {"price": ".49", "size": "20"}],
+        "asks": [{"price": ".52", "size": "25"}, {"price": ".53", "size": "60"}],
+        "timestamp": "1700000000000",
+        "hash": "0xabc"
+    }"#;
+    let event: WsBookEvent = serde_json::from_str(msg).unwrap();
+    assert_eq!(event.event_type, "book");
+    assert_eq!(event.bids.len(), 2);
+    assert_eq!(event.asks.len(), 2);
+    // Note: WS uses ".48" format, not "0.48" — parser must handle both
+    assert!(event.best_bid().unwrap() > 0.47);
+}
+
+#[test]
+fn test_parse_price_change_ws_message() {
+    let msg = r#"{
+        "event_type": "price_change",
+        "market": "0x5f65177b394277fd294cd75650044e32ba009a95022d88a0c1d565897d72f8f1",
+        "price_changes": [
+            {"asset_id": "token1", "price": "0.5", "size": "200", "side": "BUY", "hash": "abc", "best_bid": "0.5", "best_ask": "1"}
+        ],
+        "timestamp": "1700000000000"
+    }"#;
+    let event: WsMarketEvent = serde_json::from_str(msg).unwrap();
+    match event {
+        WsMarketEvent::PriceChange { price_changes, .. } => {
+            assert_eq!(price_changes.len(), 1);
+            assert_eq!(price_changes[0].side, "BUY");
+        }
+        _ => panic!("Expected PriceChange"),
+    }
+}
+
+#[test]
+fn test_parse_market_resolved_ws_message() {
+    let msg = r#"{
+        "event_type": "market_resolved",
+        "market": "0xabc",
+        "winning_outcome": "Yes",
+        "winning_asset_id": "token1",
+        "timestamp": "1700000000000"
+    }"#;
+    let event: WsMarketEvent = serde_json::from_str(msg).unwrap();
+    match event {
+        WsMarketEvent::MarketResolved { winning_outcome, .. } => {
+            assert_eq!(winning_outcome, "Yes");
+        }
+        _ => panic!("Expected MarketResolved"),
+    }
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p evaluator test_parse_book_ws`
+Expected: FAIL — `WsBookEvent` doesn't exist
+
+**Step 3: Implement**
+
+Add WebSocket message types:
+
+```rust
+// crates/evaluator/src/book_stream.rs
+
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct WsBookEvent {
+    pub event_type: String,
+    pub asset_id: String,
+    pub market: String,  // condition_id
+    pub bids: Vec<OrderLevel>,
+    pub asks: Vec<OrderLevel>,
+    pub timestamp: String,
+    pub hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event_type")]
+pub enum WsMarketEvent {
+    #[serde(rename = "book")]
+    Book(WsBookEvent),
+    #[serde(rename = "price_change")]
+    PriceChange {
+        market: String,
+        price_changes: Vec<WsPriceChange>,
+        timestamp: String,
+    },
+    #[serde(rename = "last_trade_price")]
+    LastTradePrice {
+        asset_id: String,
+        market: String,
+        price: String,
+        size: String,
+        side: String,
+        timestamp: String,
+    },
+    #[serde(rename = "market_resolved")]
+    MarketResolved {
+        market: String,
+        winning_outcome: String,
+        winning_asset_id: String,
+        timestamp: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WsPriceChange {
+    pub asset_id: String,
+    pub price: String,
+    pub size: String,
+    pub side: String,
+    pub hash: String,
+    pub best_bid: String,
+    pub best_ask: String,
+}
+```
+
+Add WebSocket connection manager:
+
+```rust
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use futures_util::{StreamExt, SinkExt};
+
+const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+
+pub struct BookStreamManager {
+    db: Arc<Database>,
+    subscribed_tokens: Arc<RwLock<HashSet<String>>>,
+}
+
+impl BookStreamManager {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self {
+            db,
+            subscribed_tokens: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Main loop: connect, subscribe, process messages, reconnect on failure.
+    pub async fn run(&self, token_ids: Vec<String>) -> Result<()> {
+        loop {
+            match self.connect_and_stream(&token_ids).await {
+                Ok(()) => {
+                    tracing::info!("WebSocket stream ended normally, reconnecting...");
+                }
+                Err(e) => {
+                    tracing::error!("WebSocket error: {:?}, reconnecting in 5s...", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    async fn connect_and_stream(&self, token_ids: &[String]) -> Result<()> {
+        let (ws_stream, _) = connect_async(WS_URL).await?;
+        let (mut write, mut read) = ws_stream.split();
+
+        // Subscribe to market channel with token_ids
+        let subscribe_msg = serde_json::json!({
+            "type": "MARKET",
+            "assets_ids": token_ids,
+            "custom_feature_enabled": true
+        });
+        write.send(Message::Text(subscribe_msg.to_string())).await?;
+
+        while let Some(msg) = read.next().await {
+            match msg? {
+                Message::Text(text) => {
+                    self.handle_message(&text).await?;
+                }
+                Message::Ping(data) => {
+                    write.send(Message::Pong(data)).await?;
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_message(&self, text: &str) -> Result<()> {
+        // Try parsing as WsMarketEvent
+        match serde_json::from_str::<WsMarketEvent>(text) {
+            Ok(WsMarketEvent::Book(book)) => {
+                self.record_book_snapshot(&book).await?;
+            }
+            Ok(WsMarketEvent::MarketResolved { market, winning_outcome, .. }) => {
+                tracing::info!(market = %market, outcome = %winning_outcome, "Market resolved via WebSocket");
+                // Trigger settlement
+            }
+            Ok(_) => {
+                // price_change, last_trade_price — log for now, use later
+            }
+            Err(e) => {
+                tracing::debug!("Unrecognized WS message: {}", &text[..text.len().min(200)]);
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_book_snapshot(&self, book: &WsBookEvent) -> Result<()> {
+        let best_bid = book.best_bid();
+        let best_ask = book.best_ask();
+        let mid = book.mid_price();
+        let spread = book.spread_cents();
+        let bid_depth = book.bid_depth_usd();
+        let ask_depth = book.ask_depth_usd();
+        let levels_json = serde_json::to_string(&serde_json::json!({
+            "bids": book.bids,
+            "asks": book.asks,
+        }))?;
+
+        self.db.conn_async(move |conn| {
+            conn.execute(
+                "INSERT INTO book_snapshots (condition_id, token_id, best_bid, best_ask, bid_depth_usd, ask_depth_usd, spread_cents, mid_price, levels_json, snapshot_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))",
+                rusqlite::params![
+                    book.market, book.asset_id,
+                    best_bid, best_ask, bid_depth, ask_depth, spread, mid,
+                    levels_json
+                ],
+            )?;
+            Ok(())
+        }).await?;
+
+        metrics::counter!("book_snapshots_recorded").increment(1);
+        Ok(())
+    }
+
+    /// Subscribe to additional token_ids on an existing connection
+    pub async fn subscribe_tokens(&self, write: &mut impl SinkExt<Message>, token_ids: &[String]) -> Result<()> {
+        let msg = serde_json::json!({
+            "assets_ids": token_ids,
+            "operation": "subscribe",
+            "custom_feature_enabled": true
+        });
+        write.send(Message::Text(msg.to_string())).await.map_err(|_| anyhow::anyhow!("send failed"))?;
+        self.subscribed_tokens.write().await.extend(token_ids.iter().cloned());
+        Ok(())
+    }
+}
+```
+
+Add config:
+
+```toml
+[clob]
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+ws_reconnect_delay_secs = 5
+ws_ping_interval_secs = 30
+```
+
+Wire into `main.rs`:
+
+```rust
+// After market scoring, gather token_ids for top-20 markets
+// Spawn: tokio::spawn(book_stream_manager.run(token_ids))
+```
+
+**Step 4: Run tests**
+
+Run: `cargo test --all`
+Expected: ALL PASS (unit tests pass; integration test connects to real WS)
+
+**Step 5: Commit**
+
+```bash
+git add crates/evaluator/src/book_stream.rs
+git commit -am "feat: WebSocket book streaming — real-time orderbook data from CLOB"
+```
+
+---
+
+## Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)
+
+**Context:** Replace the flat `slippage_default_cents = 1.0` with realistic book-walking slippage when orderbook data is available. Walk through ask levels (for buys) or bid levels (for sells) to compute what our actual fill price would be for a given trade size.
+
+**This feeds:**
+- **Execution Master detector (Task 8):** `mid_at_entry` from book for PnL decomposition
+- **Follower slippage (Task 17):** realistic entry price instead of flat estimate
+- **Copy fidelity (Task 15):** `SKIPPED_NO_FILL` when depth < trade size
+
+**Files:**
+- Modify: `crates/evaluator/src/paper_trading.rs`
+
+**Step 1: Write the failing test**
+
+```rust
+#[test]
+fn test_walk_book_buy() {
+    // Orderbook asks: [0.52 x 25], [0.53 x 60], [0.54 x 10]
+    // Buy $25 worth: fills entirely at 0.52 (25 / 0.52 ≈ 48 shares, depth has 25 shares at 0.52)
+    // Actually: we want to buy $25 of shares, so we need 25 / price shares
+    // At 0.52: can buy 25 shares * $0.52 = $13 worth. Need $25 - $13 = $12 more
+    // At 0.53: can buy remaining 12 / 0.53 ≈ 22.6 shares
+    // VWAP = (25 * 0.52 + 22.6 * 0.53) / (25 + 22.6) ≈ 0.5247
+    let asks = vec![
+        OrderLevel { price: "0.52".into(), size: "25".into() },
+        OrderLevel { price: "0.53".into(), size: "60".into() },
+        OrderLevel { price: "0.54".into(), size: "10".into() },
+    ];
+    let result = walk_book_for_fill(&asks, 25.0, Side::Buy);
+    assert!(result.is_some());
+    let (vwap, filled_usd) = result.unwrap();
+    assert!(vwap > 0.52 && vwap < 0.53);
+    assert!((filled_usd - 25.0).abs() < 0.1);
+}
+
+#[test]
+fn test_walk_book_sell() {
+    // Orderbook bids: [0.50 x 15], [0.49 x 20], [0.48 x 30]
+    // Sell $25 worth: fills partially at 0.50 ($7.5), then 0.49 ($9.8), then 0.48 ($7.7)
+    let bids = vec![
+        OrderLevel { price: "0.50".into(), size: "15".into() },
+        OrderLevel { price: "0.49".into(), size: "20".into() },
+        OrderLevel { price: "0.48".into(), size: "30".into() },
+    ];
+    let result = walk_book_for_fill(&bids, 25.0, Side::Sell);
+    assert!(result.is_some());
+    let (vwap, _) = result.unwrap();
+    assert!(vwap < 0.50 && vwap > 0.48);
+}
+
+#[test]
+fn test_walk_book_insufficient_depth() {
+    // Only $10 of depth, trying to fill $25
+    let asks = vec![
+        OrderLevel { price: "0.52".into(), size: "10".into() },  // 10 * 0.52 = $5.20
+        OrderLevel { price: "0.53".into(), size: "10".into() },  // 10 * 0.53 = $5.30
+    ];
+    let result = walk_book_for_fill(&asks, 25.0, Side::Buy);
+    assert!(result.is_none()); // not enough depth
+}
+
+#[test]
+fn test_compute_slippage_with_book() {
+    // Their price: 0.52, our book-walked VWAP: 0.525
+    // Slippage = (0.525 - 0.52) * 100 = 0.5 cents
+    let slippage = compute_slippage_from_book(0.52, 0.525, Side::Buy);
+    assert!((slippage - 0.5).abs() < 0.01);
+}
+
+#[test]
+fn test_paper_trade_uses_book_slippage_when_available() {
+    let db = Database::open(":memory:").unwrap();
+    db.run_migrations().unwrap();
+    // Insert a book snapshot with levels
+    db.conn.execute(
+        "INSERT INTO book_snapshots (condition_id, token_id, best_bid, best_ask, bid_depth_usd, ask_depth_usd, spread_cents, mid_price, levels_json, snapshot_at)
+         VALUES ('0xm1', 'token1', 0.48, 0.52, 65.0, 95.0, 4.0, 0.50,
+                 '{\"asks\":[{\"price\":\"0.52\",\"size\":\"25\"},{\"price\":\"0.53\",\"size\":\"60\"}],\"bids\":[{\"price\":\"0.48\",\"size\":\"30\"},{\"price\":\"0.49\",\"size\":\"20\"}]}',
+                 datetime('now'))",
+        [],
+    ).unwrap();
+    // ... create paper trade, verify entry price uses book-walked VWAP, not flat slippage
+}
+
+#[test]
+fn test_paper_trade_falls_back_to_flat_slippage() {
+    let db = Database::open(":memory:").unwrap();
+    db.run_migrations().unwrap();
+    // No book_snapshots for this market
+    // ... create paper trade, verify it uses flat slippage_default_cents
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p evaluator test_walk_book`
+Expected: FAIL — `walk_book_for_fill` doesn't exist
+
+**Step 3: Implement**
+
+```rust
+/// Walk through orderbook levels to compute VWAP fill price for a given USD trade size.
+/// For buys: walk ask levels (lowest first).
+/// For sells: walk bid levels (highest first).
+/// Returns None if insufficient depth to fill the order.
+/// Returns Some((vwap, filled_usd)) on success.
+pub fn walk_book_for_fill(
+    levels: &[OrderLevel],
+    target_usd: f64,
+    side: Side,
+) -> Option<(f64, f64)> {
+    let mut remaining_usd = target_usd;
+    let mut total_shares = 0.0;
+    let mut total_cost = 0.0;
+
+    // For buys, levels should be asks sorted ascending by price
+    // For sells, levels should be bids sorted descending by price
+    // (caller is responsible for correct ordering)
+    for level in levels {
+        let price = level.price.parse::<f64>().ok()?;
+        let available_shares = level.size.parse::<f64>().ok()?;
+        if price <= 0.0 || available_shares <= 0.0 {
+            continue;
+        }
+
+        let available_usd = available_shares * price;
+        let fill_usd = remaining_usd.min(available_usd);
+        let fill_shares = fill_usd / price;
+
+        total_shares += fill_shares;
+        total_cost += fill_usd;
+        remaining_usd -= fill_usd;
+
+        if remaining_usd <= 0.01 {  // filled
+            let vwap = total_cost / total_shares;
+            return Some((vwap, total_cost));
+        }
+    }
+
+    None // insufficient depth
+}
+
+/// Compute slippage in cents between their price and our book-walked VWAP.
+pub fn compute_slippage_from_book(their_price: f64, our_vwap: f64, side: Side) -> f64 {
+    match side {
+        Side::Buy => (our_vwap - their_price) * 100.0,  // we pay more
+        Side::Sell => (their_price - our_vwap) * 100.0,  // we receive less
+    }
+}
+
+/// Get the latest book levels for a market from the database.
+/// Returns None if no book snapshot exists.
+pub fn get_latest_book_levels(conn: &Connection, condition_id: &str) -> Option<(Vec<OrderLevel>, Vec<OrderLevel>)> {
+    let levels_json: Option<String> = conn.query_row(
+        "SELECT levels_json FROM book_snapshots
+         WHERE condition_id = ?1
+         ORDER BY snapshot_at DESC LIMIT 1",
+        rusqlite::params![condition_id],
+        |row| row.get(0),
+    ).ok()?;
+
+    let json: serde_json::Value = serde_json::from_str(&levels_json?).ok()?;
+    let bids: Vec<OrderLevel> = serde_json::from_value(json["bids"].clone()).ok()?;
+    let asks: Vec<OrderLevel> = serde_json::from_value(json["asks"].clone()).ok()?;
+    Some((bids, asks))
+}
+```
+
+Update `mirror_trade_to_paper` to use book-walking:
+
+```rust
+// In mirror_trade_to_paper, replace flat slippage with book-aware logic:
+let (entry_price_with_slippage, slippage_source) = match get_latest_book_levels(&conn, condition_id) {
+    Some((bids, asks)) => {
+        let levels = match side {
+            Side::Buy => &asks,
+            Side::Sell => &bids,
+        };
+        match walk_book_for_fill(levels, per_trade_size_usd, side) {
+            Some((vwap, _)) => (vwap, "book"),
+            None => {
+                // Insufficient depth — SKIP trade
+                record_fidelity_event(conn, proxy_wallet, condition_id, None, "SKIPPED_NO_FILL", "depth < trade size");
+                return Ok(MirrorDecision { inserted: false, reason: Some("SKIPPED_NO_FILL") });
+            }
+        }
+    }
+    None => {
+        // No book data — fall back to flat slippage
+        let flat_slippage = slippage_default_cents / 100.0;
+        let price = match side {
+            Side::Buy => observed_price + flat_slippage,
+            Side::Sell => observed_price - flat_slippage,
+        };
+        (price, "flat")
+    }
+};
+
+// Also extract mid_price for PnL decomposition (feeds Execution Master detector)
+let mid_at_entry: Option<f64> = get_latest_book_levels(&conn, condition_id)
+    .and_then(|_| {
+        conn.query_row(
+            "SELECT mid_price FROM book_snapshots WHERE condition_id = ?1 ORDER BY snapshot_at DESC LIMIT 1",
+            rusqlite::params![condition_id],
+            |row| row.get(0),
+        ).ok()
+    });
+
+// Store mid_at_entry on paper_trade for later PnL decomposition
+```
+
+**Step 4: Run tests**
+
+Run: `cargo test --all`
+Expected: ALL PASS
+
+**Step 5: Commit**
+
+```bash
+git commit -am "feat: depth-aware paper trading — book-walking slippage with flat fallback"
+```
+
+---
+
 ## Verification Checklist
 
-After all 21 tasks are complete, verify:
+After all 24 tasks are complete, verify:
 
 ```bash
 # All tests pass
@@ -2628,4 +3453,11 @@ cargo fmt --check
 # 7. WScore uses all 5 components
 # 8. MScore uses real trades_24h and whale_concentration when data is available
 # 9. Anomaly detection fires on behavior changes
+# 10. book_snapshots table exists and can store orderbook data
+# 11. BookResponse deserializes from real CLOB API responses
+# 12. WebSocket book messages parse correctly (both ".48" and "0.48" price formats)
+# 13. walk_book_for_fill returns None when depth < trade size
+# 14. Paper trading uses book-walked VWAP when available, flat slippage as fallback
+# 15. Taker fee is zero for non-crypto markets, quartic for 15m crypto markets
+# 16. markets table has yes_token_id and no_token_id columns populated
 ```
