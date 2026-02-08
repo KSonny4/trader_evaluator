@@ -1,0 +1,15 @@
+<div class="flex items-center gap-4 p-3 bg-gray-900 rounded-lg text-sm flex-wrap">
+    <div class="flex items-center gap-3">
+        <span class="text-gray-500 font-semibold">Jobs:</span>
+        {% for job in status.jobs %}
+        <div class="flex items-center gap-1" title="{{ job.name }}{% match job.last_run %}{% when Some with (ts) %}: {{ ts }}{% when None %}: never{% endmatch %}">
+            <span class="w-2 h-2 rounded-full {{ job.color }}"></span>
+            <span class="text-xs text-gray-400">{{ job.short_name }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    <div class="ml-auto flex items-center gap-4 text-gray-500">
+        <span>DB: {{ status.db_size_mb }} MB</span>
+        <span class="text-gray-400 font-semibold">Phase: {{ status.phase }}</span>
+    </div>
+</div>

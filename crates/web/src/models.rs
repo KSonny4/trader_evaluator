@@ -1,5 +1,8 @@
 //! View models for dashboard templates.
 //! These are the typed structs that templates render — no DB or business logic here.
+// Allow dead_code while handlers are being built incrementally (tasks 5-12).
+// Will be removed when all handlers are wired up.
+#![allow(dead_code)]
 
 /// Funnel counts for the summary bar
 pub struct FunnelCounts {
