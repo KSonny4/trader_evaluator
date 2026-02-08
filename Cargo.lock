@@ -259,6 +259,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "common",
+ "rusqlite",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

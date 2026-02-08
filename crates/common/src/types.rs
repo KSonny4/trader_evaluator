@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn de_opt_string_any<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
 where
@@ -132,7 +132,7 @@ impl CopyStrategy {
 }
 
 /// Market from Gamma API.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GammaMarket {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
@@ -151,7 +151,7 @@ pub struct GammaMarket {
 }
 
 /// Trade from Data API /trades.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiTrade {
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
@@ -176,7 +176,7 @@ pub struct ApiTrade {
 }
 
 /// Holder from Data API /holders.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiHolder {
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
@@ -188,14 +188,14 @@ pub struct ApiHolder {
     pub outcome_index: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiHolderResponse {
     pub token: Option<String>,
     pub holders: Vec<ApiHolder>,
 }
 
 /// Activity from Data API /activity.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiActivity {
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
@@ -220,7 +220,7 @@ pub struct ApiActivity {
 }
 
 /// Position from Data API /positions.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiPosition {
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
@@ -247,7 +247,7 @@ pub struct ApiPosition {
 }
 
 /// Leaderboard entry from Data API /v1/leaderboard.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiLeaderboardEntry {
     #[serde(default, deserialize_with = "de_opt_string_any")]
     pub rank: Option<String>,

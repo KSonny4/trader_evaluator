@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+mod ingestion;
 mod market_scoring;
 mod wallet_discovery;
 
