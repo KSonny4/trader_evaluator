@@ -189,6 +189,24 @@ pub fn detect_informed_specialist(
     Some(Persona::InformedSpecialist)
 }
 
+/// Detects wallets whose profit comes primarily from execution edge (unreplicable).
+/// execution_pnl_ratio = execution_pnl / total_pnl (from PnL decomposition).
+/// If ratio > threshold, this wallet's edge is in execution, not direction.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_execution_master(
+    execution_pnl_ratio: f64,
+    threshold: f64,
+) -> Option<ExclusionReason> {
+    if execution_pnl_ratio > threshold {
+        Some(ExclusionReason::ExecutionMaster {
+            execution_pnl_ratio,
+            threshold,
+        })
+    } else {
+        None
+    }
+}
+
 /// Detect the Patient Accumulator persona: long holds, low trading frequency.
 /// Returns Some(PatientAccumulator) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -675,5 +693,33 @@ mod tests {
         let features = make_accumulator_features(72.0, 5.0);
         let persona = detect_patient_accumulator(&features, 48.0, 5.0);
         assert_eq!(persona, Some(Persona::PatientAccumulator));
+    }
+
+    // --- Task 8: Execution Master ---
+
+    #[test]
+    fn test_detect_execution_master() {
+        // Wallet where 80% of PnL comes from execution edge (buying below mid)
+        let result = detect_execution_master(0.80, 0.70);
+        assert_eq!(
+            result,
+            Some(ExclusionReason::ExecutionMaster {
+                execution_pnl_ratio: 0.80,
+                threshold: 0.70,
+            })
+        );
+    }
+
+    #[test]
+    fn test_not_execution_master() {
+        let result = detect_execution_master(0.30, 0.70);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_execution_master_boundary_at_threshold() {
+        // Exactly at 0.70 — should NOT trigger (> not >=)
+        let result = detect_execution_master(0.70, 0.70);
+        assert_eq!(result, None);
     }
 }
