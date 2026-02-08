@@ -63,9 +63,17 @@ mutex_atomic = "warn"
 
 # TODO: Enable after cleanup sprints:
 # cognitive_complexity = "warn"               # 1 function exceeds threshold (31/25)
-# redundant_closure_for_method_calls = "warn" # 5 violations
 # unwrap_used = "warn"                        # 200+ violations
 # expect_used = "warn"                        # 3 violations
+
+# Auto-fixed, now enforced
+uninlined_format_args = "warn"
+needless_raw_strings = "warn"
+semicolon_if_nothing_returned = "warn"
+cast_lossless = "warn"
+redundant_closure_for_method_calls = "warn"
+map_unwrap_or = "warn"
+manual_let_else = "warn"
 
 [workspace.lints.rust]
 unused_must_use = "deny"

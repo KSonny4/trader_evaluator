@@ -60,13 +60,13 @@ pub struct MarketRow {
 
 pub fn query_markets_today(db: &Database) -> Result<Vec<MarketRow>> {
     let mut stmt = db.conn.prepare(
-        r#"
+        "
         SELECT condition_id, score_date, mscore, rank
         FROM market_scores_daily
         WHERE score_date = date('now')
         ORDER BY rank ASC
         LIMIT 20
-        "#,
+        ",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(MarketRow {
@@ -77,7 +77,7 @@ pub fn query_markets_today(db: &Database) -> Result<Vec<MarketRow>> {
         })
     })?;
 
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    Ok(rows.filter_map(std::result::Result::ok).collect())
 }
 
 fn show_markets(db: &Database) -> Result<()> {
@@ -90,8 +90,7 @@ fn show_markets(db: &Database) -> Result<()> {
             rank,
         } = r;
         println!(
-            "{rank:>3?}  {mscore:>6.3}  {score_date}  {condition_id}",
-            rank = rank
+            "{rank:>3?}  {mscore:>6.3}  {score_date}  {condition_id}"
         );
     }
     Ok(())
@@ -107,12 +106,12 @@ pub struct WalletRow {
 
 pub fn query_wallets(db: &Database) -> Result<Vec<WalletRow>> {
     let mut stmt = db.conn.prepare(
-        r#"
+        "
         SELECT proxy_wallet, discovered_from, is_active, discovered_at
         FROM wallets
         ORDER BY discovered_at DESC
         LIMIT 200
-        "#,
+        ",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(WalletRow {
@@ -122,7 +121,7 @@ pub fn query_wallets(db: &Database) -> Result<Vec<WalletRow>> {
             discovered_at: row.get(3)?,
         })
     })?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    Ok(rows.filter_map(std::result::Result::ok).collect())
 }
 
 fn show_wallets(db: &Database) -> Result<()> {
@@ -182,13 +181,13 @@ fn show_paper_pnl(db: &Database) -> Result<()> {
 
 fn show_rankings(db: &Database) -> Result<()> {
     let mut stmt = db.conn.prepare(
-        r#"
+        "
         SELECT proxy_wallet, window_days, wscore, recommended_follow_mode
         FROM wallet_scores_daily
         WHERE score_date = date('now') AND window_days = 30
         ORDER BY wscore DESC
         LIMIT 20
-        "#,
+        ",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -203,8 +202,7 @@ fn show_rankings(db: &Database) -> Result<()> {
     for r in rows {
         let (w, window_days, wscore, mode) = r?;
         println!(
-            "{wscore:>6.3}  window={window_days}  mode={mode:?}  {w}",
-            mode = mode
+            "{wscore:>6.3}  window={window_days}  mode={mode:?}  {w}"
         );
     }
     Ok(())

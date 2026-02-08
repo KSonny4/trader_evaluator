@@ -48,7 +48,7 @@ fn clamp01(x: f64) -> f64 {
 pub fn compute_mscore(market: &MarketCandidate, weights: &ScoringWeights) -> f64 {
     let liquidity_score = clamp01((market.liquidity + 1.0).log10() / 1_000_000_f64.log10());
     let volume_score = clamp01((market.volume_24h + 1.0).log10() / 500_000_f64.log10());
-    let density_score = clamp01(market.trades_24h as f64 / 500.0);
+    let density_score = clamp01(f64::from(market.trades_24h) / 500.0);
     let whale_concentration_score = clamp01(1.0 - market.top_holder_concentration);
     let time_to_expiry_score = time_to_expiry_score(market.days_to_expiry);
 
@@ -79,7 +79,7 @@ fn time_to_expiry_score(days: u32) -> f64 {
     // - ramp up from 0 at 0d to 1 at 7d
     // - stay at 1 between 7d..=30d
     // - ramp down to 0 at 90d
-    let d = days as f64;
+    let d = f64::from(days);
     if d <= 0.0 || d >= 90.0 {
         return 0.0;
     }

@@ -304,7 +304,7 @@ impl PolymarketClient {
                         continue;
                     }
 
-                    return Err(anyhow::anyhow!("HTTP {} for {}", status, url));
+                    return Err(anyhow::anyhow!("HTTP {status} for {url}"));
                 }
                 Err(e) => {
                     if attempt <= self.max_retries {
@@ -347,7 +347,7 @@ impl PolymarketClient {
                         continue;
                     }
 
-                    return Err(anyhow::anyhow!("HTTP {} for {}", status, url));
+                    return Err(anyhow::anyhow!("HTTP {status} for {url}"));
                 }
                 Err(e) => {
                     if attempt <= self.max_retries {

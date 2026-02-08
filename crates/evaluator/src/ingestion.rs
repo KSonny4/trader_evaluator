@@ -70,9 +70,8 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         let is_descending = if trades.len() >= 2 {
             let first_ts = trades
                 .first()
-                .map(|t| t.timestamp.unwrap_or(0))
-                .unwrap_or(0);
-            let last_ts = trades.last().map(|t| t.timestamp.unwrap_or(0)).unwrap_or(0);
+                .map_or(0, |t| t.timestamp.unwrap_or(0));
+            let last_ts = trades.last().map_or(0, |t| t.timestamp.unwrap_or(0));
             first_ts >= last_ts
         } else {
             true // single-element or empty page — trivially sorted
@@ -113,12 +112,12 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
                     // Persist derived row; rely on UNIQUE constraint to deduplicate.
                     let raw_json = serde_json::to_string(&t).unwrap_or_default();
                     let changed = tx.execute(
-                        r#"
+                        "
                         INSERT OR IGNORE INTO trades_raw
                             (proxy_wallet, condition_id, asset, side, size, price, outcome, outcome_index, timestamp, transaction_hash, raw_json)
                         VALUES
                             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                        "#,
+                        ",
                         rusqlite::params![
                             proxy_wallet,
                             condition_id,
@@ -323,7 +322,7 @@ mod tests {
             (page1, br#"[{"page":1}]"#.to_vec()),
             (page2, br#"[{"page":2}]"#.to_vec()),
             (page3, br#"[{"page":3}]"#.to_vec()),
-            (vec![], br#"[]"#.to_vec()), // end
+            (vec![], b"[]".to_vec()), // end
         ]);
 
         let (_pages, inserted) = ingest_trades_for_wallet(&db, &pager, "0xw", 2)
@@ -388,7 +387,7 @@ mod tests {
 
         // Should NOT return an error — should return what was collected before the 400.
         let result = ingest_trades_for_wallet(&db, &pager, "0xw", 2).await;
-        assert!(result.is_ok(), "Expected Ok but got: {:?}", result);
+        assert!(result.is_ok(), "Expected Ok but got: {result:?}");
 
         let (_pages, inserted) = result.unwrap();
         assert_eq!(inserted, 2); // tx1 + tx2 from page 1
@@ -409,15 +408,15 @@ mod tests {
         // Pre-populate two trades with timestamps 100 and 200.
         db.call(|conn| {
             conn.execute(
-                r#"INSERT INTO trades_raw
+                "INSERT INTO trades_raw
                    (proxy_wallet, condition_id, size, price, timestamp, transaction_hash, raw_json)
-                   VALUES ('0xw', '0xm', 10.0, 0.5, 100, '0xold1', '{}')"#,
+                   VALUES ('0xw', '0xm', 10.0, 0.5, 100, '0xold1', '{}')",
                 [],
             )?;
             conn.execute(
-                r#"INSERT INTO trades_raw
+                "INSERT INTO trades_raw
                    (proxy_wallet, condition_id, size, price, timestamp, transaction_hash, raw_json)
-                   VALUES ('0xw', '0xm', 5.0, 0.6, 200, '0xold2', '{}')"#,
+                   VALUES ('0xw', '0xm', 5.0, 0.6, 200, '0xold2', '{}')",
                 [],
             )?;
             Ok(())

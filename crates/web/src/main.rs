@@ -43,9 +43,8 @@ async fn basic_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let password = match &state.auth_password {
-        Some(pw) => pw,
-        None => return next.run(request).await,
+    let Some(password) = &state.auth_password else {
+        return next.run(request).await;
     };
 
     let auth_header = request
@@ -57,13 +56,12 @@ async fn basic_auth_middleware(
         .and_then(|h| h.strip_prefix("Basic "))
         .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .map(|decoded| {
+        .is_some_and(|decoded| {
             // Format is "username:password" — we only check the password part
             decoded
                 .split_once(':')
                 .is_some_and(|(_, pw)| pw == password)
-        })
-        .unwrap_or(false);
+        });
 
     if authenticated {
         next.run(request).await
@@ -227,7 +225,7 @@ async fn main() -> Result<()> {
     });
 
     let app = create_router_with_state(state);
-    let addr: SocketAddr = format!("{}:{}", web_host, web_port).parse()?;
+    let addr: SocketAddr = format!("{web_host}:{web_port}").parse()?;
     tracing::info!("dashboard listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -278,8 +276,8 @@ mod tests {
 
     fn basic_auth_header(user: &str, pass: &str) -> String {
         let encoded =
-            base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass));
-        format!("Basic {}", encoded)
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        format!("Basic {encoded}")
     }
 
     // --- Auth tests ---
@@ -644,8 +642,7 @@ mod tests {
             assert_eq!(
                 response.status(),
                 StatusCode::OK,
-                "Route {} did not return 200",
-                route
+                "Route {route} did not return 200"
             );
         }
     }
@@ -696,7 +693,7 @@ mod tests {
     async fn test_dashboard_with_real_db() {
         let db_path = "data/evaluator.db";
         if !std::path::Path::new(db_path).exists() {
-            eprintln!("Skipping: no real DB found at {}", db_path);
+            eprintln!("Skipping: no real DB found at {db_path}");
             return;
         }
 
@@ -733,8 +730,7 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::OK,
-                "Route {} failed with real DB",
-                route
+                "Route {route} failed with real DB"
             );
         }
     }

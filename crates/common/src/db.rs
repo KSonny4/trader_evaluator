@@ -348,7 +348,7 @@ mod tests {
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
-            .filter_map(|r| r.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
 
         assert!(tables.contains(&"markets".to_string()));
@@ -383,7 +383,7 @@ mod tests {
                     .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
                 let rows = stmt
                     .query_map([], |row| row.get(0))?
-                    .filter_map(|r| r.ok())
+                    .filter_map(std::result::Result::ok)
                     .collect();
                 Ok(rows)
             })
@@ -451,7 +451,7 @@ mod tests {
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
-            .filter_map(|r| r.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
 
         assert!(tables.contains(&"copy_fidelity_events".to_string()));

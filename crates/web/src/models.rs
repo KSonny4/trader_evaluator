@@ -171,7 +171,7 @@ impl FunnelCounts {
                     } else {
                         "text-red-400"
                     };
-                    (Some(format!("{:.1}%", pct)), color.to_string())
+                    (Some(format!("{pct:.1}%")), color.to_string())
                 };
 
                 let bg = if *count > 0 {

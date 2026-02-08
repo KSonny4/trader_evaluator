@@ -25,7 +25,7 @@ pub fn compute_wallet_features(
     window_days: u32,
     now_epoch: i64,
 ) -> Result<WalletFeatures> {
-    let cutoff = now_epoch - (window_days as i64) * 86400;
+    let cutoff = now_epoch - i64::from(window_days) * 86400;
 
     let trade_count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM trades_raw WHERE proxy_wallet = ?1 AND timestamp >= ?2",
@@ -81,9 +81,9 @@ pub fn compute_wallet_features(
         )
         .unwrap_or(0.0);
 
-    let weeks = (window_days as f64) / 7.0;
+    let weeks = f64::from(window_days) / 7.0;
     let trades_per_week = if weeks > 0.0 {
-        trade_count as f64 / weeks
+        f64::from(trade_count) / weeks
     } else {
         0.0
     };

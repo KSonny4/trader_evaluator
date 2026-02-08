@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
             while trades_ingestion_rx.recv().await.is_some() {
                 match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
                     Ok((_pages, inserted)) => {
-                        tracing::info!(inserted, "trades_ingestion done")
+                        tracing::info!(inserted, "trades_ingestion done");
                     }
                     Err(e) => tracing::error!(error = %e, "trades_ingestion failed"),
                 }
@@ -259,7 +259,7 @@ async fn main() -> Result<()> {
             while wal_checkpoint_rx.recv().await.is_some() {
                 match jobs::run_wal_checkpoint_once(&db).await {
                     Ok((log, checkpointed)) => {
-                        tracing::info!(log, checkpointed, "wal_checkpoint done")
+                        tracing::info!(log, checkpointed, "wal_checkpoint done");
                     }
                     Err(e) => tracing::error!(error = %e, "wal_checkpoint failed"),
                 }
