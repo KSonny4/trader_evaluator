@@ -24,7 +24,7 @@ Most competitors only do one piece (wallet tracking, copy bots, or dashboards). 
 
 ## Data Quality That Enables Replay
 
-- **Raw API responses stored** — can re-parse if schema changes
+- **Per-row raw JSON stored** — `raw_json` column on trades_raw, activity_raw etc. enables re-parsing
 - **Append-only storage** — never delete data, always replay
 - **Deterministic replay** — every paper trade decision logged with reason
 - **Follower slippage metrics** — the critical metric that determines if copy-trading works
@@ -45,7 +45,7 @@ Most competitors only do one piece (wallet tracking, copy bots, or dashboards). 
 | **Risk management first** | Risk afterthought |
 | **Follower slippage tracking** | Assume perfect execution |
 | **Persona-based selection** | No persona classification |
-| **Raw data replay** | Can't re-evaluate |
+| **Per-row data replay** | Can't re-evaluate |
 
 ## Technical Excellence
 

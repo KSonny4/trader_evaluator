@@ -457,6 +457,6 @@ All thresholds referenced in this document are configurable. See `config/default
 | Document | Relationship |
 |----------|-------------|
 | `docs/EVALUATION_STRATEGY.md` | Phase gates and evaluation framework — this bible supersedes for strategic decisions |
-| `docs/on_risk.txt` | Detailed risk management — this bible summarizes; refer to on_risk.txt for circuit breaker specifics |
+| `docs/on_risk2.txt` | Detailed risk management — this bible summarizes; refer to on_risk2.txt for circuit breaker specifics |
 | `docs/prd.txt` | Product requirements — this bible is the operational translation |
 | `CLAUDE.md` | Development guide — references this bible for strategy |

@@ -1,6 +1,6 @@
 # Evaluation Strategy: Polymarket Wallet Discovery & Paper Copy Trading
 
-> **Purpose:** This document is the single source of truth for evaluating whether the trader_evaluator system is working, what to do next, and when to pivot or kill strategies. It is consumed by both humans and the `trading-evaluator-guidance` skill.
+> **Purpose:** Operational guide for phase progression and evaluation criteria. Governed by the Strategy Bible (docs/STRATEGY_BIBLE.md) for all strategic decisions — persona definitions, risk thresholds, scoring formulas. This document defines phase gates and decision rules. It is consumed by both humans and the `trading-evaluator-guidance` skill.
 
 **Last updated:** 2026-02-08
 
@@ -47,16 +47,16 @@ Every discovered wallet gets classified into a persona. This determines whether 
 | **Execution Master** | Makes money from fills, not direction. Maker-like execution, tight spreads | execution_pnl / total_pnl > 0.7, mostly MAKER_LIKE fills, high trade frequency | NO — edge is unreplicable | Do not follow |
 | **Tail Risk Seller** | High win rate but occasional massive losses | win_rate > 80%, max_single_loss > 5x avg_win, drawdown spikes | NO — will blow you up | Do not follow |
 | **Noise Trader** | Many tiny trades, no statistical edge | trade_count > 50/week, win_rate 45-55%, ROI near zero, high churn | NO — no signal | Do not follow |
-| **Sniper/Insider** | Coordinated entries, suspicious timing, new wallet with big wins | wallet_age < 30d, first_trade_to_resolution < 48h, win_rate > 85% on first 5 trades | AVOID — adversarial risk | Do not follow |
+| **Sniper/Insider** | Coordinated entries, suspicious timing, new wallet with big wins | wallet_age < 30d AND win_rate > 0.85 on < 20 trades | AVOID — adversarial risk | Do not follow |
 | **Sybil Cluster** | Multiple wallets with correlated trades, same funding source | DBSCAN cluster membership, shared funding chain, identical trade timing | AVOID — fake signal | Do not follow |
 
 **Wallet age as trust factor:**
-- < 30 days: high suspicion — apply sniper/insider detection. If win rate > 70% on < 10 trades, flag immediately. Do NOT paper-trade.
+- < 30 days: Wallets < 30 days are excluded at Stage 1 (hard filter). See Strategy Bible §4.
 - 30-90 days: reduced confidence — classify but apply 0.8x trust multiplier to WScore. Need more data before committing.
 - 90-365 days: normal confidence — enough history to classify reliably.
 - > 365 days: high confidence — long track record, stable behavior patterns. If edge persists across multiple regime changes, strong signal.
 
-Wallet age is a **confidence factor**, not a hard filter. We still store and track young wallets — we just don't paper-trade them until they prove themselves.
+Wallet age < 30 days is a **hard filter** at Stage 1 — wallets are excluded immediately. Older wallets are still stored and tracked with trust multipliers applied to WScore.
 
 **Obscurity bonus:** Wallets NOT on the public leaderboard and NOT tracked by known analytics tools (predictfolio, polyterm) get a scoring bonus. Rationale: less-known wallets = fewer copiers = less front-running = better fills for us. Detection: check if wallet appears in leaderboard API top-500. If not, apply 1.2x multiplier to WScore.
 
@@ -112,37 +112,49 @@ The goal is a wide funnel at the top and extreme selectivity at the bottom. We w
 **Entry:** Phase 3 running for 7+ days (enough wallet data to copy). Account identified as worth following.
 **What to build:** Paper trading engine that mirrors wallet trades with full risk management from `docs/on_risk2.txt`.
 
-**Risk management (non-negotiable, from `docs/on_risk2.txt`):**
+**Risk management (non-negotiable, from Strategy Bible §7 (primary), docs/on_risk2.txt (supplementary circuit breaker details)):**
 
 All circuit breakers and risk gates must be implemented BEFORE the first paper trade runs. These are not optional enhancements — they define what "paper copy" means.
 
-**Exposure caps (halt trading if any cap hit):**
-| Control | Crypto short-term | Event markets |
-|---------|------------------|---------------|
-| Per-market max loss | 0.5% bankroll | 0.75% bankroll |
-| Max open risk (all positions) | 2% bankroll | 3% bankroll |
-| Daily loss limit | 1% bankroll | 1% bankroll |
-| Weekly loss limit | 3% bankroll | 4% bankroll |
-| Per-trade size cap | 1% bankroll | 1.5% bankroll |
+**Level 1: Per-Wallet Risk (one bad wallet cannot destroy the portfolio):**
+| Control | Default Threshold | Action on Breach |
+|---------|------------------|-----------------|
+| Max exposure | 5% of bankroll | Skip new trades until positions close |
+| Daily loss | 2% of bankroll | Pause this wallet for the day |
+| Weekly loss | 5% of bankroll | Pause for the week, trigger re-evaluation |
+| Max drawdown | 15% from peak PnL | **KILL** — stop paper-trading, re-classify |
+| Follower slippage | avg slippage > their avg edge | **KILL** — we lose even copying perfectly |
+| Copy fidelity | < 80% over 7 days | **FLAG** — paper PnL unreliable |
+
+**Level 2: Portfolio Risk (all wallets combined):**
+| Control | Default Threshold | Action on Breach |
+|---------|------------------|-----------------|
+| Total exposure | 15% of bankroll | Skip ALL new trades |
+| Daily loss | 3% of bankroll | Halt ALL trading for the day |
+| Weekly loss | 8% of bankroll | Halt ALL trading for the week |
+| Concurrent positions | 20 | Skip new trades |
+| Correlation cap | 5% per theme | Skip over-represented themes |
 
 **Gates (skip trade if any gate fails):**
-| Gate | Crypto short-term | Event markets |
-|------|------------------|---------------|
-| Spread gate | ≤ 1 cent | ≤ 2 cents |
-| Entry slippage cap | ≤ 1 cent vs detected price | ≤ 2 cents |
-| Volatility breaker | price moves ≥ 2 cents in 30s → halt 10 min | N/A |
-| Resolution clarity | N/A | must restate in 1 sentence + 1 source, else skip |
-| Trade count cap | max 10 trades/day | max 5 trades/day |
-| Copy delay | 5-30s random delay | 15-120s random delay |
+
+Per-trade gates are supplementary — primary risk management is portfolio-level. See Strategy Bible §7.
+
+| Gate | Threshold |
+|------|-----------|
+| Spread gate | ≤ 2 cents |
+| Entry slippage cap | ≤ 2 cents vs detected price |
+| Volatility breaker | price moves ≥ 2 cents in 30s → halt 10 min |
+| Resolution clarity | must restate in 1 sentence + 1 source, else skip |
+| Copy delay | 5-30s random delay (configurable per persona) |
 
 **Circuit breakers (halt all trading):**
 - Error breaker: 3+ order/API errors in 2 minutes → halt all for the day
 - Slippage breaker: if average slippage exceeds threshold → halt copying that wallet
-- Correlation breaker: cap total open risk per theme (crypto, politics, sports) to ≤ 3% bankroll
+- Correlation breaker: cap total open risk per theme (crypto, politics, sports) to ≤ 5% bankroll
 
 **The critical metric (measure this or you're guessing):**
 ```
-follower_slippage = (your_avg_entry - their_avg_entry) + (your_avg_exit - their_avg_exit) + fees
+follower_slippage = (our_avg_entry - their_avg_entry) + our_fees
 ```
 If follower_slippage is consistently negative by more than the trader's edge, you lose even with perfect risk controls. Track this per wallet and kill wallets where slippage eats the edge.
 
@@ -275,10 +287,10 @@ If follower_slippage is consistently negative by more than the trader's edge, yo
 - Consistent across at least 2 rolling windows
 
 ### 3.4 When to start real-money copy trading (Phase 7 - FUTURE)
-- At least 5 wallets meet "follow-worthy" criteria for 30+ days
+- At least 3 wallets meet "follow-worthy" criteria for 30+ days
 - Combined paper portfolio Sharpe > 1.0 for 30 days
 - Human explicitly approves with specific bankroll amount
-- Start at 10% of target allocation, scale up weekly if profitable
+- Start at $100-200, scale up weekly if profitable
 
 ### 3.5 When to pause/halt the entire system
 - API rate limits hit consistently (>10% of requests failing)

@@ -1,5 +1,6 @@
 # PRD: Polymarket Wallet Discovery + Long-Term Paper Copy Trading
 
+> **NOTE:** This is the original brainstorm/PRD document. It has been superseded by `docs/STRATEGY_BIBLE.md` for all strategic decisions (personas, risk thresholds, scoring formulas, copy fidelity) and `docs/EVALUATION_STRATEGY.md` for phase gates. The tech stack described here (Python/Postgres) was replaced with Rust/SQLite. Kept for historical context only.
 
 Human notes: please look in git_projects/trading ... use the code there and copy it here. I want to deploy to aws (same instance), use sqlite, I want to select individuals and papertrade e.g. for week before we pick person as worthy following. after we really validate we could execute on that person, we will start with some bankroll
 

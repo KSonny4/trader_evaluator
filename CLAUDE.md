@@ -28,7 +28,7 @@ WScore Ranking → "Who to Follow" with evidence
 | `docs/plans/2026-02-08-strategy-enforcement.md` | **Current implementation plan** — 24 tasks to bridge Strategy Bible to code. TDD, bite-sized. |
 | `docs/EVALUATION_STRATEGY.md` | Phase gates, evaluation metrics, decision rules. Superseded by Strategy Bible for strategic decisions, but still valid for phase progression. |
 | `docs/prd.txt` | Full product requirements — goals, data sources, data model, acceptance criteria |
-| `docs/on_risk.txt` | Risk management framework |
+| `docs/on_risk2.txt` | Risk management framework — supplementary to Strategy Bible §7 |
 | `docs/plans/2026-02-08-wallet-evaluator-mvp.md` | Original MVP plan — 15 tasks, mostly complete |
 | `docs/plans/2026-02-08-evaluator-frontend-dashboard.md` | Dashboard implementation plan |
 | `docs/inspiration.txt` | Reference projects and links |
@@ -66,7 +66,7 @@ WScore Ranking → "Who to Follow" with evidence
 - **Paper copy**: Simulated portfolio that mirrors a wallet's trades with risk caps and slippage
 - **Discovery source**: How we found a wallet — HOLDER (top holders list), TRADER_RECENT (active in market), LEADERBOARD (global ranking)
 - **Mirror strategy**: Copy trades same direction, proportional size, with configurable delay
-- **Quartic taker fee**: `fee = price * 0.25 * (price * (1 - price))^2` — max ~1.44% at p=0.60, zero near p=0 or p=1
+- **Quartic taker fee**: `fee = price * 0.25 * (price * (1 - price))^2` — max ~1.56% at p=0.50. CONDITIONAL: applies only to crypto 15-min markets. All other markets have zero taker fee.
 
 ## Technical stack
 
@@ -125,7 +125,7 @@ trader_evaluator/
     STRATEGY_BIBLE.md               # Governing strategy document
     EVALUATION_STRATEGY.md          # Phase gates + decision rules
     prd.txt                         # Product requirements
-    on_risk.txt                     # Risk framework
+    on_risk2.txt                    # Risk framework
     plans/
       2026-02-08-strategy-enforcement.md  # Current plan: 24 tasks
       2026-02-08-wallet-evaluator-mvp.md  # Original MVP plan (mostly done)
@@ -135,7 +135,7 @@ trader_evaluator/
   data/                             # SQLite database (gitignored)
 ```
 
-## Database tables (11 core)
+## Database tables
 
 | Table | Purpose | Key columns |
 |-------|---------|-------------|
@@ -267,11 +267,11 @@ Every wallet is classified into a persona before paper-trading. This is the gate
 
 **Obscurity bonus:** Wallets NOT on public leaderboards get 1.2x WScore multiplier (fewer copiers = less front-running = better fills).
 
-**Wallet age:** Younger wallets (< 90 days) get a trust penalty — not enough data to classify reliably. Wallets < 30 days with high win rates are flagged as potential snipers/insiders. Age is a confidence factor, not a hard filter.
+**Wallet age:** **Wallet age is a Stage 1 gate:** Wallets < 30 days old are **excluded** (hard filter, not tracked for paper trading). 30-90 days get 0.8x trust multiplier. 90-365 days are normal confidence (1.0x). >365 days get 1.1x trust bonus. Age gates are applied before persona classification.
 
 **Continuous re-evaluation:** Personas are re-classified weekly. Wallets can move between personas as behavior changes (e.g., a Consistent Generalist who starts tail-risk-selling gets reclassified and dropped).
 
-**Funnel:** Discover hundreds of wallets → classify all → track all → paper-trade only the best ~5-10 followable personas → rank those → follow the top handful with real money.
+**Funnel:** Discover hundreds of wallets → classify all → track all → paper-trade only the best ~5-15 followable personas → rank those → follow the top handful with real money.
 
 Detection: rule-based SQL on `wallet_features_daily` first, ML classifier later once we have labeled outcomes.
 
@@ -335,12 +335,13 @@ All linked repos were cloned/fetched and analyzed at source-code level. Key find
 
 ### Wallet scoring formula (synthesized from all sources)
 ```
-WScore = 0.25 * win_rate       # predictfolio + copy-trade-docs both use this
-       + 0.25 * roi            # copy-trade-docs weights 25%
-       + 0.20 * consistency    # Sharpe-like: stddev of per-trade returns
-       + 0.15 * volume         # filters low-activity wallets
-       + 0.10 * risk_score     # max drawdown + recovery time
-       + 0.05 * history_length # longer track record = more trustworthy
+WScore = ( 0.30 * edge_score        # ROI + win_rate (from paper results)
+         + 0.25 * consistency_score  # Sharpe ratio proxy: mean/stddev of per-trade returns
+         + 0.20 * market_skill_score # unique_markets / trades across different domains
+         + 0.15 * timing_skill_score # avg time between source entry and our copy entry
+         + 0.10 * behavior_quality   # low churn, no wash patterns, stable frequency
+         ) * trust_multiplier        # 0.5 (<30d), 0.8 (30-90d), 1.0 (90-365d), 1.1 (>365d)
+           * obscurity_bonus         # 1.2x if NOT on public leaderboard
 ```
 
 ### PnL decomposition (from polybot)
