@@ -101,7 +101,8 @@ cargo run -p evaluator -- rankings # CLI: WScore rankings
 - Agents NEVER push to `main` or merge PRs.
 - After merge: `make worktree-clean NAME=<name>`
 - First-time: `make setup-hooks`
-- **Always use `superpowers` skills** (brainstorming, TDD, systematic-debugging, verification-before-completion, etc.)
+- **Always use `superpowers` skills** (brainstorming, TDD, systematic-debugging, verification-before-completion, requesting-code-review, etc.)
+- **NO PR WITHOUT CODE REVIEW SKILL** — dispatch code-reviewer subagent, use its output
 
 ## Testing rules
 
