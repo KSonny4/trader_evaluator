@@ -1,5 +1,4 @@
 mod models;
-#[allow(dead_code)] // Query functions built ahead of handlers (tasks 7-11 will wire them)
 mod queries;
 
 use anyhow::Result;
@@ -7,7 +6,10 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse};
 use axum::{routing::get, Router};
-use models::{FunnelStage, MarketRow, SystemStatus, TrackingHealth, WalletOverview, WalletRow};
+use models::{
+    FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
+    WalletOverview, WalletRow,
+};
 use rusqlite::{Connection, OpenFlags};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -65,6 +67,19 @@ struct TrackingTemplate {
     stale: Vec<String>,
 }
 
+#[derive(Template)]
+#[template(path = "partials/paper.html")]
+struct PaperTemplate {
+    summary: PaperSummary,
+    trades: Vec<PaperTradeRow>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/rankings.html")]
+struct RankingsTemplate {
+    rankings: Vec<RankingRow>,
+}
+
 // --- Handlers ---
 
 async fn index() -> impl IntoResponse {
@@ -105,6 +120,19 @@ async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
     Html(TrackingTemplate { health, stale }.to_string())
 }
 
+async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let summary = queries::paper_summary(&conn, 10000.0).unwrap();
+    let trades = queries::recent_paper_trades(&conn, 20).unwrap();
+    Html(PaperTemplate { summary, trades }.to_string())
+}
+
+async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let rankings = queries::top_rankings(&conn, 30, 20).unwrap();
+    Html(RankingsTemplate { rankings }.to_string())
+}
+
 // --- Router ---
 
 pub fn create_router() -> Router {
@@ -120,6 +148,8 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/partials/markets", get(markets_partial))
         .route("/partials/wallets", get(wallets_partial))
         .route("/partials/tracking", get(tracking_partial))
+        .route("/partials/paper", get(paper_partial))
+        .route("/partials/rankings", get(rankings_partial))
         .with_state(state)
 }
 
@@ -366,5 +396,73 @@ mod tests {
         assert!(html.contains("Activity"));
         assert!(html.contains("Positions"));
         assert!(html.contains("Holders"));
+    }
+
+    #[tokio::test]
+    async fn test_paper_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/paper")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_paper_partial_empty_shows_message() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/paper")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("No paper trades yet"));
+    }
+
+    #[tokio::test]
+    async fn test_rankings_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/rankings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_rankings_partial_empty_shows_message() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/rankings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("No wallet scores for today"));
     }
 }

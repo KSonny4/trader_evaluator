@@ -90,33 +90,47 @@ pub struct PaperTradeRow {
     pub wallet_short: String,
     pub market_title: String,
     pub side: String,
-    pub size_usdc: f64,
-    pub entry_price: f64,
+    pub side_color: String,
+    pub size_display: String,
+    pub price_display: String,
     pub status: String,
+    pub status_color: String,
     pub pnl: Option<f64>,
+    pub pnl_display: String,
+    pub pnl_color: String,
     pub created_at: String,
 }
 
 /// Paper portfolio summary
 pub struct PaperSummary {
     pub total_pnl: f64,
+    pub pnl_display: String,
     pub open_positions: i64,
     pub settled_wins: i64,
     pub settled_losses: i64,
     pub bankroll: f64,
+    pub bankroll_display: String,
     pub pnl_color: String,
 }
 
 /// Wallet ranking row
 pub struct RankingRow {
     pub rank: i64,
+    pub rank_display: String,
+    pub row_class: String,
     pub proxy_wallet: String,
     pub wallet_short: String,
     pub wscore: f64,
+    pub wscore_display: String,
+    pub wscore_pct: String,
     pub edge_score: f64,
+    pub edge_display: String,
     pub consistency_score: f64,
+    pub consistency_display: String,
     pub trade_count: i64,
     pub paper_pnl: f64,
+    pub pnl_display: String,
+    pub pnl_color: String,
     pub follow_mode: String,
 }
 

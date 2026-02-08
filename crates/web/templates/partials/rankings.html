@@ -1,0 +1,45 @@
+{% if rankings.is_empty() %}
+<p class="text-gray-500 text-sm italic">No wallet scores for today.</p>
+{% else %}
+<div class="overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-gray-500 border-b border-gray-800">
+                <th class="text-left py-2 px-2">#</th>
+                <th class="text-left py-2 px-2">Wallet</th>
+                <th class="text-right py-2 px-2">WScore</th>
+                <th class="text-right py-2 px-2">Edge</th>
+                <th class="text-right py-2 px-2">Consistency</th>
+                <th class="text-right py-2 px-2">Trades</th>
+                <th class="text-right py-2 px-2">Paper PnL</th>
+                <th class="text-center py-2 px-2">Follow</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rankings %}
+            <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 {{ r.row_class }}">
+                <td class="py-1.5 px-2 text-gray-500">{{ r.rank_display }}</td>
+                <td class="py-1.5 px-2 font-mono text-gray-300" title="{{ r.proxy_wallet }}">{{ r.wallet_short }}</td>
+                <td class="py-1.5 px-2 text-right">
+                    <div class="flex items-center justify-end gap-2">
+                        <div class="w-16 bg-gray-800 rounded-full h-1.5">
+                            <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ r.wscore_pct }}%"></div>
+                        </div>
+                        <span class="text-gray-300 w-10 text-right">{{ r.wscore_display }}</span>
+                    </div>
+                </td>
+                <td class="py-1.5 px-2 text-right text-gray-400">{{ r.edge_display }}</td>
+                <td class="py-1.5 px-2 text-right text-gray-400">{{ r.consistency_display }}</td>
+                <td class="py-1.5 px-2 text-right text-gray-400">{{ r.trade_count }}</td>
+                <td class="py-1.5 px-2 text-right">
+                    <span class="{{ r.pnl_color }}">{{ r.pnl_display }}</span>
+                </td>
+                <td class="py-1.5 px-2 text-center">
+                    <span class="px-1.5 py-0.5 rounded text-xs bg-gray-800 text-gray-400">{{ r.follow_mode }}</span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

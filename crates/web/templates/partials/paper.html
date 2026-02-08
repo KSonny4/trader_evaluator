@@ -1,0 +1,71 @@
+<div class="space-y-4">
+    <!-- Summary cards -->
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold {{ summary.pnl_color }}">
+                {{ summary.pnl_display }}
+            </div>
+            <div class="text-xs text-gray-500">Total PnL</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-blue-400">{{ summary.open_positions }}</div>
+            <div class="text-xs text-gray-500">Open</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-green-400">{{ summary.settled_wins }}</div>
+            <div class="text-xs text-gray-500">Wins</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-red-400">{{ summary.settled_losses }}</div>
+            <div class="text-xs text-gray-500">Losses</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-300">{{ summary.bankroll_display }}</div>
+            <div class="text-xs text-gray-500">Bankroll</div>
+        </div>
+    </div>
+
+    <!-- Recent trades table -->
+    {% if trades.is_empty() %}
+    <p class="text-gray-500 text-sm italic">No paper trades yet.</p>
+    {% else %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-gray-500 border-b border-gray-800">
+                    <th class="text-left py-2 px-2">Wallet</th>
+                    <th class="text-left py-2 px-2">Market</th>
+                    <th class="text-center py-2 px-2">Side</th>
+                    <th class="text-right py-2 px-2">Size</th>
+                    <th class="text-right py-2 px-2">Entry</th>
+                    <th class="text-center py-2 px-2">Status</th>
+                    <th class="text-right py-2 px-2">PnL</th>
+                    <th class="text-right py-2 px-2">Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in trades %}
+                <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+                    <td class="py-1.5 px-2 font-mono text-gray-400">{{ t.wallet_short }}</td>
+                    <td class="py-1.5 px-2 max-w-xs truncate text-gray-300" title="{{ t.market_title }}">{{ t.market_title }}</td>
+                    <td class="py-1.5 px-2 text-center">
+                        <span class="px-1.5 py-0.5 rounded text-xs {{ t.side_color }}">
+                            {{ t.side }}
+                        </span>
+                    </td>
+                    <td class="py-1.5 px-2 text-right text-gray-400">{{ t.size_display }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-400">{{ t.price_display }}</td>
+                    <td class="py-1.5 px-2 text-center">
+                        <span class="px-1.5 py-0.5 rounded text-xs {{ t.status_color }}">
+                            {{ t.status }}
+                        </span>
+                    </td>
+                    <td class="py-1.5 px-2 text-right"><span class="{{ t.pnl_color }}">{{ t.pnl_display }}</span></td>
+                    <td class="py-1.5 px-2 text-right text-gray-500">{{ t.created_at }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>

@@ -379,12 +379,17 @@ pub fn paper_summary(conn: &Connection, bankroll: f64) -> Result<PaperSummary> {
     } else {
         "text-red-400"
     };
+    let sign = if total_pnl >= 0.0 { "+" } else { "" };
+    let pnl_display = format!("{}${:.2}", sign, total_pnl);
+    let bankroll_display = format!("${:.0}", bankroll);
     Ok(PaperSummary {
         total_pnl,
+        pnl_display,
         open_positions,
         settled_wins,
         settled_losses,
         bankroll,
+        bankroll_display,
         pnl_color: pnl_color.to_string(),
     })
 }
@@ -402,14 +407,53 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
     let rows = stmt
         .query_map([limit as i64], |row| {
             let wallet: String = row.get(0)?;
+            let side: String = row.get(2)?;
+            let size_usdc: f64 = row.get(3)?;
+            let entry_price: f64 = row.get(4)?;
+            let status: String = row.get(5)?;
+            let pnl: Option<f64> = row.get(6)?;
+
+            let side_color = if side == "BUY" {
+                "bg-green-900/50 text-green-300"
+            } else {
+                "bg-red-900/50 text-red-300"
+            }
+            .to_string();
+
+            let status_color = match status.as_str() {
+                "open" => "bg-blue-900/50 text-blue-300",
+                "settled_win" => "bg-green-900/50 text-green-300",
+                "settled_loss" => "bg-red-900/50 text-red-300",
+                _ => "bg-gray-800 text-gray-400",
+            }
+            .to_string();
+
+            let pnl_display = match pnl {
+                Some(p) => {
+                    let sign = if p >= 0.0 { "+" } else { "" };
+                    format!("{}${:.2}", sign, p)
+                }
+                None => "-".to_string(),
+            };
+
+            let pnl_color = match pnl {
+                Some(p) if p >= 0.0 => "text-green-400".to_string(),
+                Some(_) => "text-red-400".to_string(),
+                None => "text-gray-600".to_string(),
+            };
+
             Ok(PaperTradeRow {
                 wallet_short: shorten_wallet(&wallet),
                 market_title: row.get(1)?,
-                side: row.get(2)?,
-                size_usdc: row.get(3)?,
-                entry_price: row.get(4)?,
-                status: row.get(5)?,
-                pnl: row.get(6)?,
+                side,
+                side_color,
+                size_display: format!("${:.2}", size_usdc),
+                price_display: format!("{:.3}", entry_price),
+                status,
+                status_color,
+                pnl,
+                pnl_display,
+                pnl_color,
                 created_at: row.get(7)?,
             })
         })?
@@ -433,26 +477,59 @@ pub fn top_rankings(conn: &Connection, window_days: i64, limit: usize) -> Result
     let rows = stmt
         .query_map([window_days, limit as i64], |row| {
             let wallet: String = row.get(0)?;
+            let wscore: f64 = row.get(1)?;
+            let edge_score: f64 = row.get(2)?;
+            let consistency_score: f64 = row.get(3)?;
+            let paper_pnl: f64 = row.get(6)?;
+
+            let pnl_color = if paper_pnl >= 0.0 {
+                "text-green-400"
+            } else {
+                "text-red-400"
+            }
+            .to_string();
+            let sign = if paper_pnl >= 0.0 { "+" } else { "" };
+
             Ok(RankingRow {
                 rank: 0, // filled below
+                rank_display: String::new(),
+                row_class: String::new(),
                 proxy_wallet: wallet.clone(),
                 wallet_short: shorten_wallet(&wallet),
-                wscore: row.get(1)?,
-                edge_score: row.get(2)?,
-                consistency_score: row.get(3)?,
+                wscore,
+                wscore_display: format!("{:.2}", wscore),
+                wscore_pct: format!("{:.0}", wscore * 100.0),
+                edge_score,
+                edge_display: format!("{:.2}", edge_score),
+                consistency_score,
+                consistency_display: format!("{:.2}", consistency_score),
                 follow_mode: row.get(4)?,
                 trade_count: row.get(5)?,
-                paper_pnl: row.get(6)?,
+                paper_pnl,
+                pnl_display: format!("{}${:.2}", sign, paper_pnl),
+                pnl_color,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    // Fill ranks
+    // Fill ranks and rank display
     let rows: Vec<RankingRow> = rows
         .into_iter()
         .enumerate()
         .map(|(i, mut r)| {
-            r.rank = (i + 1) as i64;
+            let rank = (i + 1) as i64;
+            r.rank = rank;
+            r.rank_display = match rank {
+                1 => "\u{1F3C6}".to_string(), // trophy
+                2 => "\u{1F948}".to_string(), // silver medal
+                3 => "\u{1F949}".to_string(), // bronze medal
+                n => n.to_string(),
+            };
+            r.row_class = if rank <= 3 {
+                "bg-gray-800/20".to_string()
+            } else {
+                String::new()
+            };
             r
         })
         .collect();
