@@ -1,0 +1,26 @@
+#!/bin/bash
+# Pre-push hook: blocks direct pushes to main/master.
+# Install with: make setup-hooks
+# Bypass in emergency: git push --no-verify
+
+protected_branches="main master"
+
+while read local_ref local_sha remote_ref remote_sha; do
+    for branch in $protected_branches; do
+        if echo "$remote_ref" | grep -qE "refs/heads/$branch$"; then
+            echo ""
+            echo "  BLOCKED: Direct push to '$branch' is not allowed."
+            echo ""
+            echo "  Create a feature branch and open a PR instead:"
+            echo "    git checkout -b feature/my-change"
+            echo "    git push -u origin feature/my-change"
+            echo "    gh pr create"
+            echo ""
+            echo "  To bypass in an emergency: git push --no-verify"
+            echo ""
+            exit 1
+        fi
+    done
+done
+
+exit 0

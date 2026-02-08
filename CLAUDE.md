@@ -186,8 +186,21 @@ make check                         # Verify DB schema matches code expectations
 
 ## Development workflow
 
+**MANDATORY: Never commit directly to `main`.** All changes go through feature branches and pull requests.
+
 **MANDATORY: Always use `superpowers` skills.**
 
+### Branch & PR workflow (non-negotiable)
+1. Create a feature branch: `git checkout -b feature/<name>` or use `superpowers:using-git-worktrees`
+2. Implement with TDD (red-green-refactor)
+3. Commit to the feature branch (never to `main`)
+4. Push the branch: `git push -u origin feature/<name>`
+5. Create a PR: `gh pr create`
+6. CI must pass (cargo test + clippy + fmt — runs automatically via GitHub Actions)
+7. Human reviews and merges the PR
+8. **Claude/agents must NEVER push to `main` or merge PRs** — only the human merges
+
+### Skill workflow
 - **Before any work:** Run `evaluator-guidance` skill to check current phase and get recommendations
 - **Before writing code:** Use `superpowers:writing-plans` or follow the existing plan
 - **For any feature/bugfix:** Use `superpowers:test-driven-development` — TDD always
@@ -196,6 +209,11 @@ make check                         # Verify DB schema matches code expectations
 - **After implementation:** Use `superpowers:requesting-code-review`
 
 All code changes must pass: `cargo test --all`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`
+
+### First-time setup
+```bash
+make setup-hooks   # Install pre-push hook that blocks direct pushes to main
+```
 
 ## Testing philosophy
 
