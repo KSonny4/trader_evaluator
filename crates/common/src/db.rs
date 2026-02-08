@@ -27,7 +27,12 @@ impl AsyncDb {
             Ok(())
         })
         .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| match e {
+            tokio_rusqlite::Error::Error(err) => {
+                anyhow::Error::from(err).context("AsyncDb::open: migration failed")
+            }
+            other => anyhow::anyhow!("AsyncDb::open: {other}"),
+        })?;
         Ok(Self { conn })
     }
 
@@ -50,7 +55,7 @@ impl AsyncDb {
                     anyhow::anyhow!("database close error: {err}")
                 }
                 tokio_rusqlite::Error::Error(err) => err,
-                _ => anyhow::anyhow!("unknown database error"),
+                other => anyhow::anyhow!("database error: {other}"),
             },
         )
     }

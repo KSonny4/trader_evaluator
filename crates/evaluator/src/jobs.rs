@@ -279,7 +279,8 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
 
         let page_inserted = db
             .call(move |conn| {
-                conn.execute(
+                let tx = conn.transaction()?;
+                tx.execute(
                     "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params!["data_api", "GET", url, raw],
                 )?;
@@ -296,7 +297,7 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
                     };
                     let timestamp = e.timestamp.unwrap_or(0);
                     let raw_json = serde_json::to_string(&e).unwrap_or_default();
-                    let changed = conn.execute(
+                    let changed = tx.execute(
                         r#"
                         INSERT OR IGNORE INTO activity_raw
                             (proxy_wallet, condition_id, activity_type, size, usdc_size, price, side, outcome, outcome_index, timestamp, transaction_hash, raw_json)
@@ -320,6 +321,7 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
                     )?;
                     ins += changed as u64;
                 }
+                tx.commit()?;
                 Ok(ins)
             })
             .await?;
@@ -371,7 +373,8 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
 
         let page_inserted = db
             .call(move |conn| {
-                conn.execute(
+                let tx = conn.transaction()?;
+                tx.execute(
                     "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params!["data_api", "GET", url, raw],
                 )?;
@@ -391,7 +394,7 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
                         None => continue,
                     };
                     let raw_json = serde_json::to_string(&p).unwrap_or_default();
-                    let changed = conn.execute(
+                    let changed = tx.execute(
                         r#"
                         INSERT INTO positions_snapshots
                             (proxy_wallet, condition_id, asset, size, avg_price, current_value, cash_pnl, percent_pnl, outcome, outcome_index, raw_json)
@@ -414,6 +417,7 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
                     )?;
                     ins += changed as u64;
                 }
+                tx.commit()?;
                 Ok(ins)
             })
             .await?;
@@ -466,7 +470,8 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
 
         let page_inserted = db
             .call(move |conn| {
-                conn.execute(
+                let tx = conn.transaction()?;
+                tx.execute(
                     "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params!["data_api", "GET", url, raw_h],
                 )?;
@@ -481,7 +486,7 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
                         let Some(amount) = h.amount else {
                             continue;
                         };
-                        let changed = conn.execute(
+                        let changed = tx.execute(
                             r#"
                             INSERT INTO holders_snapshots
                                 (condition_id, token, proxy_wallet, amount, outcome_index, pseudonym)
@@ -500,6 +505,7 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
                         ins += changed as u64;
                     }
                 }
+                tx.commit()?;
                 Ok(ins)
             })
             .await?;
@@ -606,8 +612,13 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         consistency_weight: cfg.wallet_scoring.consistency_weight,
     };
 
-    let wallets: Vec<String> = db
-        .call(|conn| {
+    let windows_days = cfg.wallet_scoring.windows_days.clone();
+    let bankroll = cfg.risk.paper_bankroll_usdc;
+
+    // Batch read: fetch all (wallet, window) PnL values in one db.call().
+    let windows_c = windows_days.clone();
+    let pnl_data: Vec<(String, i64, f64)> = db
+        .call(move |conn| {
             let mut stmt = conn.prepare(
                 r#"
                 SELECT proxy_wallet
@@ -617,46 +628,68 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
                 LIMIT 500
                 "#,
             )?;
-            let rows = stmt
+            let wallets: Vec<String> = stmt
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
+
+            let mut results = Vec::new();
+            let mut pnl_stmt = conn.prepare(
+                "SELECT SUM(pnl) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
+            )?;
+
+            for wallet in &wallets {
+                for &wd in &windows_c {
+                    let window = format!("-{} days", wd);
+                    let pnl: Option<f64> = pnl_stmt.query_row(
+                        rusqlite::params![wallet, window],
+                        |row| row.get(0),
+                    )?;
+                    results.push((wallet.clone(), wd as i64, pnl.unwrap_or(0.0)));
+                }
+            }
+            Ok(results)
         })
         .await?;
 
-    let mut inserted = 0_u64;
-    for waddr in wallets {
-        for &window_days in &cfg.wallet_scoring.windows_days {
-            let window = format!("-{} days", window_days);
-            let waddr_c = waddr.clone();
-            let bankroll = cfg.risk.paper_bankroll_usdc;
+    // Compute scores in Rust (no DB needed).
+    struct ScoreRow {
+        proxy_wallet: String,
+        window_days: i64,
+        wscore: f64,
+        edge_score: f64,
+        consistency_score: f64,
+        roi_pct: f64,
+    }
 
-            let pnl: Option<f64> = db
-                .call(move |conn| {
-                    Ok(conn.query_row(
-                        "SELECT SUM(pnl) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
-                        rusqlite::params![waddr_c, window],
-                        |row| row.get(0),
-                    )?)
-                })
-                .await?;
-            let pnl = pnl.unwrap_or(0.0);
-            let roi_pct = if bankroll > 0.0 {
-                100.0 * pnl / bankroll
-            } else {
-                0.0
-            };
+    let mut score_rows = Vec::with_capacity(pnl_data.len());
+    for (wallet, window_days, pnl) in &pnl_data {
+        let roi_pct = if bankroll > 0.0 {
+            100.0 * pnl / bankroll
+        } else {
+            0.0
+        };
+        let input = WalletScoreInput {
+            paper_roi_pct: roi_pct,
+            daily_return_stdev_pct: 0.0,
+        };
+        let wscore = compute_wscore(&input, &w);
+        score_rows.push(ScoreRow {
+            proxy_wallet: wallet.clone(),
+            window_days: *window_days,
+            wscore,
+            edge_score: input.paper_roi_pct.max(0.0) / 20.0,
+            consistency_score: 1.0,
+            roi_pct,
+        });
+    }
 
-            let input = WalletScoreInput {
-                paper_roi_pct: roi_pct,
-                daily_return_stdev_pct: 0.0,
-            };
-            let score = compute_wscore(&input, &w);
-
-            let waddr_c2 = waddr.clone();
-            let today_c = today.clone();
-            db.call(move |conn| {
-                conn.execute(
+    // Batch write: upsert all scores in one db.call() with a transaction.
+    let inserted: u64 = db
+        .call(move |conn| {
+            let tx = conn.transaction()?;
+            let mut ins = 0_u64;
+            for r in &score_rows {
+                tx.execute(
                     r#"
                     INSERT INTO wallet_scores_daily
                         (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score, paper_roi_pct, recommended_follow_mode)
@@ -670,22 +703,22 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
                         recommended_follow_mode = excluded.recommended_follow_mode
                     "#,
                     rusqlite::params![
-                        waddr_c2,
-                        today_c,
-                        window_days as i64,
-                        score,
-                        input.paper_roi_pct.max(0.0) / 20.0,
-                        1.0,
-                        roi_pct,
+                        r.proxy_wallet,
+                        today,
+                        r.window_days,
+                        r.wscore,
+                        r.edge_score,
+                        r.consistency_score,
+                        r.roi_pct,
                         "mirror"
                     ],
                 )?;
-                Ok(())
-            })
-            .await?;
-            inserted += 1;
-        }
-    }
+                ins += 1;
+            }
+            tx.commit()?;
+            Ok(ins)
+        })
+        .await?;
 
     Ok(inserted)
 }
@@ -855,13 +888,14 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
         let raw_owned = raw;
 
         db.call(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params!["gamma_api", "GET", url_owned, raw_owned],
             )?;
 
             for r in &page_db_rows {
-                conn.execute(
+                tx.execute(
                     r#"
                     INSERT INTO markets
                         (condition_id, title, slug, description, end_date, liquidity, volume, category, event_slug, last_updated_at)
@@ -891,6 +925,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                     ],
                 )?;
             }
+            tx.commit()?;
             Ok(())
         })
         .await?;
@@ -914,9 +949,10 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
 
     let inserted: u64 = db
         .call(move |conn| {
+            let tx = conn.transaction()?;
             let mut ins = 0_u64;
             for (condition_id, mscore, rank) in ranked_data {
-                let changed = conn.execute(
+                let changed = tx.execute(
                     r#"
                     INSERT INTO market_scores_daily
                         (condition_id, score_date, mscore, rank)
@@ -930,6 +966,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                 )?;
                 ins += changed as u64;
             }
+            tx.commit()?;
             Ok(ins)
         })
         .await?;
@@ -1015,18 +1052,19 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         let cid = condition_id.clone();
         let page_inserted: u64 = db
             .call(move |conn| {
-                conn.execute(
+                let tx = conn.transaction()?;
+                tx.execute(
                     "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params!["data_api", "GET", holders_url, raw_h],
                 )?;
-                conn.execute(
+                tx.execute(
                     "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params!["data_api", "GET", trades_url, raw_t],
                 )?;
 
                 let mut ins = 0_u64;
                 for (proxy_wallet, discovered_from) in wallets_to_insert {
-                    let changed = conn.execute(
+                    let changed = tx.execute(
                         r#"
                         INSERT OR IGNORE INTO wallets
                             (proxy_wallet, discovered_from, discovered_market, is_active)
@@ -1037,6 +1075,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
                     )?;
                     ins += changed as u64;
                 }
+                tx.commit()?;
                 Ok(ins)
             })
             .await?;

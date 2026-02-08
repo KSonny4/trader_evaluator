@@ -46,10 +46,12 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         // Save raw response bytes (unmodified) before parsing/derivation.
         let url = pager.trades_url(user, limit, offset);
 
-        // Batch all DB work for this page into a single db.call() closure.
+        // Batch all DB work for this page into a single db.call() closure
+        // wrapped in a transaction for atomicity.
         let page_inserted = db
             .call(move |conn| {
-                conn.execute(
+                let tx = conn.transaction()?;
+                tx.execute(
                     "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params!["data_api", "GET", url, raw_body],
                 )?;
@@ -64,11 +66,11 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
                         Some(v) if !v.is_empty() => v.to_string(),
                         _ => continue, // required key missing
                     };
-                    let tx = t.transaction_hash.clone();
+                    let tx_hash = t.transaction_hash.clone();
 
                     // Persist derived row; rely on UNIQUE constraint to deduplicate.
                     let raw_json = serde_json::to_string(&t).unwrap_or_default();
-                    let changed = conn.execute(
+                    let changed = tx.execute(
                         r#"
                         INSERT OR IGNORE INTO trades_raw
                             (proxy_wallet, condition_id, asset, side, size, price, outcome, outcome_index, timestamp, transaction_hash, raw_json)
@@ -85,12 +87,13 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
                             t.outcome,
                             t.outcome_index,
                             t.timestamp.unwrap_or(0),
-                            tx,
+                            tx_hash,
                             raw_json,
                         ],
                     )?;
                     page_ins += changed as u64;
                 }
+                tx.commit()?;
                 Ok(page_ins)
             })
             .await?;
