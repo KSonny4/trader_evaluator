@@ -56,7 +56,7 @@ Only three personas advance to paper trading. Everything else is excluded.
 
 | Persona | Key Signals | Follow Mode | Trust Level |
 |---------|------------|-------------|-------------|
-| **Informed Specialist** | unique_markets < 10, win_rate > 60%, enters before price moves | Mirror with 5-30s delay | PRIMARY target |
+| **Informed Specialist** | todo what about unique mstkrt domains? unique_markets < 10, win_rate > 60%, enters before price moves | Mirror with 5-30s delay | PRIMARY target |
 | **Consistent Generalist** | unique_markets > 20, win_rate 52-60%, low drawdown, Sharpe > 1 | Mirror | SECONDARY |
 | **Patient Accumulator** | avg_hold_time > 48h, large positions (>90th percentile), < 5 trades/week | Mirror with 24h+ delay | SLOW but reliable |
 
