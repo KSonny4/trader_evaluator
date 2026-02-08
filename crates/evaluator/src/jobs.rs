@@ -710,11 +710,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                 .volume_24hr
                 .as_deref()
                 .and_then(|s| s.parse::<f64>().ok())
-                .or_else(|| {
-                    m.volume
-                        .as_deref()
-                        .and_then(|s| s.parse::<f64>().ok())
-                })
+                .or_else(|| m.volume.as_deref().and_then(|s| s.parse::<f64>().ok()))
                 .unwrap_or(0.0);
 
             // Gamma doesn't reliably provide these for MVP. Keep 0 to let liquidity/volume dominate.
