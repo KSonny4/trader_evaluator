@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::db::Database;
+use common::db::AsyncDb;
 use common::types::ApiTrade;
 
 pub trait TradesPager {
@@ -15,7 +15,7 @@ pub trait TradesPager {
 
 #[allow(dead_code)]
 pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
-    db: &Database,
+    db: &AsyncDb,
     pager: &P,
     user: &str,
     limit: u32,
@@ -45,52 +45,57 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
 
         // Save raw response bytes (unmodified) before parsing/derivation.
         let url = pager.trades_url(user, limit, offset);
-        db.conn.execute(
-            "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params!["data_api", "GET", url, raw_body],
-        )?;
 
-        if trades.is_empty() {
-            break;
-        }
+        // Batch all DB work for this page into a single db.call() closure.
+        let page_inserted = db
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params!["data_api", "GET", url, raw_body],
+                )?;
 
-        for t in trades {
-            let proxy_wallet = match t.proxy_wallet.as_deref() {
-                Some(v) if !v.is_empty() => v.to_string(),
-                _ => continue, // required key missing
-            };
-            let condition_id = match t.condition_id.as_deref() {
-                Some(v) if !v.is_empty() => v.to_string(),
-                _ => continue, // required key missing
-            };
-            let tx = t.transaction_hash.clone();
+                let mut page_ins = 0_u64;
+                for t in trades {
+                    let proxy_wallet = match t.proxy_wallet.as_deref() {
+                        Some(v) if !v.is_empty() => v.to_string(),
+                        _ => continue, // required key missing
+                    };
+                    let condition_id = match t.condition_id.as_deref() {
+                        Some(v) if !v.is_empty() => v.to_string(),
+                        _ => continue, // required key missing
+                    };
+                    let tx = t.transaction_hash.clone();
 
-            // Persist derived row; rely on UNIQUE constraint to deduplicate.
-            let raw_json = serde_json::to_string(&t).unwrap_or_default();
-            let changed = db.conn.execute(
-                r#"
-                INSERT OR IGNORE INTO trades_raw
-                    (proxy_wallet, condition_id, asset, side, size, price, outcome, outcome_index, timestamp, transaction_hash, raw_json)
-                VALUES
-                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                "#,
-                rusqlite::params![
-                    proxy_wallet,
-                    condition_id,
-                    t.asset,
-                    t.side,
-                    t.size.and_then(|s| s.parse::<f64>().ok()),
-                    t.price.and_then(|s| s.parse::<f64>().ok()),
-                    t.outcome,
-                    t.outcome_index,
-                    t.timestamp.unwrap_or(0),
-                    tx,
-                    raw_json,
-                ],
-            )?;
-            inserted += changed as u64;
-        }
+                    // Persist derived row; rely on UNIQUE constraint to deduplicate.
+                    let raw_json = serde_json::to_string(&t).unwrap_or_default();
+                    let changed = conn.execute(
+                        r#"
+                        INSERT OR IGNORE INTO trades_raw
+                            (proxy_wallet, condition_id, asset, side, size, price, outcome, outcome_index, timestamp, transaction_hash, raw_json)
+                        VALUES
+                            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        "#,
+                        rusqlite::params![
+                            proxy_wallet,
+                            condition_id,
+                            t.asset,
+                            t.side,
+                            t.size.and_then(|s| s.parse::<f64>().ok()),
+                            t.price.and_then(|s| s.parse::<f64>().ok()),
+                            t.outcome,
+                            t.outcome_index,
+                            t.timestamp.unwrap_or(0),
+                            tx,
+                            raw_json,
+                        ],
+                    )?;
+                    page_ins += changed as u64;
+                }
+                Ok(page_ins)
+            })
+            .await?;
 
+        inserted += page_inserted;
         offset += limit;
 
         // Stop if API returns less than a full page. This is a simple guard against
@@ -148,8 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingest_trades_for_wallet_dedup_raw_and_pagination() {
-        let db = Database::open(":memory:").unwrap();
-        db.run_migrations().unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
 
         let page1 = vec![
             ApiTrade {
@@ -272,25 +276,23 @@ mod tests {
             .unwrap();
         assert_eq!(inserted, 4); // tx2 inserted once, + tx1 + tx3 + missing-tx row; skipped row not inserted
 
-        let trades_count: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))
+        let (trades_count, raw_count): (i64, i64) = db
+            .call(|conn| {
+                let tc = conn.query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))?;
+                let rc = conn.query_row("SELECT COUNT(*) FROM raw_api_responses", [], |row| {
+                    row.get(0)
+                })?;
+                Ok((tc, rc))
+            })
+            .await
             .unwrap();
         assert_eq!(trades_count, 4);
-
-        let raw_count: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM raw_api_responses", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
         assert!(raw_count >= 3); // at least the three non-empty pages
     }
 
     #[tokio::test]
     async fn test_ingest_trades_gracefully_handles_http_400_at_high_offset() {
-        let db = Database::open(":memory:").unwrap();
-        db.run_migrations().unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
 
         let page1 = vec![
             ApiTrade {
@@ -341,8 +343,10 @@ mod tests {
         assert_eq!(inserted, 2); // tx1 + tx2 from page 1
 
         let trades_count: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))?)
+            })
+            .await
             .unwrap();
         assert_eq!(trades_count, 2);
     }

@@ -41,10 +41,8 @@ impl AsyncDb {
         F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.conn
-            .call(move |conn| function(conn))
-            .await
-            .map_err(|e: tokio_rusqlite::Error<anyhow::Error>| match e {
+        self.conn.call(move |conn| function(conn)).await.map_err(
+            |e: tokio_rusqlite::Error<anyhow::Error>| match e {
                 tokio_rusqlite::Error::ConnectionClosed => {
                     anyhow::anyhow!("database connection closed")
                 }
@@ -53,7 +51,8 @@ impl AsyncDb {
                 }
                 tokio_rusqlite::Error::Error(err) => err,
                 _ => anyhow::anyhow!("unknown database error"),
-            })
+            },
+        )
     }
 }
 

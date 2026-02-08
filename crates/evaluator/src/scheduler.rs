@@ -36,30 +36,6 @@ pub fn start(jobs: Vec<JobSpec>) -> Vec<JoinHandle<()>> {
         .collect()
 }
 
-pub fn start_local(jobs: Vec<JobSpec>) -> Vec<JoinHandle<()>> {
-    jobs.into_iter()
-        .map(|job| {
-            tokio::task::spawn_local(async move {
-                let start_at = if job.run_immediately {
-                    Instant::now()
-                } else {
-                    Instant::now() + job.interval
-                };
-                let mut interval = tokio::time::interval_at(start_at, job.interval);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-                loop {
-                    interval.tick().await;
-                    tracing::debug!(job = %job.name, "scheduler tick");
-                    if job.tick.send(()).await.is_err() {
-                        break;
-                    }
-                }
-            })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
