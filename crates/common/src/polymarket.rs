@@ -5,6 +5,21 @@ use anyhow::Result;
 use reqwest::{Client, StatusCode, Url};
 use std::time::Duration;
 
+/// Server-side filters for the Gamma `/markets` endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct GammaFilter {
+    /// Only markets with liquidity >= this value.
+    pub liquidity_num_min: Option<f64>,
+    /// Only markets with volume >= this value.
+    pub volume_num_min: Option<f64>,
+    /// Only markets ending on or after this date (ISO-8601, e.g. "2026-02-09").
+    pub end_date_min: Option<String>,
+    /// Only markets ending on or before this date.
+    pub end_date_max: Option<String>,
+    /// false = only open markets.
+    pub closed: Option<bool>,
+}
+
 pub struct PolymarketClient {
     data_api_url: String,
     gamma_api_url: String,
@@ -223,21 +238,38 @@ impl PolymarketClient {
 
     #[allow(dead_code)]
     pub async fn fetch_gamma_markets(&self, limit: u32, offset: u32) -> Result<Vec<GammaMarket>> {
-        let (markets, _raw) = self.fetch_gamma_markets_raw(limit, offset).await?;
+        let (markets, _raw) = self
+            .fetch_gamma_markets_raw(limit, offset, &GammaFilter::default())
+            .await?;
         Ok(markets)
     }
 
-    #[allow(dead_code)]
     pub async fn fetch_gamma_markets_raw(
         &self,
         limit: u32,
         offset: u32,
+        filter: &GammaFilter,
     ) -> Result<(Vec<GammaMarket>, Vec<u8>)> {
         let mut url = Url::parse(&format!("{}/markets", self.gamma_api_url))?;
         {
             let mut qp = url.query_pairs_mut();
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
+            if let Some(v) = filter.liquidity_num_min {
+                qp.append_pair("liquidity_num_min", &v.to_string());
+            }
+            if let Some(v) = filter.volume_num_min {
+                qp.append_pair("volume_num_min", &v.to_string());
+            }
+            if let Some(ref v) = filter.end_date_min {
+                qp.append_pair("end_date_min", v);
+            }
+            if let Some(ref v) = filter.end_date_max {
+                qp.append_pair("end_date_max", v);
+            }
+            if let Some(closed) = filter.closed {
+                qp.append_pair("closed", &closed.to_string());
+            }
         }
         let body = self.get_bytes_with_retry(url).await?;
         Ok((serde_json::from_slice(&body)?, body))

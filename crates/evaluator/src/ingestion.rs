@@ -25,7 +25,21 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
     let mut inserted = 0_u64;
 
     loop {
-        let (trades, raw_body) = pager.fetch_trades_page(user, limit, offset).await?;
+        let fetch_result = pager.fetch_trades_page(user, limit, offset).await;
+        let (trades, raw_body) = match fetch_result {
+            Ok(v) => v,
+            Err(e) => {
+                // Treat errors during pagination (e.g., HTTP 400 at high offsets)
+                // as "end of data" — return what we collected so far.
+                tracing::warn!(
+                    user,
+                    offset,
+                    error = %e,
+                    "trades pagination stopped early due to error; returning collected data"
+                );
+                break;
+            }
+        };
         let page_len = trades.len();
         pages += 1;
 
@@ -93,12 +107,19 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
 mod tests {
     use super::*;
 
+    /// Each page is either Ok((trades, raw_bytes)) or Err.
     struct FakeTradesPager {
-        pages: Vec<(Vec<ApiTrade>, Vec<u8>)>,
+        pages: Vec<Result<(Vec<ApiTrade>, Vec<u8>)>>,
     }
 
     impl FakeTradesPager {
-        fn new(pages: Vec<(Vec<ApiTrade>, Vec<u8>)>) -> Self {
+        fn from_ok_pages(pages: Vec<(Vec<ApiTrade>, Vec<u8>)>) -> Self {
+            Self {
+                pages: pages.into_iter().map(Ok).collect(),
+            }
+        }
+
+        fn new(pages: Vec<Result<(Vec<ApiTrade>, Vec<u8>)>>) -> Self {
             Self { pages }
         }
     }
@@ -117,7 +138,11 @@ mod tests {
             offset: u32,
         ) -> Result<(Vec<ApiTrade>, Vec<u8>)> {
             let idx = (offset / 2) as usize;
-            Ok(self.pages.get(idx).cloned().unwrap_or_default())
+            match self.pages.get(idx) {
+                Some(Ok(page)) => Ok(page.clone()),
+                Some(Err(_)) => Err(anyhow::anyhow!("HTTP 400 Bad Request")),
+                None => Ok(Default::default()),
+            }
         }
     }
 
@@ -235,7 +260,7 @@ mod tests {
             },
         ];
 
-        let pager = FakeTradesPager::new(vec![
+        let pager = FakeTradesPager::from_ok_pages(vec![
             (page1, br#"[{"page":1}]"#.to_vec()),
             (page2, br#"[{"page":2}]"#.to_vec()),
             (page3, br#"[{"page":3}]"#.to_vec()),
@@ -260,5 +285,53 @@ mod tests {
             })
             .unwrap();
         assert!(raw_count >= 3); // at least the three non-empty pages
+    }
+
+    #[tokio::test]
+    async fn test_ingest_trades_gracefully_handles_http_400_at_high_offset() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let page1 = vec![
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xtx1".to_string()),
+                size: Some("10".to_string()),
+                price: Some("0.5".to_string()),
+                timestamp: Some(1),
+                asset: None, title: None, slug: None, outcome: None,
+                outcome_index: None, side: None, pseudonym: None, name: None,
+            },
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xtx2".to_string()),
+                size: Some("5".to_string()),
+                price: Some("0.6".to_string()),
+                timestamp: Some(2),
+                asset: None, title: None, slug: None, outcome: None,
+                outcome_index: None, side: None, pseudonym: None, name: None,
+            },
+        ];
+
+        // Page 2 returns HTTP 400 (simulating Polymarket offset cap).
+        let pager = FakeTradesPager::new(vec![
+            Ok((page1, br#"[{"page":1}]"#.to_vec())),
+            Err(anyhow::anyhow!("HTTP 400 Bad Request")),
+        ]);
+
+        // Should NOT return an error — should return what was collected before the 400.
+        let result = ingest_trades_for_wallet(&db, &pager, "0xw", 2).await;
+        assert!(result.is_ok(), "Expected Ok but got: {:?}", result);
+
+        let (_pages, inserted) = result.unwrap();
+        assert_eq!(inserted, 2); // tx1 + tx2 from page 1
+
+        let trades_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(trades_count, 2);
     }
 }

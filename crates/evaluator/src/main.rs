@@ -52,6 +52,93 @@ async fn main() -> Result<()> {
                 std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
             ));
 
+            // ── Bootstrap: run pipeline sequentially on first startup ──
+            // Jobs depend on each other's output:
+            //   market_scoring → wallet_discovery → ingestion/holders → paper/scoring
+            // Running them simultaneously on a fresh DB produces 0 rows everywhere.
+            tracing::info!("bootstrap: running pipeline sequentially");
+
+            // Phase 1: Market scoring (fetches from Gamma API, populates markets + market_scores_daily)
+            {
+                let db = common::db::Database::open(&db_path).expect("open db");
+                db.run_migrations().expect("migrations");
+                match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+                    Ok(n) => tracing::info!(inserted = n, "bootstrap: market_scoring done"),
+                    Err(e) => tracing::error!(error = %e, "bootstrap: market_scoring failed"),
+                }
+            }
+
+            // Phase 2: Wallet discovery (reads market_scores_daily, populates wallets)
+            {
+                let db = common::db::Database::open(&db_path).expect("open db");
+                db.run_migrations().expect("migrations");
+                match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
+                    .await
+                {
+                    Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
+                    Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
+                }
+            }
+
+            // Phase 3: Ingestion (reads wallets, populates trades/activity/positions/holders)
+            {
+                let db = common::db::Database::open(&db_path).expect("open db");
+                db.run_migrations().expect("migrations");
+
+                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
+                    Ok((_pages, ins)) => {
+                        tracing::info!(inserted = ins, "bootstrap: trades_ingestion done")
+                    }
+                    Err(e) => tracing::error!(error = %e, "bootstrap: trades_ingestion failed"),
+                }
+                match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
+                    Ok(ins) => {
+                        tracing::info!(inserted = ins, "bootstrap: activity_ingestion done")
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "bootstrap: activity_ingestion failed")
+                    }
+                }
+                match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
+                    Ok(ins) => {
+                        tracing::info!(inserted = ins, "bootstrap: positions_snapshot done")
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "bootstrap: positions_snapshot failed")
+                    }
+                }
+                match jobs::run_holders_snapshot_once(
+                    &db,
+                    api.as_ref(),
+                    cfg.wallet_discovery.holders_per_market as u32,
+                )
+                .await
+                {
+                    Ok(ins) => {
+                        tracing::info!(inserted = ins, "bootstrap: holders_snapshot done")
+                    }
+                    Err(e) => tracing::error!(error = %e, "bootstrap: holders_snapshot failed"),
+                }
+            }
+
+            // Phase 4: Paper trading + scoring (reads trades_raw + wallets)
+            {
+                let db = common::db::Database::open(&db_path).expect("open db");
+                db.run_migrations().expect("migrations");
+
+                match jobs::run_paper_tick_once(&db, cfg.as_ref()) {
+                    Ok(ins) => tracing::info!(inserted = ins, "bootstrap: paper_tick done"),
+                    Err(e) => tracing::error!(error = %e, "bootstrap: paper_tick failed"),
+                }
+                match jobs::run_wallet_scoring_once(&db, cfg.as_ref()) {
+                    Ok(ins) => tracing::info!(inserted = ins, "bootstrap: wallet_scoring done"),
+                    Err(e) => tracing::error!(error = %e, "bootstrap: wallet_scoring failed"),
+                }
+            }
+
+            tracing::info!("bootstrap complete — starting periodic scheduler");
+
+            // ── Periodic scheduler: all jobs on intervals (no run_immediately) ──
             let (market_scoring_tx, mut market_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
             let (wallet_discovery_tx, mut wallet_discovery_rx) =
                 tokio::sync::mpsc::channel::<()>(8);
@@ -73,7 +160,7 @@ async fn main() -> Result<()> {
                         cfg.market_scoring.refresh_interval_secs,
                     ),
                     tick: market_scoring_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "wallet_discovery".to_string(),
@@ -81,7 +168,7 @@ async fn main() -> Result<()> {
                         cfg.wallet_discovery.refresh_interval_secs,
                     ),
                     tick: wallet_discovery_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "trades_ingestion".to_string(),
@@ -89,7 +176,7 @@ async fn main() -> Result<()> {
                         cfg.ingestion.trades_poll_interval_secs,
                     ),
                     tick: trades_ingestion_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "activity_ingestion".to_string(),
@@ -97,7 +184,7 @@ async fn main() -> Result<()> {
                         cfg.ingestion.activity_poll_interval_secs,
                     ),
                     tick: activity_ingestion_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "positions_snapshot".to_string(),
@@ -105,7 +192,7 @@ async fn main() -> Result<()> {
                         cfg.ingestion.positions_poll_interval_secs,
                     ),
                     tick: positions_snapshot_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "holders_snapshot".to_string(),
@@ -113,19 +200,19 @@ async fn main() -> Result<()> {
                         cfg.ingestion.holders_poll_interval_secs,
                     ),
                     tick: holders_snapshot_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "paper_tick".to_string(),
                     interval: std::time::Duration::from_secs(60),
                     tick: paper_tick_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
                 scheduler::JobSpec {
                     name: "wallet_scoring".to_string(),
                     interval: std::time::Duration::from_secs(86400),
                     tick: wallet_scoring_tx,
-                    run_immediately: true,
+                    run_immediately: false,
                 },
             ]);
 

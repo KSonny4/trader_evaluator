@@ -8,7 +8,7 @@ use crate::paper_trading::{mirror_trade_to_paper, Side};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
 
-use common::polymarket::PolymarketClient;
+use common::polymarket::{GammaFilter, PolymarketClient};
 use std::time::Instant;
 
 impl GammaMarketsPager for PolymarketClient {
@@ -23,9 +23,10 @@ impl GammaMarketsPager for PolymarketClient {
         &self,
         limit: u32,
         offset: u32,
+        filter: &GammaFilter,
     ) -> Result<(Vec<GammaMarket>, Vec<u8>)> {
         let start = Instant::now();
-        let res = self.fetch_gamma_markets_raw(limit, offset).await;
+        let res = self.fetch_gamma_markets_raw(limit, offset, filter).await;
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "gamma_markets").record(ms);
         match res {
@@ -213,9 +214,19 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
     let mut inserted = 0_u64;
     for w in wallets {
         let w = w?;
-        let (p, ins) = crate::ingestion::ingest_trades_for_wallet(db, pager, &w, limit).await?;
-        pages += p;
-        inserted += ins;
+        match crate::ingestion::ingest_trades_for_wallet(db, pager, &w, limit).await {
+            Ok((p, ins)) => {
+                pages += p;
+                inserted += ins;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    wallet = %w,
+                    error = %e,
+                    "trades ingestion failed for wallet; continuing to next"
+                );
+            }
+        }
     }
     metrics::counter!("evaluator_trades_ingested_total").increment(inserted);
     Ok((pages, inserted))
@@ -240,7 +251,18 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
     let mut inserted = 0_u64;
     for w in wallets {
         let w = w?;
-        let (events, raw) = pager.fetch_activity_page(&w, limit, 0).await?;
+        let fetch_result = pager.fetch_activity_page(&w, limit, 0).await;
+        let (events, raw) = match fetch_result {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    wallet = %w,
+                    error = %e,
+                    "activity ingestion failed for wallet; continuing to next"
+                );
+                continue;
+            }
+        };
         let url = pager.activity_url(&w, limit, 0);
         db.conn.execute(
             "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
@@ -306,7 +328,18 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
     let mut inserted = 0_u64;
     for w in wallets {
         let w = w?;
-        let (positions, raw) = pager.fetch_positions_page(&w, limit, 0).await?;
+        let fetch_result = pager.fetch_positions_page(&w, limit, 0).await;
+        let (positions, raw) = match fetch_result {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    wallet = %w,
+                    error = %e,
+                    "positions snapshot failed for wallet; continuing to next"
+                );
+                continue;
+            }
+        };
         let url = pager.positions_url(&w, limit, 0);
         db.conn.execute(
             "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
@@ -374,7 +407,18 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
     let mut inserted = 0_u64;
     for m in markets_iter {
         let condition_id = m?;
-        let (holder_resp, raw_h) = holders.fetch_holders(&condition_id, per_market).await?;
+        let fetch_result = holders.fetch_holders(&condition_id, per_market).await;
+        let (holder_resp, raw_h) = match fetch_result {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    condition_id = %condition_id,
+                    error = %e,
+                    "holders snapshot failed for market; continuing to next"
+                );
+                continue;
+            }
+        };
         let url = holders.holders_url(&condition_id, per_market);
         db.conn.execute(
             "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
@@ -564,6 +608,7 @@ pub trait GammaMarketsPager {
         &self,
         limit: u32,
         offset: u32,
+        filter: &GammaFilter,
     ) -> impl std::future::Future<Output = Result<(Vec<GammaMarket>, Vec<u8>)>> + Send;
 }
 
@@ -615,8 +660,22 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
     let limit = 100_u32;
     let mut all: Vec<MarketCandidate> = Vec::new();
 
+    // Build server-side filter from config to avoid fetching thousands of dead markets.
+    let tomorrow = (chrono::Utc::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let filter = GammaFilter {
+        closed: Some(false),
+        liquidity_num_min: Some(cfg.market_scoring.min_liquidity_usdc),
+        volume_num_min: Some(cfg.market_scoring.min_daily_volume_usdc),
+        end_date_min: Some(tomorrow),
+        ..Default::default()
+    };
+
     loop {
-        let (markets, raw) = pager.fetch_gamma_markets_page(limit, offset).await?;
+        let (markets, raw) = pager
+            .fetch_gamma_markets_page(limit, offset, &filter)
+            .await?;
         let page_len = markets.len();
         let url = pager.gamma_markets_url(limit, offset);
         db.conn.execute(
@@ -632,18 +691,30 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
             let Some(condition_id) = m.condition_id.clone() else {
                 continue;
             };
-            let Some(title) = m.title.clone() else {
+            // Gamma API uses `question` for the market title; fall back to `title`.
+            let title = m
+                .question
+                .clone()
+                .or_else(|| m.title.clone())
+                .unwrap_or_default();
+            if title.is_empty() {
                 continue;
-            };
+            }
             let liquidity = m
                 .liquidity
                 .as_deref()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(0.0);
+            // Use 24h volume for daily scoring; fall back to total volume.
             let volume_24h = m
-                .volume
+                .volume_24hr
                 .as_deref()
                 .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| {
+                    m.volume
+                        .as_deref()
+                        .and_then(|s| s.parse::<f64>().ok())
+                })
                 .unwrap_or(0.0);
 
             // Gamma doesn't reliably provide these for MVP. Keep 0 to let liquidity/volume dominate.
@@ -870,6 +941,7 @@ mod tests {
             &self,
             _limit: u32,
             offset: u32,
+            _filter: &GammaFilter,
         ) -> Result<(Vec<GammaMarket>, Vec<u8>)> {
             let idx = (offset / 100) as usize;
             Ok(self.pages.get(idx).cloned().unwrap_or_default())
@@ -886,25 +958,31 @@ mod tests {
         let markets = vec![
             GammaMarket {
                 condition_id: Some("0x1".to_string()),
-                title: Some("M1".to_string()),
+                question: Some("M1".to_string()),
+                title: None,
                 slug: None,
                 description: None,
                 end_date: Some(end_date.clone()),
                 liquidity: Some("5000".to_string()),
                 volume: Some("8000".to_string()),
+                volume_24hr: Some("8000".to_string()),
                 category: None,
                 event_slug: None,
+                neg_risk: None,
             },
             GammaMarket {
                 condition_id: Some("0x2".to_string()),
-                title: Some("M2".to_string()),
+                question: Some("M2".to_string()),
+                title: None,
                 slug: None,
                 description: None,
                 end_date: Some(end_date),
                 liquidity: Some("20000".to_string()),
                 volume: Some("9000".to_string()),
+                volume_24hr: Some("9000".to_string()),
                 category: None,
                 event_slug: None,
+                neg_risk: None,
             },
         ];
 

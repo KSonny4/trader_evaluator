@@ -136,6 +136,8 @@ impl CopyStrategy {
 pub struct GammaMarket {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
+    /// Gamma uses `question` for the market title; `title` may also appear.
+    pub question: Option<String>,
     pub title: Option<String>,
     pub slug: Option<String>,
     pub description: Option<String>,
@@ -143,11 +145,17 @@ pub struct GammaMarket {
     pub end_date: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string_any")]
     pub liquidity: Option<String>,
+    /// Total all-time volume.
     #[serde(default, deserialize_with = "de_opt_string_any")]
     pub volume: Option<String>,
+    /// 24-hour trading volume.
+    #[serde(rename = "volume24hr", default, deserialize_with = "de_opt_string_any")]
+    pub volume_24hr: Option<String>,
     pub category: Option<String>,
     #[serde(rename = "eventSlug")]
     pub event_slug: Option<String>,
+    #[serde(rename = "negRisk")]
+    pub neg_risk: Option<bool>,
 }
 
 /// Trade from Data API /trades.
