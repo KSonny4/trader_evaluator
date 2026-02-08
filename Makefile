@@ -20,15 +20,18 @@ build-linux:
 
 # === Deploy ===
 SERVER ?= ubuntu@YOUR_SERVER_IP
+SSH_KEY ?= ~/git_projects/trading/trading-bot.pem
 REMOTE_DIR ?= /opt/evaluator
 DB = $(REMOTE_DIR)/data/evaluator.db
-DB_CMD = ssh $(SERVER) 'sqlite3 $(DB)'
+SSH = ssh -i $(SSH_KEY)
+SCP = scp -i $(SSH_KEY)
+DB_CMD = $(SSH) $(SERVER) 'sqlite3 $(DB)'
 
 deploy: test build-linux
-	scp target/x86_64-unknown-linux-musl/release/evaluator $(SERVER):$(REMOTE_DIR)/evaluator.new
-	scp target/x86_64-unknown-linux-musl/release/web $(SERVER):$(REMOTE_DIR)/web.new
-	scp config/default.toml $(SERVER):$(REMOTE_DIR)/config/default.toml
-	ssh $(SERVER) 'mv $(REMOTE_DIR)/evaluator.new $(REMOTE_DIR)/evaluator && mv $(REMOTE_DIR)/web.new $(REMOTE_DIR)/web && sudo systemctl restart evaluator && sudo systemctl restart web'
+	$(SCP) target/x86_64-unknown-linux-musl/release/evaluator $(SERVER):$(REMOTE_DIR)/evaluator.new
+	$(SCP) target/x86_64-unknown-linux-musl/release/web $(SERVER):$(REMOTE_DIR)/web.new
+	$(SCP) config/default.toml $(SERVER):$(REMOTE_DIR)/config/default.toml
+	$(SSH) $(SERVER) 'mv $(REMOTE_DIR)/evaluator.new $(REMOTE_DIR)/evaluator && mv $(REMOTE_DIR)/web.new $(REMOTE_DIR)/web && sudo systemctl restart evaluator && sudo systemctl restart web'
 	@echo "Deployed. Waiting 10s for startup..."
 	@sleep 10
 	$(MAKE) check
