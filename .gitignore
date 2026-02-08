@@ -1,0 +1,8 @@
+.worktrees/
+target/
+data/
+.env
+.env.*
+*.swp
+.DS_Store
+
