@@ -65,7 +65,7 @@ pub async fn mirror_trade_to_paper(
     // Clone owned values for the 'static Send closure
     let proxy_wallet = proxy_wallet.to_string();
     let condition_id = condition_id.to_string();
-    let outcome = outcome.map(|s| s.to_string());
+    let outcome = outcome.map(std::string::ToString::to_string);
 
     db.call(move |conn| {
         let strategy = "mirror";
@@ -131,12 +131,12 @@ pub async fn mirror_trade_to_paper(
         let (entry_price, slippage_applied) = apply_slippage(observed_price, side, slippage_pct);
 
         conn.execute(
-            r#"
+            "
             INSERT INTO paper_trades
                 (proxy_wallet, strategy, condition_id, side, outcome, outcome_index, size_usdc, entry_price, slippage_applied, triggered_by_trade_id, status)
             VALUES
                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open')
-            "#,
+            ",
             rusqlite::params![
                 proxy_wallet,
                 strategy,
@@ -154,11 +154,11 @@ pub async fn mirror_trade_to_paper(
         // Upsert position (inline — same transaction).
         let existing: Option<(i64, f64, f64)> = conn
             .query_row(
-                r#"
+                "
                 SELECT id, total_size_usdc, avg_entry_price
                 FROM paper_positions
                 WHERE proxy_wallet = ?1 AND strategy = ?2 AND condition_id = ?3 AND side = ?4
-                "#,
+                ",
                 rusqlite::params![proxy_wallet, strategy, condition_id, side.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -179,12 +179,12 @@ pub async fn mirror_trade_to_paper(
             }
             None => {
                 conn.execute(
-                    r#"
+                    "
                     INSERT INTO paper_positions
                         (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
                     VALUES
                         (?1, ?2, ?3, ?4, ?5, ?6)
-                    "#,
+                    ",
                     rusqlite::params![
                         proxy_wallet,
                         strategy,
@@ -258,12 +258,12 @@ mod tests {
         // Existing exposure in market is $900, cap is $1,000.
         db.call(|conn| {
             conn.execute(
-                r#"
+                "
                 INSERT INTO paper_positions
                     (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
                 VALUES
                     (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
+                ",
                 rusqlite::params!["0xwallet", "mirror", "0xcond", "BUY", 900.0, 0.50],
             )?;
             Ok(())
@@ -310,12 +310,12 @@ mod tests {
         // Realized PnL is -1600 on a 10k bankroll => 16% drawdown, threshold is 15%.
         db.call(|conn| {
             conn.execute(
-                r#"
+                "
                 INSERT INTO paper_trades
                     (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
                 VALUES
                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
-                "#,
+                ",
                 rusqlite::params![
                     "0xwallet",
                     "mirror",

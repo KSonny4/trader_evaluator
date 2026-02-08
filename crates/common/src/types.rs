@@ -132,7 +132,7 @@ impl CopyStrategy {
 }
 
 /// Market from Gamma API.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GammaMarket {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
@@ -159,7 +159,7 @@ pub struct GammaMarket {
 }
 
 /// Trade from Data API /trades.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ApiTrade {
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
@@ -196,7 +196,7 @@ pub struct ApiHolder {
     pub outcome_index: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ApiHolderResponse {
     pub token: Option<String>,
     pub holders: Vec<ApiHolder>,

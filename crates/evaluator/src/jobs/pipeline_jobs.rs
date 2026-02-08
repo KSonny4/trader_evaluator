@@ -1,505 +1,16 @@
 use anyhow::Result;
 use common::config::Config;
 use common::db::AsyncDb;
-use common::types::{ApiActivity, ApiHolderResponse, ApiPosition, ApiTrade, GammaMarket};
+use common::polymarket::GammaFilter;
+#[cfg(test)]
+use common::types::{ApiHolderResponse, ApiTrade, GammaMarket};
 
 use crate::market_scoring::{rank_markets, MarketCandidate};
 use crate::paper_trading::{mirror_trade_to_paper, Side};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
 
-use common::polymarket::{GammaFilter, PolymarketClient};
-use std::time::Instant;
-
-impl GammaMarketsPager for PolymarketClient {
-    fn gamma_markets_url(&self, limit: u32, offset: u32) -> String {
-        format!(
-            "{}/markets?limit={limit}&offset={offset}",
-            self.gamma_api_url()
-        )
-    }
-
-    async fn fetch_gamma_markets_page(
-        &self,
-        limit: u32,
-        offset: u32,
-        filter: &GammaFilter,
-    ) -> Result<(Vec<GammaMarket>, Vec<u8>)> {
-        let start = Instant::now();
-        let res = self.fetch_gamma_markets_raw(limit, offset, filter).await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "gamma_markets").record(ms);
-        match res {
-            Ok(v) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "gamma_markets", "status" => "ok").increment(1);
-                Ok(v)
-            }
-            Err(e) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "gamma_markets", "status" => "error").increment(1);
-                Err(e)
-            }
-        }
-    }
-}
-
-impl HoldersFetcher for PolymarketClient {
-    fn holders_url(&self, condition_id: &str, limit: u32) -> String {
-        format!(
-            "{}/holders?market={condition_id}&limit={limit}",
-            self.data_api_url()
-        )
-    }
-
-    async fn fetch_holders(
-        &self,
-        condition_id: &str,
-        limit: u32,
-    ) -> Result<(Vec<ApiHolderResponse>, Vec<u8>)> {
-        let start = Instant::now();
-        let res = self.fetch_holders_raw(condition_id, limit).await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "holders").record(ms);
-        match res {
-            Ok(v) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "holders", "status" => "ok").increment(1);
-                Ok(v)
-            }
-            Err(e) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "holders", "status" => "error").increment(1);
-                Err(e)
-            }
-        }
-    }
-}
-
-impl MarketTradesFetcher for PolymarketClient {
-    fn market_trades_url(&self, condition_id: &str, limit: u32, offset: u32) -> String {
-        self.trades_url_any(None, Some(condition_id), limit, offset)
-    }
-
-    async fn fetch_market_trades_page(
-        &self,
-        condition_id: &str,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(Vec<ApiTrade>, Vec<u8>)> {
-        let start = Instant::now();
-        let res = self
-            .fetch_trades_raw_any(None, Some(condition_id), limit, offset)
-            .await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "market_trades").record(ms);
-        match res {
-            Ok(v) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "market_trades", "status" => "ok").increment(1);
-                Ok(v)
-            }
-            Err(e) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "market_trades", "status" => "error").increment(1);
-                Err(e)
-            }
-        }
-    }
-}
-
-impl crate::ingestion::TradesPager for PolymarketClient {
-    fn trades_url(&self, user: &str, limit: u32, offset: u32) -> String {
-        self.trades_url_any(Some(user), None, limit, offset)
-    }
-
-    async fn fetch_trades_page(
-        &self,
-        user: &str,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(Vec<ApiTrade>, Vec<u8>)> {
-        let start = Instant::now();
-        let res = self
-            .fetch_trades_raw_any(Some(user), None, limit, offset)
-            .await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "user_trades").record(ms);
-        match res {
-            Ok(v) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "user_trades", "status" => "ok").increment(1);
-                Ok(v)
-            }
-            Err(e) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "user_trades", "status" => "error").increment(1);
-                Err(e)
-            }
-        }
-    }
-}
-
-impl ActivityPager for PolymarketClient {
-    fn activity_url(&self, user: &str, limit: u32, offset: u32) -> String {
-        format!(
-            "{}/activity?user={user}&limit={limit}&offset={offset}",
-            self.data_api_url()
-        )
-    }
-
-    async fn fetch_activity_page(
-        &self,
-        user: &str,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(Vec<ApiActivity>, Vec<u8>)> {
-        let start = Instant::now();
-        let res = self.fetch_activity_raw(user, limit, offset).await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "activity").record(ms);
-        match res {
-            Ok(v) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "activity", "status" => "ok").increment(1);
-                Ok(v)
-            }
-            Err(e) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "activity", "status" => "error").increment(1);
-                Err(e)
-            }
-        }
-    }
-}
-
-impl PositionsPager for PolymarketClient {
-    fn positions_url(&self, user: &str, limit: u32, offset: u32) -> String {
-        format!(
-            "{}/positions?user={user}&limit={limit}&offset={offset}",
-            self.data_api_url()
-        )
-    }
-
-    async fn fetch_positions_page(
-        &self,
-        user: &str,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(Vec<ApiPosition>, Vec<u8>)> {
-        let start = Instant::now();
-        let res = self.fetch_positions_raw(user, limit, offset).await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "positions").record(ms);
-        match res {
-            Ok(v) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "positions", "status" => "ok").increment(1);
-                Ok(v)
-            }
-            Err(e) => {
-                metrics::counter!("evaluator_api_requests_total", "endpoint" => "positions", "status" => "error").increment(1);
-                Err(e)
-            }
-        }
-    }
-}
-
-pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
-    db: &AsyncDb,
-    pager: &P,
-    limit: u32,
-) -> Result<(u64, u64)> {
-    let wallets: Vec<String> = db
-        .call(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT proxy_wallet
-                FROM wallets
-                WHERE is_active = 1
-                ORDER BY discovered_at DESC
-                LIMIT 500
-                "#,
-            )?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-
-    let mut pages = 0_u64;
-    let mut inserted = 0_u64;
-    for w in wallets {
-        match crate::ingestion::ingest_trades_for_wallet(db, pager, &w, limit).await {
-            Ok((p, ins)) => {
-                pages += p;
-                inserted += ins;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    wallet = %w,
-                    error = %e,
-                    "trades ingestion failed for wallet; continuing to next"
-                );
-            }
-        }
-    }
-    metrics::counter!("evaluator_trades_ingested_total").increment(inserted);
-    Ok((pages, inserted))
-}
-
-pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
-    db: &AsyncDb,
-    pager: &P,
-    limit: u32,
-) -> Result<u64> {
-    let wallets: Vec<String> = db
-        .call(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT proxy_wallet
-                FROM wallets
-                WHERE is_active = 1
-                ORDER BY discovered_at DESC
-                LIMIT 500
-                "#,
-            )?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-
-    let mut inserted = 0_u64;
-    for w in wallets {
-        let fetch_result = pager.fetch_activity_page(&w, limit, 0).await;
-        let (events, _raw) = match fetch_result {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    wallet = %w,
-                    error = %e,
-                    "activity ingestion failed for wallet; continuing to next"
-                );
-                continue;
-            }
-        };
-
-        let page_inserted = db
-            .call(move |conn| {
-                let tx = conn.transaction()?;
-
-                let mut ins = 0_u64;
-                for e in events {
-                    let proxy_wallet = match e.proxy_wallet.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let activity_type = match e.activity_type.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let timestamp = e.timestamp.unwrap_or(0);
-                    let raw_json = serde_json::to_string(&e).unwrap_or_default();
-                    let changed = tx.execute(
-                        r#"
-                        INSERT OR IGNORE INTO activity_raw
-                            (proxy_wallet, condition_id, activity_type, size, usdc_size, price, side, outcome, outcome_index, timestamp, transaction_hash, raw_json)
-                        VALUES
-                            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                        "#,
-                        rusqlite::params![
-                            proxy_wallet,
-                            e.condition_id,
-                            activity_type,
-                            e.size.and_then(|s| s.parse::<f64>().ok()),
-                            e.usdc_size.and_then(|s| s.parse::<f64>().ok()),
-                            e.price.and_then(|s| s.parse::<f64>().ok()),
-                            e.side,
-                            e.outcome,
-                            e.outcome_index,
-                            timestamp,
-                            e.transaction_hash,
-                            raw_json,
-                        ],
-                    )?;
-                    ins += changed as u64;
-                }
-                tx.commit()?;
-                Ok(ins)
-            })
-            .await?;
-
-        inserted += page_inserted;
-    }
-
-    Ok(inserted)
-}
-
-pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
-    db: &AsyncDb,
-    pager: &P,
-    limit: u32,
-) -> Result<u64> {
-    let wallets: Vec<String> = db
-        .call(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT proxy_wallet
-                FROM wallets
-                WHERE is_active = 1
-                ORDER BY discovered_at DESC
-                LIMIT 500
-                "#,
-            )?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-
-    let mut inserted = 0_u64;
-    for w in wallets {
-        let fetch_result = pager.fetch_positions_page(&w, limit, 0).await;
-        let (positions, _raw) = match fetch_result {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    wallet = %w,
-                    error = %e,
-                    "positions snapshot failed for wallet; continuing to next"
-                );
-                continue;
-            }
-        };
-
-        let page_inserted = db
-            .call(move |conn| {
-                let tx = conn.transaction()?;
-
-                let mut ins = 0_u64;
-                for p in positions {
-                    let proxy_wallet = match p.proxy_wallet.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let condition_id = match p.condition_id.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let size = match p.size.as_deref().and_then(|s| s.parse::<f64>().ok()) {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    let raw_json = serde_json::to_string(&p).unwrap_or_default();
-                    let changed = tx.execute(
-                        r#"
-                        INSERT INTO positions_snapshots
-                            (proxy_wallet, condition_id, asset, size, avg_price, current_value, cash_pnl, percent_pnl, outcome, outcome_index, raw_json)
-                        VALUES
-                            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                        "#,
-                        rusqlite::params![
-                            proxy_wallet,
-                            condition_id,
-                            p.asset,
-                            size,
-                            p.avg_price.and_then(|s| s.parse::<f64>().ok()),
-                            p.current_value.and_then(|s| s.parse::<f64>().ok()),
-                            p.cash_pnl.and_then(|s| s.parse::<f64>().ok()),
-                            p.percent_pnl.and_then(|s| s.parse::<f64>().ok()),
-                            p.outcome,
-                            p.outcome_index,
-                            raw_json,
-                        ],
-                    )?;
-                    ins += changed as u64;
-                }
-                tx.commit()?;
-                Ok(ins)
-            })
-            .await?;
-
-        inserted += page_inserted;
-    }
-
-    Ok(inserted)
-}
-
-pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
-    db: &AsyncDb,
-    holders: &H,
-    per_market: u32,
-) -> Result<u64> {
-    let markets: Vec<String> = db
-        .call(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT condition_id
-                FROM market_scores_daily
-                WHERE score_date = date('now')
-                ORDER BY rank ASC
-                LIMIT 20
-                "#,
-            )?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
-
-    let mut inserted = 0_u64;
-    for condition_id in markets {
-        let fetch_result = holders.fetch_holders(&condition_id, per_market).await;
-        let (holder_resp, _raw_h) = match fetch_result {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    condition_id = %condition_id,
-                    error = %e,
-                    "holders snapshot failed for market; continuing to next"
-                );
-                continue;
-            }
-        };
-        let cid = condition_id.clone();
-
-        let page_inserted = db
-            .call(move |conn| {
-                let tx = conn.transaction()?;
-
-                let mut ins = 0_u64;
-                for r in holder_resp {
-                    let token = r.token.clone();
-                    for h in r.holders {
-                        let Some(proxy_wallet) = h.proxy_wallet else {
-                            continue;
-                        };
-                        let Some(amount) = h.amount else {
-                            continue;
-                        };
-                        let changed = tx.execute(
-                            r#"
-                            INSERT INTO holders_snapshots
-                                (condition_id, token, proxy_wallet, amount, outcome_index, pseudonym)
-                            VALUES
-                                (?1, ?2, ?3, ?4, ?5, ?6)
-                            "#,
-                            rusqlite::params![
-                                cid,
-                                token,
-                                proxy_wallet,
-                                amount,
-                                h.outcome_index,
-                                h.pseudonym
-                            ],
-                        )?;
-                        ins += changed as u64;
-                    }
-                }
-                tx.commit()?;
-                Ok(ins)
-            })
-            .await?;
-
-        inserted += page_inserted;
-    }
-
-    Ok(inserted)
-}
+use super::fetcher_traits::*;
 
 pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     // Read unprocessed trades from DB.
@@ -515,14 +26,14 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     let rows: Vec<TradeRow> = db
         .call(|conn| {
             let mut stmt = conn.prepare(
-                r#"
+                "
                 SELECT tr.id, tr.proxy_wallet, tr.condition_id, tr.side, tr.price, tr.outcome, tr.outcome_index
                 FROM trades_raw tr
                 LEFT JOIN paper_trades pt ON pt.triggered_by_trade_id = tr.id
                 WHERE pt.id IS NULL
                 ORDER BY tr.id ASC
                 LIMIT 500
-                "#,
+                ",
             )?;
             let rows = stmt
                 .query_map([], |row| {
@@ -590,6 +101,15 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
 }
 
 pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    struct ScoreRow {
+        proxy_wallet: String,
+        window_days: i64,
+        wscore: f64,
+        edge_score: f64,
+        consistency_score: f64,
+        roi_pct: f64,
+    }
+
     let today = chrono::Utc::now().date_naive().to_string();
 
     let w = WScoreWeights {
@@ -605,13 +125,13 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     let pnl_data: Vec<(String, i64, f64)> = db
         .call(move |conn| {
             let mut stmt = conn.prepare(
-                r#"
+                "
                 SELECT proxy_wallet
                 FROM wallets
                 WHERE is_active = 1
                 ORDER BY discovered_at DESC
                 LIMIT 500
-                "#,
+                ",
             )?;
             let wallets: Vec<String> = stmt
                 .query_map([], |row| row.get::<_, String>(0))?
@@ -624,12 +144,12 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
 
             for wallet in &wallets {
                 for &wd in &windows_c {
-                    let window = format!("-{} days", wd);
+                    let window = format!("-{wd} days");
                     let pnl: Option<f64> = pnl_stmt.query_row(
                         rusqlite::params![wallet, window],
                         |row| row.get(0),
                     )?;
-                    results.push((wallet.clone(), wd as i64, pnl.unwrap_or(0.0)));
+                    results.push((wallet.clone(), i64::from(wd), pnl.unwrap_or(0.0)));
                 }
             }
             Ok(results)
@@ -637,15 +157,6 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         .await?;
 
     // Compute scores in Rust (no DB needed).
-    struct ScoreRow {
-        proxy_wallet: String,
-        window_days: i64,
-        wscore: f64,
-        edge_score: f64,
-        consistency_score: f64,
-        roi_pct: f64,
-    }
-
     let mut score_rows = Vec::with_capacity(pnl_data.len());
     for (wallet, window_days, pnl) in &pnl_data {
         let roi_pct = if bankroll > 0.0 {
@@ -675,7 +186,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
             let mut ins = 0_u64;
             for r in &score_rows {
                 tx.execute(
-                    r#"
+                    "
                     INSERT INTO wallet_scores_daily
                         (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score, paper_roi_pct, recommended_follow_mode)
                     VALUES
@@ -686,7 +197,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
                         consistency_score = excluded.consistency_score,
                         paper_roi_pct = excluded.paper_roi_pct,
                         recommended_follow_mode = excluded.recommended_follow_mode
-                    "#,
+                    ",
                     rusqlite::params![
                         r.proxy_wallet,
                         today,
@@ -708,102 +219,11 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     Ok(inserted)
 }
 
-pub trait GammaMarketsPager {
-    #[allow(dead_code)]
-    fn gamma_markets_url(&self, limit: u32, offset: u32) -> String;
-    fn fetch_gamma_markets_page(
-        &self,
-        limit: u32,
-        offset: u32,
-        filter: &GammaFilter,
-    ) -> impl std::future::Future<Output = Result<(Vec<GammaMarket>, Vec<u8>)>> + Send;
-}
-
-pub trait HoldersFetcher {
-    #[allow(dead_code)]
-    fn holders_url(&self, condition_id: &str, limit: u32) -> String;
-    fn fetch_holders(
-        &self,
-        condition_id: &str,
-        limit: u32,
-    ) -> impl std::future::Future<Output = Result<(Vec<ApiHolderResponse>, Vec<u8>)>> + Send;
-}
-
-pub trait MarketTradesFetcher {
-    #[allow(dead_code)]
-    fn market_trades_url(&self, condition_id: &str, limit: u32, offset: u32) -> String;
-    fn fetch_market_trades_page(
-        &self,
-        condition_id: &str,
-        limit: u32,
-        offset: u32,
-    ) -> impl std::future::Future<Output = Result<(Vec<ApiTrade>, Vec<u8>)>> + Send;
-}
-
-pub trait ActivityPager {
-    #[allow(dead_code)]
-    fn activity_url(&self, user: &str, limit: u32, offset: u32) -> String;
-    fn fetch_activity_page(
-        &self,
-        user: &str,
-        limit: u32,
-        offset: u32,
-    ) -> impl std::future::Future<Output = Result<(Vec<ApiActivity>, Vec<u8>)>> + Send;
-}
-
-pub trait PositionsPager {
-    #[allow(dead_code)]
-    fn positions_url(&self, user: &str, limit: u32, offset: u32) -> String;
-    fn fetch_positions_page(
-        &self,
-        user: &str,
-        limit: u32,
-        offset: u32,
-    ) -> impl std::future::Future<Output = Result<(Vec<ApiPosition>, Vec<u8>)>> + Send;
-}
-
-/// Run a WAL checkpoint to fold the WAL file back into the main database.
-///
-/// Without periodic checkpointing, the WAL file grows unbounded (we observed
-/// 6.5 GB after 28 hours). TRUNCATE mode resets the WAL to zero bytes after
-/// checkpointing all pages.
-pub async fn run_wal_checkpoint_once(db: &AsyncDb) -> Result<(i64, i64)> {
-    db.call(|conn| {
-        let mut stmt = conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)")?;
-        let (busy, log, checkpointed) = stmt.query_row([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        if busy != 0 {
-            tracing::warn!(
-                busy,
-                log,
-                checkpointed,
-                "WAL checkpoint: database was busy, partial checkpoint"
-            );
-            metrics::counter!("evaluator_wal_checkpoint_total", "status" => "busy").increment(1);
-        } else {
-            tracing::info!(log, checkpointed, "WAL checkpoint complete");
-            metrics::counter!("evaluator_wal_checkpoint_total", "status" => "ok").increment(1);
-        }
-        metrics::gauge!("evaluator_wal_checkpoint_pages").set(checkpointed as f64);
-        Ok((log, checkpointed))
-    })
-    .await
-}
-
 pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
     db: &AsyncDb,
     pager: &P,
     cfg: &Config,
 ) -> Result<u64> {
-    let mut offset = 0_u32;
-    let limit = 100_u32;
-    let mut all: Vec<MarketCandidate> = Vec::new();
-
     // Extra fields from GammaMarket for the full DB upsert (not in MarketCandidate).
     #[derive(Clone)]
     struct MarketDbRow {
@@ -817,6 +237,10 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
         category: Option<String>,
         event_slug: Option<String>,
     }
+
+    let mut offset = 0_u32;
+    let limit = 100_u32;
+    let mut all: Vec<MarketCandidate> = Vec::new();
 
     // Build server-side filter from config to avoid fetching thousands of dead markets.
     let tomorrow = (chrono::Utc::now() + chrono::Duration::days(1))
@@ -912,7 +336,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
 
             for r in &page_db_rows {
                 tx.execute(
-                    r#"
+                    "
                     INSERT INTO markets
                         (condition_id, title, slug, description, end_date, liquidity, volume, category, event_slug, last_updated_at)
                     VALUES
@@ -927,7 +351,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                         category = excluded.category,
                         event_slug = excluded.event_slug,
                         last_updated_at = datetime('now')
-                    "#,
+                    ",
                     rusqlite::params![
                         r.condition_id,
                         r.title,
@@ -969,7 +393,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
             let mut ins = 0_u64;
             for (condition_id, mscore, rank) in ranked_data {
                 let changed = tx.execute(
-                    r#"
+                    "
                     INSERT INTO market_scores_daily
                         (condition_id, score_date, mscore, rank)
                     VALUES
@@ -977,7 +401,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                     ON CONFLICT(condition_id, score_date) DO UPDATE SET
                         mscore = excluded.mscore,
                         rank = excluded.rank
-                    "#,
+                    ",
                     rusqlite::params![condition_id, today, mscore, rank],
                 )?;
                 ins += changed as u64;
@@ -1000,13 +424,13 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
     let markets: Vec<String> = db
         .call(|conn| {
             let mut stmt = conn.prepare(
-                r#"
+                "
                 SELECT condition_id
                 FROM market_scores_daily
                 WHERE score_date = date('now')
                 ORDER BY rank ASC
                 LIMIT 20
-                "#,
+                ",
             )?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))?
@@ -1068,12 +492,12 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
                 let mut ins = 0_u64;
                 for (proxy_wallet, discovered_from) in wallets_to_insert {
                     let changed = tx.execute(
-                        r#"
+                        "
                         INSERT OR IGNORE INTO wallets
                             (proxy_wallet, discovered_from, discovered_market, is_active)
                         VALUES
                             (?1, ?2, ?3, 1)
-                        "#,
+                        ",
                         rusqlite::params![proxy_wallet, discovered_from, cid],
                     )?;
                     ins += changed as u64;
@@ -1117,6 +541,7 @@ fn compute_days_to_expiry(end_date: Option<&str>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     struct FakeGammaPager {
         pages: Vec<(Vec<GammaMarket>, Vec<u8>)>,
     }
@@ -1145,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_market_scoring_persists_ranked_rows() {
-        let cfg = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         let end_date = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
@@ -1241,7 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_wallet_discovery_inserts_wallets() {
-        let cfg = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         db.call(|conn| {
@@ -1266,7 +691,7 @@ mod tests {
                     outcome_index: Some(0),
                 }],
             }],
-            raw: br#"[]"#.to_vec(),
+            raw: b"[]".to_vec(),
         };
 
         let trades = FakeMarketTradesFetcher {
@@ -1352,7 +777,7 @@ mod tests {
                     name: None,
                 },
             ],
-            raw: br#"[]"#.to_vec(),
+            raw: b"[]".to_vec(),
         };
 
         let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
@@ -1368,63 +793,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_trades_ingestion_inserts_rows() {
-        let db = AsyncDb::open(":memory:").await.unwrap();
-
-        db.call(|conn| {
-            conn.execute(
-                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
-                rusqlite::params!["0xw"],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-        struct OnePagePager;
-        impl crate::ingestion::TradesPager for OnePagePager {
-            fn trades_url(&self, user: &str, limit: u32, offset: u32) -> String {
-                format!("https://data-api.polymarket.com/trades?user={user}&limit={limit}&offset={offset}")
-            }
-            async fn fetch_trades_page(
-                &self,
-                _user: &str,
-                _limit: u32,
-                offset: u32,
-            ) -> Result<(Vec<ApiTrade>, Vec<u8>)> {
-                if offset > 0 {
-                    return Ok((vec![], br#"[]"#.to_vec()));
-                }
-                Ok((
-                    vec![ApiTrade {
-                        proxy_wallet: Some("0xw".to_string()),
-                        condition_id: Some("0xcond".to_string()),
-                        transaction_hash: Some("0xtx1".to_string()),
-                        size: Some("1".to_string()),
-                        price: Some("0.5".to_string()),
-                        timestamp: Some(1),
-                        asset: None,
-                        title: None,
-                        slug: None,
-                        outcome: Some("YES".to_string()),
-                        outcome_index: Some(0),
-                        side: Some("BUY".to_string()),
-                        pseudonym: None,
-                        name: None,
-                    }],
-                    br#"[{"page":1}]"#.to_vec(),
-                ))
-            }
-        }
-
-        let pager = OnePagePager;
-        let (_pages, inserted) = run_trades_ingestion_once(&db, &pager, 100).await.unwrap();
-        assert_eq!(inserted, 1);
-    }
-
-    #[tokio::test]
     async fn test_run_paper_tick_creates_paper_trades() {
-        let cfg = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         db.call(|conn| {
@@ -1433,12 +803,12 @@ mod tests {
                 rusqlite::params!["0xw"],
             )?;
             conn.execute(
-                r#"
+                "
                 INSERT INTO trades_raw
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                 VALUES
                     (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx1', '{}')
-                "#,
+                ",
                 rusqlite::params!["0xw", "0xcond"],
             )?;
             Ok(())
@@ -1460,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_wallet_scoring_inserts_wallet_scores() {
-        let cfg = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         db.call(|conn| {
@@ -1469,12 +839,12 @@ mod tests {
                 rusqlite::params!["0xw"],
             )?;
             conn.execute(
-                r#"
+                "
                 INSERT INTO paper_trades
                     (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
                 VALUES
                     (?1, 'mirror', ?2, 'BUY', 100.0, 0.5, 'settled_win', 50.0, datetime('now'), datetime('now'))
-                "#,
+                ",
                 rusqlite::params!["0xw", "0xcond"],
             )?;
             Ok(())

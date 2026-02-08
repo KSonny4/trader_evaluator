@@ -27,3 +27,54 @@ askama = "0.15"
 tower-http = { version = "0.6", features = ["fs"] }
 tower = { version = "0.5", features = ["util"] }
 base64 = "0.22"
+
+# === Workspace-wide lint configuration ===
+# These lints enforce clean architecture. Run `cargo clippy` to check.
+# Lints here interact with `-- -D warnings` in make test, so only
+# enable lints the codebase already passes.
+[workspace.lints.clippy]
+too_many_lines = "warn"           # threshold in clippy.toml (250, ratchet to 100)
+type_complexity = "warn"
+large_enum_variant = "warn"
+module_inception = "warn"
+needless_pass_by_value = "warn"
+
+# Zero-violation regression guards — prevent future regressions at zero cost
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+map_err_ignore = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+fn_to_numeric_cast_any = "deny"
+rc_buffer = "warn"
+rc_mutex = "deny"
+undocumented_unsafe_blocks = "deny"
+float_cmp_const = "deny"
+lossy_float_literal = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+redundant_type_annotations = "warn"
+large_stack_arrays = "warn"
+large_futures = "warn"
+significant_drop_tightening = "warn"
+significant_drop_in_scrutinee = "warn"
+derive_partial_eq_without_eq = "warn"
+mutex_atomic = "warn"
+
+# TODO: Enable after cleanup sprints:
+# cognitive_complexity = "warn"               # 1 function exceeds threshold (31/25)
+# unwrap_used = "warn"                        # 200+ violations
+# expect_used = "warn"                        # 3 violations
+
+# Auto-fixed, now enforced
+uninlined_format_args = "warn"
+needless_raw_strings = "warn"
+semicolon_if_nothing_returned = "warn"
+cast_lossless = "warn"
+redundant_closure_for_method_calls = "warn"
+map_unwrap_or = "warn"
+manual_let_else = "warn"
+items_after_statements = "warn"
+
+[workspace.lints.rust]
+unused_must_use = "deny"

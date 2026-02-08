@@ -36,9 +36,10 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
 }
 
 pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
-    let db_size_mb = std::fs::metadata(db_path)
-        .map(|m| format!("{:.1}", m.len() as f64 / 1_048_576.0))
-        .unwrap_or_else(|_| "?".to_string());
+    let db_size_mb = std::fs::metadata(db_path).map_or_else(
+        |_| "?".to_string(),
+        |m| format!("{:.1}", m.len() as f64 / 1_048_576.0),
+    );
 
     // Determine phase from data presence
     let has_scores: bool = conn
@@ -132,7 +133,7 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
     let mut jobs = Vec::new();
     for (name, short, table, ts_col, expected_interval_secs) in job_defs {
         let last_run: Option<String> = conn
-            .query_row(&format!("SELECT MAX({}) FROM {}", ts_col, table), [], |r| {
+            .query_row(&format!("SELECT MAX({ts_col}) FROM {table}"), [], |r| {
                 r.get(0)
             })
             .unwrap_or(None);
@@ -287,23 +288,17 @@ pub fn tracking_health(conn: &Connection) -> Result<Vec<TrackingHealth>> {
     let mut result = Vec::new();
     for (label, table, ts_col) in data_types {
         let count_1h: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE {} > datetime('now', '-1 hour')",
-                table, ts_col
-            ),
+            &format!("SELECT COUNT(*) FROM {table} WHERE {ts_col} > datetime('now', '-1 hour')"),
             [],
             |r| r.get(0),
         )?;
         let count_24h: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE {} > datetime('now', '-1 day')",
-                table, ts_col
-            ),
+            &format!("SELECT COUNT(*) FROM {table} WHERE {ts_col} > datetime('now', '-1 day')"),
             [],
             |r| r.get(0),
         )?;
         let last: Option<String> = conn
-            .query_row(&format!("SELECT MAX({}) FROM {}", ts_col, table), [], |r| {
+            .query_row(&format!("SELECT MAX({ts_col}) FROM {table}"), [], |r| {
                 r.get(0)
             })
             .unwrap_or(None);
@@ -380,8 +375,8 @@ pub fn paper_summary(conn: &Connection, bankroll: f64) -> Result<PaperSummary> {
         "text-red-400"
     };
     let sign = if total_pnl >= 0.0 { "+" } else { "" };
-    let pnl_display = format!("{}${:.2}", sign, total_pnl);
-    let bankroll_display = format!("${:.0}", bankroll);
+    let pnl_display = format!("{sign}${total_pnl:.2}");
+    let bankroll_display = format!("${bankroll:.0}");
     Ok(PaperSummary {
         total_pnl,
         pnl_display,
@@ -431,7 +426,7 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
             let pnl_display = match pnl {
                 Some(p) => {
                     let sign = if p >= 0.0 { "+" } else { "" };
-                    format!("{}${:.2}", sign, p)
+                    format!("{sign}${p:.2}")
                 }
                 None => "-".to_string(),
             };
@@ -448,8 +443,8 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
                 market_title: row.get(1)?,
                 side,
                 side_color,
-                size_display: format!("${:.2}", size_usdc),
-                price_display: format!("{:.3}", entry_price),
+                size_display: format!("${size_usdc:.2}"),
+                price_display: format!("{entry_price:.3}"),
                 status,
                 status_color,
                 pnl,
@@ -498,16 +493,16 @@ pub fn top_rankings(conn: &Connection, window_days: i64, limit: usize) -> Result
                 proxy_wallet: wallet.clone(),
                 wallet_short: shorten_wallet(&wallet),
                 wscore,
-                wscore_display: format!("{:.2}", wscore),
+                wscore_display: format!("{wscore:.2}"),
                 wscore_pct: format!("{:.0}", wscore * 100.0),
                 edge_score,
-                edge_display: format!("{:.2}", edge_score),
+                edge_display: format!("{edge_score:.2}"),
                 consistency_score,
-                consistency_display: format!("{:.2}", consistency_score),
+                consistency_display: format!("{consistency_score:.2}"),
                 follow_mode: row.get(4)?,
                 trade_count: row.get(5)?,
                 paper_pnl,
-                pnl_display: format!("{}${:.2}", sign, paper_pnl),
+                pnl_display: format!("{sign}${paper_pnl:.2}"),
                 pnl_color,
             })
         })?

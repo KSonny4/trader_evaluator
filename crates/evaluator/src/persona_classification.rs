@@ -60,11 +60,11 @@ impl ExclusionReason {
 
     pub fn metric_value(&self) -> f64 {
         match self {
-            Self::TooYoung { age_days, .. } => *age_days as f64,
-            Self::TooFewTrades { total, .. } => *total as f64,
+            Self::TooYoung { age_days, .. } => f64::from(*age_days),
+            Self::TooFewTrades { total, .. } => f64::from(*total),
             Self::Inactive {
                 days_since_last, ..
-            } => *days_since_last as f64,
+            } => f64::from(*days_since_last),
             Self::ExecutionMaster {
                 execution_pnl_ratio,
                 ..
@@ -79,9 +79,9 @@ impl ExclusionReason {
 
     pub fn threshold(&self) -> f64 {
         match self {
-            Self::TooYoung { min_required, .. } => *min_required as f64,
-            Self::TooFewTrades { min_required, .. } => *min_required as f64,
-            Self::Inactive { max_allowed, .. } => *max_allowed as f64,
+            Self::TooYoung { min_required, .. } => f64::from(*min_required),
+            Self::TooFewTrades { min_required, .. } => f64::from(*min_required),
+            Self::Inactive { max_allowed, .. } => f64::from(*max_allowed),
             Self::ExecutionMaster { threshold, .. } => *threshold,
             Self::TailRiskSeller {
                 loss_multiplier_threshold,
@@ -157,7 +157,7 @@ pub fn record_exclusion(
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Persona {
     InformedSpecialist,
     ConsistentGeneralist,
@@ -198,7 +198,7 @@ pub fn detect_informed_specialist(
     if total_resolved == 0 {
         return None;
     }
-    let win_rate = features.win_count as f64 / total_resolved as f64;
+    let win_rate = f64::from(features.win_count) / f64::from(total_resolved);
     if win_rate < min_win_rate {
         return None;
     }
@@ -325,7 +325,7 @@ pub fn detect_consistent_generalist(
     if total_resolved == 0 {
         return None;
     }
-    let win_rate = features.win_count as f64 / total_resolved as f64;
+    let win_rate = f64::from(features.win_count) / f64::from(total_resolved);
     if win_rate < min_win_rate || win_rate > max_win_rate {
         return None;
     }

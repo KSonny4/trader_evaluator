@@ -1,0 +1,15 @@
+# Clippy configuration — enforce clean architecture
+# See: https://rust-lang.github.io/rust-clippy/master/index.html
+
+# Functions over 250 lines must be split.
+# Ratchet plan: 250 (now) → 150 → 100
+too-many-lines-threshold = 250
+
+# Structs/enums with too many variants indicate a design problem
+enum-variant-size-threshold = 200
+
+# Limit cognitive complexity per function
+cognitive-complexity-threshold = 25
+
+# Type complexity — deeply nested generics are hard to read
+type-complexity-threshold = 250
