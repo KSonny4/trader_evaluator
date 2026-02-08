@@ -1,5 +1,85 @@
 use serde::Deserialize;
 
+fn de_opt_string_any<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptStringAnyVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for OptStringAnyVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("null, string, number, or bool")
+        }
+
+        fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            de_opt_string_any(deserializer)
+        }
+
+        fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E>(self, v: String) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_f64<E>(self, v: f64) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+    }
+
+    deserializer.deserialize_any(OptStringAnyVisitor)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoverySource {
     Holder,
@@ -61,7 +141,9 @@ pub struct GammaMarket {
     pub description: Option<String>,
     #[serde(rename = "endDate")]
     pub end_date: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub liquidity: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub volume: Option<String>,
     pub category: Option<String>,
     #[serde(rename = "eventSlug")]
@@ -76,7 +158,9 @@ pub struct ApiTrade {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
     pub asset: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub size: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub price: Option<String>,
     pub timestamp: Option<i64>,
     pub title: Option<String>,
@@ -119,9 +203,12 @@ pub struct ApiActivity {
     pub condition_id: Option<String>,
     #[serde(rename = "type")]
     pub activity_type: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub size: Option<String>,
     #[serde(rename = "usdcSize")]
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub usdc_size: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub price: Option<String>,
     pub side: Option<String>,
     pub outcome: Option<String>,
@@ -140,14 +227,19 @@ pub struct ApiPosition {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
     pub asset: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub size: Option<String>,
     #[serde(rename = "avgPrice")]
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub avg_price: Option<String>,
     #[serde(rename = "currentValue")]
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub current_value: Option<String>,
     #[serde(rename = "cashPnl")]
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub cash_pnl: Option<String>,
     #[serde(rename = "percentPnl")]
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub percent_pnl: Option<String>,
     pub outcome: Option<String>,
     #[serde(rename = "outcomeIndex")]
@@ -157,6 +249,7 @@ pub struct ApiPosition {
 /// Leaderboard entry from Data API /v1/leaderboard.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiLeaderboardEntry {
+    #[serde(default, deserialize_with = "de_opt_string_any")]
     pub rank: Option<String>,
     #[serde(rename = "proxyWallet")]
     pub proxy_wallet: Option<String>,
