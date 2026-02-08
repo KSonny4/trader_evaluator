@@ -2,6 +2,64 @@
 
 {% block content %}
 <div class="space-y-6">
-    <p class="text-gray-400">Dashboard sections loading...</p>
+    <!-- Status Strip: polls every 30s -->
+    <div hx-get="/partials/status" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <p class="text-gray-600 text-sm">Loading status...</p>
+    </div>
+
+    <!-- Funnel Bar: polls every 30s -->
+    <div hx-get="/partials/funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <p class="text-gray-600 text-sm">Loading funnel...</p>
+    </div>
+
+    <!-- Stage 1: Markets -->
+    <details open>
+        <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
+            Stage 1: Market Discovery
+        </summary>
+        <div hx-get="/partials/markets" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading markets...</p>
+        </div>
+    </details>
+
+    <!-- Stage 2: Wallets -->
+    <details open>
+        <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
+            Stage 2: Wallet Discovery
+        </summary>
+        <div hx-get="/partials/wallets" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading wallets...</p>
+        </div>
+    </details>
+
+    <!-- Stage 3: Tracking -->
+    <details open>
+        <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
+            Stage 3: Long-Term Tracking
+        </summary>
+        <div hx-get="/partials/tracking" hx-trigger="load, every 30s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading tracking...</p>
+        </div>
+    </details>
+
+    <!-- Stage 4: Paper Copy -->
+    <details open>
+        <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
+            Stage 4: Paper Copy Engine
+        </summary>
+        <div hx-get="/partials/paper" hx-trigger="load, every 30s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading paper trades...</p>
+        </div>
+    </details>
+
+    <!-- Stage 5: Rankings -->
+    <details open>
+        <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
+            Stage 5: Wallet Rankings
+        </summary>
+        <div hx-get="/partials/rankings" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading rankings...</p>
+        </div>
+    </details>
 </div>
 {% endblock %}

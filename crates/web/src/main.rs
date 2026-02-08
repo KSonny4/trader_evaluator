@@ -448,6 +448,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_all_partials_return_200() {
+        let routes = vec![
+            "/partials/status",
+            "/partials/funnel",
+            "/partials/markets",
+            "/partials/wallets",
+            "/partials/tracking",
+            "/partials/paper",
+            "/partials/rankings",
+        ];
+        for route in routes {
+            let app = create_test_app();
+            let response = app
+                .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "Route {} did not return 200",
+                route
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_contains_htmx_partials() {
+        let app = create_router();
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("hx-get=\"/partials/status\""));
+        assert!(html.contains("hx-get=\"/partials/funnel\""));
+        assert!(html.contains("hx-get=\"/partials/markets\""));
+        assert!(html.contains("hx-get=\"/partials/wallets\""));
+        assert!(html.contains("hx-get=\"/partials/tracking\""));
+        assert!(html.contains("hx-get=\"/partials/paper\""));
+        assert!(html.contains("hx-get=\"/partials/rankings\""));
+        assert!(html.contains("every 30s"));
+        assert!(html.contains("every 60s"));
+    }
+
+    #[tokio::test]
     async fn test_rankings_partial_empty_shows_message() {
         let app = create_test_app();
         let response = app
