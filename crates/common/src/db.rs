@@ -216,6 +216,8 @@ CREATE TABLE IF NOT EXISTS wallet_features_daily (
     unique_markets INTEGER,
     avg_hold_time_hours REAL,
     max_drawdown_pct REAL,
+    trades_per_week REAL,
+    sharpe_ratio REAL,
     UNIQUE(proxy_wallet, feature_date, window_days)
 );
 
@@ -287,7 +289,8 @@ CREATE TABLE IF NOT EXISTS wallet_exclusions (
     reason TEXT NOT NULL,              -- e.g. "tail_risk_seller", "noise_trader", "too_young"
     metric_value REAL,                 -- the actual value that triggered exclusion
     threshold REAL,                    -- the threshold it was compared against
-    excluded_at TEXT NOT NULL DEFAULT (datetime('now'))
+    excluded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(proxy_wallet, reason)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);

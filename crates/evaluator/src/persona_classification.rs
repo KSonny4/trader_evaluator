@@ -25,15 +25,22 @@ pub enum ExclusionReason {
     TailRiskSeller {
         win_rate: f64,
         max_loss_ratio: f64,
+        min_win_rate_threshold: f64,
+        loss_multiplier_threshold: f64,
     },
     NoiseTrader {
         trades_per_week: f64,
         abs_roi: f64,
+        max_trades_threshold: f64,
+        max_roi_threshold: f64,
     },
     SniperInsider {
         age_days: u32,
         win_rate: f64,
         trade_count: u32,
+        max_age_threshold: u32,
+        min_win_rate_threshold: f64,
+        max_trades_threshold: u32,
     },
 }
 
@@ -76,9 +83,18 @@ impl ExclusionReason {
             Self::TooFewTrades { min_required, .. } => *min_required as f64,
             Self::Inactive { max_allowed, .. } => *max_allowed as f64,
             Self::ExecutionMaster { threshold, .. } => *threshold,
-            Self::TailRiskSeller { .. } => 0.0,
-            Self::NoiseTrader { .. } => 0.0,
-            Self::SniperInsider { .. } => 0.0,
+            Self::TailRiskSeller {
+                loss_multiplier_threshold,
+                ..
+            } => *loss_multiplier_threshold,
+            Self::NoiseTrader {
+                max_trades_threshold,
+                ..
+            } => *max_trades_threshold,
+            Self::SniperInsider {
+                min_win_rate_threshold,
+                ..
+            } => *min_win_rate_threshold,
         }
     }
 }
@@ -220,6 +236,8 @@ pub fn detect_tail_risk_seller(
         Some(ExclusionReason::TailRiskSeller {
             win_rate,
             max_loss_ratio: max_loss_vs_avg_win,
+            min_win_rate_threshold,
+            loss_multiplier_threshold,
         })
     } else {
         None
@@ -239,6 +257,8 @@ pub fn detect_noise_trader(
         Some(ExclusionReason::NoiseTrader {
             trades_per_week,
             abs_roi,
+            max_trades_threshold: max_trades_per_week,
+            max_roi_threshold: max_abs_roi,
         })
     } else {
         None
@@ -261,6 +281,9 @@ pub fn detect_sniper_insider(
             age_days: wallet_age_days,
             win_rate,
             trade_count,
+            max_age_threshold: max_age_days,
+            min_win_rate_threshold: min_win_rate,
+            max_trades_threshold: max_trades,
         })
     } else {
         None
@@ -468,6 +491,48 @@ mod tests {
     }
 
     #[test]
+    fn test_record_exclusion_replaces_not_duplicates() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Insert first exclusion
+        let reason1 = ExclusionReason::TooYoung {
+            age_days: 5,
+            min_required: 30,
+        };
+        record_exclusion(&db.conn, "0xabc", &reason1).unwrap();
+
+        // Insert same wallet+reason again with different metric
+        let reason2 = ExclusionReason::TooYoung {
+            age_days: 10,
+            min_required: 30,
+        };
+        record_exclusion(&db.conn, "0xabc", &reason2).unwrap();
+
+        // Should be 1 row, not 2 (INSERT OR REPLACE with UNIQUE constraint)
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM wallet_exclusions WHERE proxy_wallet = '0xabc' AND reason = 'STAGE1_TOO_YOUNG'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // The metric should be updated to the latest value
+        let metric: f64 = db
+            .conn
+            .query_row(
+                "SELECT metric_value FROM wallet_exclusions WHERE proxy_wallet = '0xabc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((metric - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_exclusion_reason_str_all_variants() {
         assert_eq!(
             ExclusionReason::TooYoung {
@@ -504,7 +569,9 @@ mod tests {
         assert_eq!(
             ExclusionReason::TailRiskSeller {
                 win_rate: 0.85,
-                max_loss_ratio: 8.0
+                max_loss_ratio: 8.0,
+                min_win_rate_threshold: 0.80,
+                loss_multiplier_threshold: 5.0,
             }
             .reason_str(),
             "TAIL_RISK_SELLER"
@@ -512,7 +579,9 @@ mod tests {
         assert_eq!(
             ExclusionReason::NoiseTrader {
                 trades_per_week: 60.0,
-                abs_roi: 0.005
+                abs_roi: 0.005,
+                max_trades_threshold: 50.0,
+                max_roi_threshold: 0.02,
             }
             .reason_str(),
             "NOISE_TRADER"
@@ -521,7 +590,10 @@ mod tests {
             ExclusionReason::SniperInsider {
                 age_days: 15,
                 win_rate: 0.90,
-                trade_count: 12
+                trade_count: 12,
+                max_age_threshold: 30,
+                min_win_rate_threshold: 0.85,
+                max_trades_threshold: 20,
             }
             .reason_str(),
             "SNIPER_INSIDER"
@@ -794,6 +866,8 @@ mod tests {
             Some(ExclusionReason::TailRiskSeller {
                 win_rate: 0.85,
                 max_loss_ratio: 8.0,
+                min_win_rate_threshold: 0.80,
+                loss_multiplier_threshold: 5.0,
             })
         );
     }
@@ -828,6 +902,8 @@ mod tests {
             Some(ExclusionReason::NoiseTrader {
                 trades_per_week: 60.0,
                 abs_roi: 0.005,
+                max_trades_threshold: 50.0,
+                max_roi_threshold: 0.02,
             })
         );
     }
@@ -863,6 +939,9 @@ mod tests {
                 age_days: 15,
                 win_rate: 0.90,
                 trade_count: 12,
+                max_age_threshold: 30,
+                min_win_rate_threshold: 0.85,
+                max_trades_threshold: 20,
             })
         );
     }

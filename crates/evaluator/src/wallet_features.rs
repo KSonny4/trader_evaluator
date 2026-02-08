@@ -122,8 +122,9 @@ pub fn save_wallet_features(
     conn.execute(
         "INSERT OR REPLACE INTO wallet_features_daily
          (proxy_wallet, feature_date, window_days, trade_count, win_count, loss_count,
-          total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+          total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct,
+          trades_per_week, sharpe_ratio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             features.proxy_wallet,
             feature_date,
@@ -136,6 +137,8 @@ pub fn save_wallet_features(
             features.unique_markets,
             features.avg_hold_time_hours,
             features.max_drawdown_pct,
+            features.trades_per_week,
+            features.sharpe_ratio,
         ],
     )?;
     Ok(())
@@ -220,5 +223,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+
+        // Verify trades_per_week and sharpe_ratio are persisted (not silently dropped)
+        let (tpw, sr): (f64, f64) = db
+            .conn
+            .query_row(
+                "SELECT trades_per_week, sharpe_ratio FROM wallet_features_daily WHERE proxy_wallet = '0xabc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!((tpw - 2.5).abs() < f64::EPSILON);
+        assert!((sr - 1.2).abs() < f64::EPSILON);
     }
 }
