@@ -1,0 +1,67 @@
+[general]
+mode = "paper"
+log_level = "info"
+
+[database]
+path = "data/evaluator.db"
+
+[risk]
+max_exposure_per_market_pct = 10.0     # max % of bankroll per market
+max_exposure_per_wallet_pct = 5.0      # max % of bankroll per wallet-copy
+max_daily_trades = 100                 # turnover cap
+slippage_pct = 1.0                     # conservative slippage assumption
+no_chase_adverse_move_pct = 5.0        # don't increase after 5% adverse
+portfolio_stop_drawdown_pct = 15.0     # pause if drawdown > 15%
+paper_bankroll_usdc = 10000.0
+
+[market_scoring]
+top_n_markets = 20
+min_liquidity_usdc = 1000.0
+min_daily_volume_usdc = 5000.0
+min_daily_trades = 20
+min_unique_traders = 10
+max_days_to_expiry = 90
+min_days_to_expiry = 1
+refresh_interval_secs = 86400          # daily
+weights_liquidity = 0.25
+weights_volume = 0.25
+weights_density = 0.20
+weights_whale_concentration = 0.15
+weights_time_to_expiry = 0.15
+
+[wallet_discovery]
+min_total_trades = 5                   # prune wallets with < N trades
+max_wallets_per_market = 100
+holders_per_market = 20                # Polymarket API caps at 20
+refresh_interval_secs = 86400          # daily
+
+[ingestion]
+trades_poll_interval_secs = 3600       # hourly
+activity_poll_interval_secs = 21600    # every 6 hours
+positions_poll_interval_secs = 86400   # daily
+holders_poll_interval_secs = 86400     # daily
+rate_limit_delay_ms = 200              # between API calls
+max_retries = 3
+backoff_base_ms = 1000
+
+[paper_trading]
+strategies = ["mirror"]                # later: "delay", "consensus"
+mirror_delay_secs = 0                  # 0 = immediate mirror
+position_size_usdc = 100.0             # per-trade size
+
+[wallet_scoring]
+windows_days = [7, 30, 90]
+min_trades_for_score = 10
+edge_weight = 0.30
+consistency_weight = 0.25
+market_skill_weight = 0.20
+timing_skill_weight = 0.15
+behavior_quality_weight = 0.10
+
+[observability]
+prometheus_port = 9094                 # different from trading bots (9091-9093)
+
+[polymarket]
+data_api_url = "https://data-api.polymarket.com"
+gamma_api_url = "https://gamma-api.polymarket.com"
+
