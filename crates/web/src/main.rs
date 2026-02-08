@@ -3,9 +3,13 @@ mod queries;
 
 use anyhow::Result;
 use askama::Template;
+use axum::body::Body;
 use axum::extract::State;
-use axum::response::{Html, IntoResponse};
+use axum::http::{header, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
 use axum::{routing::get, Router};
+use base64::Engine as _;
 use models::{
     FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
     WalletOverview, WalletRow,
@@ -17,6 +21,7 @@ use std::sync::Arc;
 
 pub struct AppState {
     pub db_path: PathBuf,
+    pub auth_password: Option<String>,
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -27,6 +32,51 @@ pub fn open_readonly(state: &AppState) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     Ok(conn)
+}
+
+// --- Basic Auth Middleware ---
+
+/// Returns 401 Unauthorized if auth_password is configured and credentials don't match.
+/// If auth_password is None, all requests pass through (no auth).
+async fn basic_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let password = match &state.auth_password {
+        Some(pw) => pw,
+        None => return next.run(request).await,
+    };
+
+    let auth_header = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let authenticated = auth_header
+        .and_then(|h| h.strip_prefix("Basic "))
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|decoded| {
+            // Format is "username:password" — we only check the password part
+            decoded
+                .split_once(':')
+                .is_some_and(|(_, pw)| pw == password)
+        })
+        .unwrap_or(false);
+
+    if authenticated {
+        next.run(request).await
+    } else {
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(
+                header::WWW_AUTHENTICATE,
+                "Basic realm=\"Evaluator Dashboard\"",
+            )
+            .body(Body::from("Unauthorized"))
+            .unwrap()
+    }
 }
 
 // --- Templates ---
@@ -150,6 +200,10 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/partials/tracking", get(tracking_partial))
         .route("/partials/paper", get(paper_partial))
         .route("/partials/rankings", get(rankings_partial))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            basic_auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -165,8 +219,12 @@ async fn main() -> Result<()> {
         .web
         .as_ref()
         .map_or("0.0.0.0".to_string(), |w| w.host.clone());
+    let auth_password = config.web.as_ref().and_then(|w| w.auth_password.clone());
 
-    let state = Arc::new(AppState { db_path });
+    let state = Arc::new(AppState {
+        db_path,
+        auth_password,
+    });
 
     let app = create_router_with_state(state);
     let addr: SocketAddr = format!("{}:{}", web_host, web_port).parse()?;
@@ -196,9 +254,121 @@ mod tests {
         // Leak the tempfile to keep it alive for the test
         std::mem::forget(tmp);
 
-        let state = Arc::new(AppState { db_path: path });
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: None,
+        });
         create_router_with_state(state)
     }
+
+    fn create_test_app_with_auth(password: &str) -> Router {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let db = Database::open(path.to_str().unwrap()).unwrap();
+        db.run_migrations().unwrap();
+        drop(db);
+        std::mem::forget(tmp);
+
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: Some(password.to_string()),
+        });
+        create_router_with_state(state)
+    }
+
+    fn basic_auth_header(user: &str, pass: &str) -> String {
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass));
+        format!("Basic {}", encoded)
+    }
+
+    // --- Auth tests ---
+
+    #[tokio::test]
+    async fn test_auth_returns_401_without_credentials() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_returns_401_with_wrong_password() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Authorization", basic_auth_header("admin", "wrong"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_returns_200_with_correct_password() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Authorization", basic_auth_header("admin", "secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_disabled_when_no_password() {
+        let app = create_test_app(); // auth_password: None
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_partials_also_protected() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_www_authenticate_header_present() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(www_auth.contains("Basic"));
+    }
+
+    // --- Existing tests ---
 
     #[tokio::test]
     async fn test_index_returns_200() {
@@ -532,6 +702,7 @@ mod tests {
 
         let state = Arc::new(AppState {
             db_path: db_path.into(),
+            auth_password: None,
         });
         let app = create_router_with_state(state);
 

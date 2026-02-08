@@ -15,9 +15,14 @@ sudo apt-get update -y
 sudo apt-get install -y sqlite3 ca-certificates
 
 sudo install -m 0644 -o root -g root deploy/systemd/evaluator.service /etc/systemd/system/evaluator.service
+sudo install -m 0644 -o root -g root deploy/systemd/web.service /etc/systemd/system/web.service
 sudo systemctl daemon-reload
 sudo systemctl enable evaluator
+sudo systemctl enable web
 
-echo "OK: evaluator user + directories + systemd service installed."
-echo "Next: copy binary/config to $REMOTE_DIR and run: sudo systemctl start evaluator"
-
+echo "OK: evaluator user + directories + systemd services (evaluator + web) installed."
+echo "Next: copy binary/config to $REMOTE_DIR and run:"
+echo "  sudo systemctl start evaluator"
+echo "  sudo systemctl start web"
+echo ""
+echo "For cloudflared tunnel setup, run: bash deploy/setup-cloudflared.sh"

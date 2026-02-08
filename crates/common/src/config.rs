@@ -108,6 +108,7 @@ pub struct Polymarket {
 pub struct Web {
     pub port: u16,
     pub host: String,
+    pub auth_password: Option<String>,
 }
 
 impl Config {
@@ -146,7 +147,8 @@ mod tests {
         let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
         let web = config.web.expect("web section should be present");
         assert_eq!(web.port, 8080);
-        assert_eq!(web.host, "0.0.0.0");
+        assert_eq!(web.host, "127.0.0.1");
+        assert!(web.auth_password.is_some());
     }
 
     #[test]
