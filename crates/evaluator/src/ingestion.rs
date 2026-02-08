@@ -41,9 +41,15 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         }
 
         for t in trades {
-            let tx = t.transaction_hash.clone().unwrap_or_default();
-            let proxy_wallet = t.proxy_wallet.clone().unwrap_or_default();
-            let condition_id = t.condition_id.clone().unwrap_or_default();
+            let proxy_wallet = match t.proxy_wallet.as_deref() {
+                Some(v) if !v.is_empty() => v.to_string(),
+                _ => continue, // required key missing
+            };
+            let condition_id = match t.condition_id.as_deref() {
+                Some(v) if !v.is_empty() => v.to_string(),
+                _ => continue, // required key missing
+            };
+            let tx = t.transaction_hash.clone();
 
             // Persist derived row; rely on UNIQUE constraint to deduplicate.
             let raw_json = serde_json::to_string(&t).unwrap_or_default();
@@ -191,22 +197,61 @@ mod tests {
             },
         ];
 
+        // page3 contains:
+        // - a trade with missing tx hash (should still insert, and NOT collide with other missing tx hash rows)
+        // - a trade missing required keys (should be skipped)
+        let page3 = vec![
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: None,
+                size: Some("2".to_string()),
+                price: Some("0.55".to_string()),
+                timestamp: Some(4),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+            ApiTrade {
+                proxy_wallet: None,
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xtx_skip".to_string()),
+                size: Some("2".to_string()),
+                price: Some("0.55".to_string()),
+                timestamp: Some(4),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+        ];
+
         let pager = FakeTradesPager::new(vec![
             (page1, br#"[{"page":1}]"#.to_vec()),
             (page2, br#"[{"page":2}]"#.to_vec()),
+            (page3, br#"[{"page":3}]"#.to_vec()),
             (vec![], br#"[]"#.to_vec()), // end
         ]);
 
         let (_pages, inserted) = ingest_trades_for_wallet(&db, &pager, "0xw", 2)
             .await
             .unwrap();
-        assert_eq!(inserted, 3); // tx2 inserted once
+        assert_eq!(inserted, 4); // tx2 inserted once, + tx1 + tx3 + missing-tx row; skipped row not inserted
 
         let trades_count: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(trades_count, 3);
+        assert_eq!(trades_count, 4);
 
         let raw_count: i64 = db
             .conn
@@ -214,6 +259,6 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert!(raw_count >= 2); // at least the two non-empty pages
+        assert!(raw_count >= 3); // at least the three non-empty pages
     }
 }
