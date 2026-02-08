@@ -2,18 +2,50 @@ use crate::types::{
     ApiActivity, ApiHolderResponse, ApiLeaderboardEntry, ApiPosition, ApiTrade, GammaMarket,
 };
 use anyhow::Result;
-use reqwest::Url;
+use reqwest::{Client, StatusCode, Url};
+use std::time::Duration;
 
 pub struct PolymarketClient {
     data_api_url: String,
     gamma_api_url: String,
+    client: Client,
+    rate_limit_delay: Duration,
+    max_retries: u32,
+    backoff_base: Duration,
 }
 
 impl PolymarketClient {
     pub fn new(data_api_url: &str, gamma_api_url: &str) -> Self {
+        Self::new_with_settings(
+            data_api_url,
+            gamma_api_url,
+            Duration::from_secs(15),
+            Duration::from_millis(200),
+            3,
+            Duration::from_millis(1000),
+        )
+    }
+
+    pub fn new_with_settings(
+        data_api_url: &str,
+        gamma_api_url: &str,
+        timeout: Duration,
+        rate_limit_delay: Duration,
+        max_retries: u32,
+        backoff_base: Duration,
+    ) -> Self {
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("reqwest client build failed");
+
         Self {
             data_api_url: data_api_url.trim_end_matches('/').to_string(),
             gamma_api_url: gamma_api_url.trim_end_matches('/').to_string(),
+            client,
+            rate_limit_delay,
+            max_retries,
+            backoff_base,
         }
     }
 
@@ -41,7 +73,7 @@ impl PolymarketClient {
         offset: u32,
     ) -> Result<Vec<ApiTrade>> {
         let url = self.trades_url(user, market, limit, offset);
-        let body = reqwest::get(url).await?.text().await?;
+        let body = self.get_text_with_retry(url).await?;
         Ok(serde_json::from_str(&body)?)
     }
 
@@ -57,7 +89,7 @@ impl PolymarketClient {
             qp.append_pair("market", condition_ids);
             qp.append_pair("limit", &limit.to_string());
         }
-        let body = reqwest::get(url).await?.text().await?;
+        let body = self.get_text_with_retry(url).await?;
         Ok(serde_json::from_str(&body)?)
     }
 
@@ -75,7 +107,7 @@ impl PolymarketClient {
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = reqwest::get(url).await?.text().await?;
+        let body = self.get_text_with_retry(url).await?;
         Ok(serde_json::from_str(&body)?)
     }
 
@@ -93,7 +125,7 @@ impl PolymarketClient {
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = reqwest::get(url).await?.text().await?;
+        let body = self.get_text_with_retry(url).await?;
         Ok(serde_json::from_str(&body)?)
     }
 
@@ -113,7 +145,7 @@ impl PolymarketClient {
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = reqwest::get(url).await?.text().await?;
+        let body = self.get_text_with_retry(url).await?;
         Ok(serde_json::from_str(&body)?)
     }
 
@@ -125,8 +157,67 @@ impl PolymarketClient {
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = reqwest::get(url).await?.text().await?;
+        let body = self.get_text_with_retry(url).await?;
         Ok(serde_json::from_str(&body)?)
+    }
+
+    async fn get_text_with_retry<U: IntoUrlLike>(&self, url: U) -> Result<String> {
+        let url = url.into_url()?;
+        let mut attempt: u32 = 0;
+
+        loop {
+            attempt += 1;
+            if !self.rate_limit_delay.is_zero() {
+                tokio::time::sleep(self.rate_limit_delay).await;
+            }
+
+            let req = self.client.get(url.clone());
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp.text().await?);
+                    }
+
+                    // Retry on transient statuses.
+                    if attempt <= self.max_retries
+                        && (status == StatusCode::TOO_MANY_REQUESTS
+                            || status.is_server_error()
+                            || status == StatusCode::REQUEST_TIMEOUT)
+                    {
+                        let backoff = self.backoff_base.mul_f64(2_f64.powi((attempt - 1) as i32));
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+
+                    return Err(anyhow::anyhow!("HTTP {} for {}", status, url));
+                }
+                Err(e) => {
+                    if attempt <= self.max_retries {
+                        let backoff = self.backoff_base.mul_f64(2_f64.powi((attempt - 1) as i32));
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+}
+
+trait IntoUrlLike {
+    fn into_url(self) -> Result<Url>;
+}
+
+impl IntoUrlLike for String {
+    fn into_url(self) -> Result<Url> {
+        Ok(Url::parse(&self)?)
+    }
+}
+
+impl IntoUrlLike for Url {
+    fn into_url(self) -> Result<Url> {
+        Ok(self)
     }
 }
 
