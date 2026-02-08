@@ -3,6 +3,7 @@ use common::db::AsyncDb;
 use common::types::ApiTrade;
 
 pub trait TradesPager {
+    #[allow(dead_code)]
     fn trades_url(&self, user: &str, limit: u32, offset: u32) -> String;
 
     fn fetch_trades_page(
@@ -20,13 +21,29 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
     user: &str,
     limit: u32,
 ) -> Result<(u64, u64)> {
+    // Query the latest known trade timestamp for this wallet so we can stop
+    // pagination early once we reach trades we already have.
+    let user_owned = user.to_string();
+    let max_known_ts: Option<i64> = db
+        .call(move |conn| {
+            let ts = conn
+                .query_row(
+                    "SELECT MAX(timestamp) FROM trades_raw WHERE proxy_wallet = ?1",
+                    [&user_owned],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap_or(None);
+            Ok(ts)
+        })
+        .await?;
+
     let mut offset = 0;
     let mut pages = 0_u64;
     let mut inserted = 0_u64;
 
     loop {
         let fetch_result = pager.fetch_trades_page(user, limit, offset).await;
-        let (trades, raw_body) = match fetch_result {
+        let (trades, _raw_body) = match fetch_result {
             Ok(v) => v,
             Err(e) => {
                 // Treat errors during pagination (e.g., HTTP 400 at high offsets)
@@ -43,18 +60,43 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         let page_len = trades.len();
         pages += 1;
 
-        // Save raw response bytes (unmodified) before parsing/derivation.
-        let url = pager.trades_url(user, limit, offset);
+        // Check if ALL trades on this page are at or before our latest known
+        // timestamp. If so, we've already ingested everything newer and can stop.
+        // The API returns trades in descending order (newest first), so once a
+        // full page is "old", there's nothing new beyond it.
+        //
+        // Safety: verify descending order before relying on the optimisation.
+        // If the API ever changes sort order, we fall back to full pagination.
+        let is_descending = if trades.len() >= 2 {
+            let first_ts = trades
+                .first()
+                .map(|t| t.timestamp.unwrap_or(0))
+                .unwrap_or(0);
+            let last_ts = trades.last().map(|t| t.timestamp.unwrap_or(0)).unwrap_or(0);
+            first_ts >= last_ts
+        } else {
+            true // single-element or empty page — trivially sorted
+        };
+
+        let all_known = if let Some(max_ts) = max_known_ts {
+            if !is_descending {
+                tracing::warn!(
+                    user,
+                    "trades API returned non-descending order; skipping early-stop optimisation"
+                );
+                false
+            } else {
+                !trades.is_empty() && trades.iter().all(|t| t.timestamp.unwrap_or(0) <= max_ts)
+            }
+        } else {
+            false
+        };
 
         // Batch all DB work for this page into a single db.call() closure
         // wrapped in a transaction for atomicity.
         let page_inserted = db
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                tx.execute(
-                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params!["data_api", "GET", url, raw_body],
-                )?;
 
                 let mut page_ins = 0_u64;
                 for t in trades {
@@ -101,8 +143,18 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         inserted += page_inserted;
         offset += limit;
 
-        // Stop if API returns less than a full page. This is a simple guard against
-        // accidental infinite loops during early bring-up.
+        // If all trades on this page were already known, stop — no need to
+        // fetch older pages we've already ingested.
+        if all_known {
+            tracing::debug!(
+                user,
+                offset,
+                "all trades on page already known; stopping pagination"
+            );
+            break;
+        }
+
+        // Stop if API returns less than a full page.
         if page_len < limit as usize {
             break;
         }
@@ -279,18 +331,14 @@ mod tests {
             .unwrap();
         assert_eq!(inserted, 4); // tx2 inserted once, + tx1 + tx3 + missing-tx row; skipped row not inserted
 
-        let (trades_count, raw_count): (i64, i64) = db
+        let trades_count: i64 = db
             .call(|conn| {
                 let tc = conn.query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))?;
-                let rc = conn.query_row("SELECT COUNT(*) FROM raw_api_responses", [], |row| {
-                    row.get(0)
-                })?;
-                Ok((tc, rc))
+                Ok(tc)
             })
             .await
             .unwrap();
         assert_eq!(trades_count, 4);
-        assert!(raw_count >= 3); // at least the three non-empty pages
     }
 
     #[tokio::test]
@@ -352,5 +400,161 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(trades_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_ingest_trades_stops_early_when_all_trades_already_known() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Pre-populate two trades with timestamps 100 and 200.
+        db.call(|conn| {
+            conn.execute(
+                r#"INSERT INTO trades_raw
+                   (proxy_wallet, condition_id, size, price, timestamp, transaction_hash, raw_json)
+                   VALUES ('0xw', '0xm', 10.0, 0.5, 100, '0xold1', '{}')"#,
+                [],
+            )?;
+            conn.execute(
+                r#"INSERT INTO trades_raw
+                   (proxy_wallet, condition_id, size, price, timestamp, transaction_hash, raw_json)
+                   VALUES ('0xw', '0xm', 5.0, 0.6, 200, '0xold2', '{}')"#,
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // API returns: page1 has one new trade (ts=300) + one old (ts=200),
+        // page2 has all old trades (ts=100, ts=50). We should stop after page2.
+        // Page3 should NEVER be fetched.
+        let page1 = vec![
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xnew1".to_string()),
+                size: Some("3".to_string()),
+                price: Some("0.7".to_string()),
+                timestamp: Some(300),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xold2".to_string()),
+                size: Some("5".to_string()),
+                price: Some("0.6".to_string()),
+                timestamp: Some(200),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+        ];
+        let page2 = vec![
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xold1".to_string()),
+                size: Some("10".to_string()),
+                price: Some("0.5".to_string()),
+                timestamp: Some(100),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xancient".to_string()),
+                size: Some("1".to_string()),
+                price: Some("0.4".to_string()),
+                timestamp: Some(50),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+        ];
+        // Page3 = trap: if we reach it, pagination didn't stop early.
+        let page3 = vec![
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xtrap".to_string()),
+                size: Some("99".to_string()),
+                price: Some("0.99".to_string()),
+                timestamp: Some(1),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+            ApiTrade {
+                proxy_wallet: Some("0xw".to_string()),
+                condition_id: Some("0xm".to_string()),
+                transaction_hash: Some("0xtrap2".to_string()),
+                size: Some("99".to_string()),
+                price: Some("0.99".to_string()),
+                timestamp: Some(2),
+                asset: None,
+                title: None,
+                slug: None,
+                outcome: None,
+                outcome_index: None,
+                side: None,
+                pseudonym: None,
+                name: None,
+            },
+        ];
+
+        let pager = FakeTradesPager::from_ok_pages(vec![
+            (page1, b"[]".to_vec()),
+            (page2, b"[]".to_vec()),
+            (page3, b"[]".to_vec()),
+        ]);
+
+        let (pages, inserted) = ingest_trades_for_wallet(&db, &pager, "0xw", 2)
+            .await
+            .unwrap();
+
+        // Page1 had a mix (new + old), so we continue. Page2 was all old, so we stop.
+        assert_eq!(pages, 2, "should have fetched exactly 2 pages, not 3");
+        // Only 0xnew1 (ts=300) and 0xancient (ts=50) are new inserts.
+        // 0xold1 and 0xold2 are deduped by INSERT OR IGNORE.
+        assert_eq!(inserted, 2, "should have inserted 2 new trades");
+
+        // Total in DB: 2 pre-existing + 2 new = 4
+        let total: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM trades_raw", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(total, 4);
     }
 }

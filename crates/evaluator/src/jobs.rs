@@ -264,7 +264,7 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
     let mut inserted = 0_u64;
     for w in wallets {
         let fetch_result = pager.fetch_activity_page(&w, limit, 0).await;
-        let (events, raw) = match fetch_result {
+        let (events, _raw) = match fetch_result {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -275,15 +275,10 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
                 continue;
             }
         };
-        let url = pager.activity_url(&w, limit, 0);
 
         let page_inserted = db
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                tx.execute(
-                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params!["data_api", "GET", url, raw],
-                )?;
 
                 let mut ins = 0_u64;
                 for e in events {
@@ -358,7 +353,7 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
     let mut inserted = 0_u64;
     for w in wallets {
         let fetch_result = pager.fetch_positions_page(&w, limit, 0).await;
-        let (positions, raw) = match fetch_result {
+        let (positions, _raw) = match fetch_result {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -369,15 +364,10 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
                 continue;
             }
         };
-        let url = pager.positions_url(&w, limit, 0);
 
         let page_inserted = db
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                tx.execute(
-                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params!["data_api", "GET", url, raw],
-                )?;
 
                 let mut ins = 0_u64;
                 for p in positions {
@@ -454,7 +444,7 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
     let mut inserted = 0_u64;
     for condition_id in markets {
         let fetch_result = holders.fetch_holders(&condition_id, per_market).await;
-        let (holder_resp, raw_h) = match fetch_result {
+        let (holder_resp, _raw_h) = match fetch_result {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -465,16 +455,11 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
                 continue;
             }
         };
-        let url = holders.holders_url(&condition_id, per_market);
         let cid = condition_id.clone();
 
         let page_inserted = db
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                tx.execute(
-                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params!["data_api", "GET", url, raw_h],
-                )?;
 
                 let mut ins = 0_u64;
                 for r in holder_resp {
@@ -724,6 +709,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
 }
 
 pub trait GammaMarketsPager {
+    #[allow(dead_code)]
     fn gamma_markets_url(&self, limit: u32, offset: u32) -> String;
     fn fetch_gamma_markets_page(
         &self,
@@ -734,6 +720,7 @@ pub trait GammaMarketsPager {
 }
 
 pub trait HoldersFetcher {
+    #[allow(dead_code)]
     fn holders_url(&self, condition_id: &str, limit: u32) -> String;
     fn fetch_holders(
         &self,
@@ -743,6 +730,7 @@ pub trait HoldersFetcher {
 }
 
 pub trait MarketTradesFetcher {
+    #[allow(dead_code)]
     fn market_trades_url(&self, condition_id: &str, limit: u32, offset: u32) -> String;
     fn fetch_market_trades_page(
         &self,
@@ -753,6 +741,7 @@ pub trait MarketTradesFetcher {
 }
 
 pub trait ActivityPager {
+    #[allow(dead_code)]
     fn activity_url(&self, user: &str, limit: u32, offset: u32) -> String;
     fn fetch_activity_page(
         &self,
@@ -763,6 +752,7 @@ pub trait ActivityPager {
 }
 
 pub trait PositionsPager {
+    #[allow(dead_code)]
     fn positions_url(&self, user: &str, limit: u32, offset: u32) -> String;
     fn fetch_positions_page(
         &self,
@@ -770,6 +760,39 @@ pub trait PositionsPager {
         limit: u32,
         offset: u32,
     ) -> impl std::future::Future<Output = Result<(Vec<ApiPosition>, Vec<u8>)>> + Send;
+}
+
+/// Run a WAL checkpoint to fold the WAL file back into the main database.
+///
+/// Without periodic checkpointing, the WAL file grows unbounded (we observed
+/// 6.5 GB after 28 hours). TRUNCATE mode resets the WAL to zero bytes after
+/// checkpointing all pages.
+pub async fn run_wal_checkpoint_once(db: &AsyncDb) -> Result<(i64, i64)> {
+    db.call(|conn| {
+        let mut stmt = conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        let (busy, log, checkpointed) = stmt.query_row([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        if busy != 0 {
+            tracing::warn!(
+                busy,
+                log,
+                checkpointed,
+                "WAL checkpoint: database was busy, partial checkpoint"
+            );
+            metrics::counter!("evaluator_wal_checkpoint_total", "status" => "busy").increment(1);
+        } else {
+            tracing::info!(log, checkpointed, "WAL checkpoint complete");
+            metrics::counter!("evaluator_wal_checkpoint_total", "status" => "ok").increment(1);
+        }
+        metrics::gauge!("evaluator_wal_checkpoint_pages").set(checkpointed as f64);
+        Ok((log, checkpointed))
+    })
+    .await
 }
 
 pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
@@ -808,11 +831,10 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
     };
 
     loop {
-        let (markets, raw) = pager
+        let (markets, _raw) = pager
             .fetch_gamma_markets_page(limit, offset, &filter)
             .await?;
         let page_len = markets.len();
-        let url = pager.gamma_markets_url(limit, offset);
 
         let mut page_candidates: Vec<MarketCandidate> = Vec::new();
         let mut page_db_rows: Vec<MarketDbRow> = Vec::new();
@@ -883,16 +905,10 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
             });
         }
 
-        // Upsert markets and raw response in one db.call().
-        let url_owned = url;
-        let raw_owned = raw;
+        // Upsert markets in one db.call().
 
         db.call(move |conn| {
             let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["gamma_api", "GET", url_owned, raw_owned],
-            )?;
 
             for r in &page_db_rows {
                 tx.execute(
@@ -1001,21 +1017,16 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 
     let mut inserted = 0_u64;
     for condition_id in markets {
-        let (holder_resp, raw_h) = holders
+        let (holder_resp, _raw_h) = holders
             .fetch_holders(
                 &condition_id,
                 cfg.wallet_discovery.holders_per_market as u32,
             )
             .await?;
-        let holders_url = holders.holders_url(
-            &condition_id,
-            cfg.wallet_discovery.holders_per_market as u32,
-        );
 
-        let (market_trades, raw_t) = trades
+        let (market_trades, _raw_t) = trades
             .fetch_market_trades_page(&condition_id, 200, 0)
             .await?;
-        let trades_url = trades.market_trades_url(&condition_id, 200, 0);
 
         let mut holder_wallets: Vec<HolderWallet> = Vec::new();
         for r in &holder_resp {
@@ -1053,14 +1064,6 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         let page_inserted: u64 = db
             .call(move |conn| {
                 let tx = conn.transaction()?;
-                tx.execute(
-                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params!["data_api", "GET", holders_url, raw_h],
-                )?;
-                tx.execute(
-                    "INSERT INTO raw_api_responses (api, method, url, response_body) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params!["data_api", "GET", trades_url, raw_t],
-                )?;
 
                 let mut ins = 0_u64;
                 for (proxy_wallet, discovered_from) in wallets_to_insert {
@@ -1181,22 +1184,18 @@ mod tests {
         let inserted = run_market_scoring_once(&db, &pager, &cfg).await.unwrap();
         assert!(inserted > 0);
 
-        let (cnt_scores, cnt_markets, cnt_raw): (i64, i64, i64) = db
+        let (cnt_scores, cnt_markets): (i64, i64) = db
             .call(|conn| {
                 let cs = conn.query_row("SELECT COUNT(*) FROM market_scores_daily", [], |row| {
                     row.get(0)
                 })?;
                 let cm = conn.query_row("SELECT COUNT(*) FROM markets", [], |row| row.get(0))?;
-                let cr = conn.query_row("SELECT COUNT(*) FROM raw_api_responses", [], |row| {
-                    row.get(0)
-                })?;
-                Ok((cs, cm, cr))
+                Ok((cs, cm))
             })
             .await
             .unwrap();
         assert!(cnt_scores > 0);
         assert_eq!(cnt_markets, 2);
-        assert_eq!(cnt_raw, 1);
     }
 
     struct FakeHoldersFetcher {

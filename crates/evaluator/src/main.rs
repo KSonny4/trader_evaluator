@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
     let (holders_snapshot_tx, mut holders_snapshot_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (paper_tick_tx, mut paper_tick_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (wallet_scoring_tx, mut wallet_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (wal_checkpoint_tx, mut wal_checkpoint_rx) = tokio::sync::mpsc::channel::<()>(8);
 
     let _scheduler_handles = scheduler::start(vec![
         scheduler::JobSpec {
@@ -124,6 +125,12 @@ async fn main() -> Result<()> {
             interval: std::time::Duration::from_secs(86400),
             tick: wallet_scoring_tx,
             run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "wal_checkpoint".to_string(),
+            interval: std::time::Duration::from_secs(300), // every 5 minutes
+            tick: wal_checkpoint_tx,
+            run_immediately: false, // no need to checkpoint at startup
         },
     ]);
 
@@ -239,6 +246,20 @@ async fn main() -> Result<()> {
                 match jobs::run_wallet_scoring_once(&db, cfg.as_ref()).await {
                     Ok(inserted) => tracing::info!(inserted, "wallet_scoring done"),
                     Err(e) => tracing::error!(error = %e, "wallet_scoring failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let db = db.clone();
+        async move {
+            while wal_checkpoint_rx.recv().await.is_some() {
+                match jobs::run_wal_checkpoint_once(&db).await {
+                    Ok((log, checkpointed)) => {
+                        tracing::info!(log, checkpointed, "wal_checkpoint done")
+                    }
+                    Err(e) => tracing::error!(error = %e, "wal_checkpoint failed"),
                 }
             }
         }

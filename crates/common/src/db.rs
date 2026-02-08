@@ -78,6 +78,11 @@ impl Database {
 }
 
 const SCHEMA: &str = r#"
+-- WARNING: INSERTs into raw_api_responses were removed (2026-02-08 storage crisis).
+-- The table stored full HTTP response bodies (~300KB each, ~3.7 GB after 28 hours).
+-- Per-row raw_json columns in trades_raw, activity_raw, etc. already provide
+-- equivalent replay capability. Do NOT re-enable bulk raw response storage
+-- without disk budget analysis. See deploy/purge-raw.sh for cleanup.
 CREATE TABLE IF NOT EXISTS raw_api_responses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     api TEXT NOT NULL,                 -- data_api, gamma_api
