@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+mod cli;
 mod ingestion;
 mod market_scoring;
 mod metrics;
@@ -19,15 +20,21 @@ async fn main() -> Result<()> {
 
     tracing::info!("trader_evaluator starting");
 
-    let _prom_handle = metrics::install_prometheus(config.observability.prometheus_port)?;
-    metrics::describe();
-
     if let Some(parent) = std::path::Path::new(&config.database.path).parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let db = common::db::Database::open(&config.database.path)?;
     db.run_migrations()?;
+
+    let cmd = cli::parse_args(std::env::args()).map_err(anyhow::Error::msg)?;
+    if cmd != cli::Command::Run {
+        cli::run_command(&db, cmd)?;
+        return Ok(());
+    }
+
+    let _prom_handle = metrics::install_prometheus(config.observability.prometheus_port)?;
+    metrics::describe();
 
     // Scheduler wires the periodic ticks. Actual job logic will be implemented in later tasks.
     let (market_scoring_tx, mut market_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
