@@ -8,6 +8,9 @@ pub struct Database {
 impl Database {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // busy_timeout via the rusqlite API — makes SQLite retry for up to 30s
+        // when the database is locked by another connection (concurrent jobs).
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         Ok(Self { conn })
     }

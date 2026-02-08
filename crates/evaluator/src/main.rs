@@ -37,7 +37,6 @@ async fn main() -> Result<()> {
     let _prom_handle = metrics::install_prometheus(config.observability.prometheus_port)?;
     metrics::describe();
 
-    let db_path = config.database.path.clone();
     let cfg = std::rc::Rc::new(config);
 
     let local = tokio::task::LocalSet::new();
@@ -52,93 +51,31 @@ async fn main() -> Result<()> {
                 std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
             ));
 
-            // ── Bootstrap: run pipeline sequentially on first startup ──
-            // Jobs depend on each other's output:
-            //   market_scoring → wallet_discovery → ingestion/holders → paper/scoring
-            // Running them simultaneously on a fresh DB produces 0 rows everywhere.
-            tracing::info!("bootstrap: running pipeline sequentially");
+            // Single shared DB connection — avoids SQLite write-lock contention
+            // on the single-threaded LocalSet (busy_timeout can't help when the
+            // thread is blocked waiting for itself to release the lock).
+            let db =
+                std::rc::Rc::new(common::db::Database::open(&cfg.database.path).expect("open db"));
+            db.run_migrations().expect("migrations");
 
-            // Phase 1: Market scoring (fetches from Gamma API, populates markets + market_scores_daily)
-            {
-                let db = common::db::Database::open(&db_path).expect("open db");
-                db.run_migrations().expect("migrations");
-                match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
-                    Ok(n) => tracing::info!(inserted = n, "bootstrap: market_scoring done"),
-                    Err(e) => tracing::error!(error = %e, "bootstrap: market_scoring failed"),
-                }
+            // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
+            tracing::info!("bootstrap: seeding markets and wallets");
+
+            match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+                Ok(n) => tracing::info!(inserted = n, "bootstrap: market_scoring done"),
+                Err(e) => tracing::error!(error = %e, "bootstrap: market_scoring failed"),
             }
 
-            // Phase 2: Wallet discovery (reads market_scores_daily, populates wallets)
-            {
-                let db = common::db::Database::open(&db_path).expect("open db");
-                db.run_migrations().expect("migrations");
-                match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
-                    .await
-                {
-                    Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
-                    Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
-                }
-            }
-
-            // Phase 3: Ingestion (reads wallets, populates trades/activity/positions/holders)
-            {
-                let db = common::db::Database::open(&db_path).expect("open db");
-                db.run_migrations().expect("migrations");
-
-                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
-                    Ok((_pages, ins)) => {
-                        tracing::info!(inserted = ins, "bootstrap: trades_ingestion done")
-                    }
-                    Err(e) => tracing::error!(error = %e, "bootstrap: trades_ingestion failed"),
-                }
-                match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
-                    Ok(ins) => {
-                        tracing::info!(inserted = ins, "bootstrap: activity_ingestion done")
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "bootstrap: activity_ingestion failed")
-                    }
-                }
-                match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
-                    Ok(ins) => {
-                        tracing::info!(inserted = ins, "bootstrap: positions_snapshot done")
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "bootstrap: positions_snapshot failed")
-                    }
-                }
-                match jobs::run_holders_snapshot_once(
-                    &db,
-                    api.as_ref(),
-                    cfg.wallet_discovery.holders_per_market as u32,
-                )
+            match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
                 .await
-                {
-                    Ok(ins) => {
-                        tracing::info!(inserted = ins, "bootstrap: holders_snapshot done")
-                    }
-                    Err(e) => tracing::error!(error = %e, "bootstrap: holders_snapshot failed"),
-                }
-            }
-
-            // Phase 4: Paper trading + scoring (reads trades_raw + wallets)
             {
-                let db = common::db::Database::open(&db_path).expect("open db");
-                db.run_migrations().expect("migrations");
-
-                match jobs::run_paper_tick_once(&db, cfg.as_ref()) {
-                    Ok(ins) => tracing::info!(inserted = ins, "bootstrap: paper_tick done"),
-                    Err(e) => tracing::error!(error = %e, "bootstrap: paper_tick failed"),
-                }
-                match jobs::run_wallet_scoring_once(&db, cfg.as_ref()) {
-                    Ok(ins) => tracing::info!(inserted = ins, "bootstrap: wallet_scoring done"),
-                    Err(e) => tracing::error!(error = %e, "bootstrap: wallet_scoring failed"),
-                }
+                Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
+                Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
             }
 
-            tracing::info!("bootstrap complete — starting periodic scheduler");
+            tracing::info!("bootstrap done — starting scheduler (ingestion runs immediately)");
 
-            // ── Periodic scheduler: all jobs on intervals (no run_immediately) ──
+            // ── Periodic scheduler ──
             let (market_scoring_tx, mut market_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
             let (wallet_discovery_tx, mut wallet_discovery_rx) =
                 tokio::sync::mpsc::channel::<()>(8);
@@ -176,7 +113,7 @@ async fn main() -> Result<()> {
                         cfg.ingestion.trades_poll_interval_secs,
                     ),
                     tick: trades_ingestion_tx,
-                    run_immediately: false,
+                    run_immediately: true,
                 },
                 scheduler::JobSpec {
                     name: "activity_ingestion".to_string(),
@@ -184,7 +121,7 @@ async fn main() -> Result<()> {
                         cfg.ingestion.activity_poll_interval_secs,
                     ),
                     tick: activity_ingestion_tx,
-                    run_immediately: false,
+                    run_immediately: true,
                 },
                 scheduler::JobSpec {
                     name: "positions_snapshot".to_string(),
@@ -192,7 +129,7 @@ async fn main() -> Result<()> {
                         cfg.ingestion.positions_poll_interval_secs,
                     ),
                     tick: positions_snapshot_tx,
-                    run_immediately: false,
+                    run_immediately: true,
                 },
                 scheduler::JobSpec {
                     name: "holders_snapshot".to_string(),
@@ -200,33 +137,28 @@ async fn main() -> Result<()> {
                         cfg.ingestion.holders_poll_interval_secs,
                     ),
                     tick: holders_snapshot_tx,
-                    run_immediately: false,
+                    run_immediately: true,
                 },
                 scheduler::JobSpec {
                     name: "paper_tick".to_string(),
                     interval: std::time::Duration::from_secs(60),
                     tick: paper_tick_tx,
-                    run_immediately: false,
+                    run_immediately: true,
                 },
                 scheduler::JobSpec {
                     name: "wallet_scoring".to_string(),
                     interval: std::time::Duration::from_secs(86400),
                     tick: wallet_scoring_tx,
-                    run_immediately: false,
+                    run_immediately: true,
                 },
             ]);
 
             tokio::task::spawn_local({
                 let api = api.clone();
                 let cfg = cfg.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while market_scoring_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "market_scoring migrations failed");
-                            continue;
-                        }
                         match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
                             Ok(n) => tracing::info!(inserted = n, "market_scoring done"),
                             Err(e) => tracing::error!(error = %e, "market_scoring failed"),
@@ -238,14 +170,9 @@ async fn main() -> Result<()> {
             tokio::task::spawn_local({
                 let api = api.clone();
                 let cfg = cfg.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while wallet_discovery_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "wallet_discovery migrations failed");
-                            continue;
-                        }
                         match jobs::run_wallet_discovery_once(
                             &db,
                             api.as_ref(),
@@ -263,14 +190,9 @@ async fn main() -> Result<()> {
 
             tokio::task::spawn_local({
                 let api = api.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while trades_ingestion_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "trades_ingestion migrations failed");
-                            continue;
-                        }
                         match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
                             Ok((_pages, inserted)) => {
                                 tracing::info!(inserted, "trades_ingestion done")
@@ -283,14 +205,9 @@ async fn main() -> Result<()> {
 
             tokio::task::spawn_local({
                 let api = api.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while activity_ingestion_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "activity_ingestion migrations failed");
-                            continue;
-                        }
                         match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
                             Ok(inserted) => tracing::info!(inserted, "activity_ingestion done"),
                             Err(e) => tracing::error!(error = %e, "activity_ingestion failed"),
@@ -301,14 +218,9 @@ async fn main() -> Result<()> {
 
             tokio::task::spawn_local({
                 let api = api.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while positions_snapshot_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "positions_snapshot migrations failed");
-                            continue;
-                        }
                         match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
                             Ok(inserted) => tracing::info!(inserted, "positions_snapshot done"),
                             Err(e) => tracing::error!(error = %e, "positions_snapshot failed"),
@@ -320,14 +232,9 @@ async fn main() -> Result<()> {
             tokio::task::spawn_local({
                 let api = api.clone();
                 let cfg = cfg.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while holders_snapshot_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "holders_snapshot migrations failed");
-                            continue;
-                        }
                         match jobs::run_holders_snapshot_once(
                             &db,
                             api.as_ref(),
@@ -344,14 +251,9 @@ async fn main() -> Result<()> {
 
             tokio::task::spawn_local({
                 let cfg = cfg.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while paper_tick_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "paper_tick migrations failed");
-                            continue;
-                        }
                         match jobs::run_paper_tick_once(&db, cfg.as_ref()) {
                             Ok(inserted) => tracing::info!(inserted, "paper_tick done"),
                             Err(e) => tracing::error!(error = %e, "paper_tick failed"),
@@ -362,14 +264,9 @@ async fn main() -> Result<()> {
 
             tokio::task::spawn_local({
                 let cfg = cfg.clone();
-                let db_path = db_path.clone();
+                let db = db.clone();
                 async move {
                     while wallet_scoring_rx.recv().await.is_some() {
-                        let db = common::db::Database::open(&db_path).expect("open db");
-                        if let Err(e) = db.run_migrations() {
-                            tracing::error!(error = %e, "wallet_scoring migrations failed");
-                            continue;
-                        }
                         match jobs::run_wallet_scoring_once(&db, cfg.as_ref()) {
                             Ok(inserted) => tracing::info!(inserted, "wallet_scoring done"),
                             Err(e) => tracing::error!(error = %e, "wallet_scoring failed"),
