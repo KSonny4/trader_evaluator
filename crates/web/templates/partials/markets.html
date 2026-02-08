@@ -1,0 +1,39 @@
+{% if markets.is_empty() %}
+<p class="text-gray-500 text-sm italic">No markets scored today.</p>
+{% else %}
+<div class="overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-gray-500 border-b border-gray-800">
+                <th class="text-left py-2 px-2">#</th>
+                <th class="text-left py-2 px-2">Market</th>
+                <th class="text-right py-2 px-2">MScore</th>
+                <th class="text-right py-2 px-2">Liquidity</th>
+                <th class="text-right py-2 px-2">Volume</th>
+                <th class="text-right py-2 px-2">Density</th>
+                <th class="text-right py-2 px-2">Expiry</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in markets %}
+            <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+                <td class="py-1.5 px-2 text-gray-500">{{ m.rank }}</td>
+                <td class="py-1.5 px-2 max-w-xs truncate" title="{{ m.title }}">{{ m.title }}</td>
+                <td class="py-1.5 px-2 text-right">
+                    <div class="flex items-center justify-end gap-2">
+                        <div class="w-16 bg-gray-800 rounded-full h-1.5">
+                            <div class="bg-blue-500 h-1.5 rounded-full" style="width: {{ m.mscore * 100.0 }}%"></div>
+                        </div>
+                        <span class="text-gray-300 w-10 text-right">{{ "{:.2}"|format(m.mscore) }}</span>
+                    </div>
+                </td>
+                <td class="py-1.5 px-2 text-right text-gray-400">${{ "{:.0}"|format(m.liquidity) }}</td>
+                <td class="py-1.5 px-2 text-right text-gray-400">${{ "{:.0}"|format(m.volume) }}</td>
+                <td class="py-1.5 px-2 text-right text-gray-400">{{ "{:.2}"|format(m.density_score) }}</td>
+                <td class="py-1.5 px-2 text-right text-gray-500">{% match m.end_date %}{% when Some with (d) %}{{ d }}{% when None %}-{% endmatch %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

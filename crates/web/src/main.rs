@@ -7,7 +7,7 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse};
 use axum::{routing::get, Router};
-use models::{FunnelStage, SystemStatus};
+use models::{FunnelStage, MarketRow, SystemStatus, TrackingHealth, WalletOverview, WalletRow};
 use rusqlite::{Connection, OpenFlags};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -45,6 +45,26 @@ struct FunnelBarTemplate {
     stages: Vec<FunnelStage>,
 }
 
+#[derive(Template)]
+#[template(path = "partials/markets.html")]
+struct MarketsTemplate {
+    markets: Vec<MarketRow>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/wallets.html")]
+struct WalletsTemplate {
+    overview: WalletOverview,
+    wallets: Vec<WalletRow>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/tracking.html")]
+struct TrackingTemplate {
+    health: Vec<TrackingHealth>,
+    stale: Vec<String>,
+}
+
 // --- Handlers ---
 
 async fn index() -> impl IntoResponse {
@@ -65,6 +85,26 @@ async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Html(FunnelBarTemplate { stages }.to_string())
 }
 
+async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let markets = queries::top_markets_today(&conn).unwrap();
+    Html(MarketsTemplate { markets }.to_string())
+}
+
+async fn wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let overview = queries::wallet_overview(&conn).unwrap();
+    let wallets = queries::recent_wallets(&conn, 20).unwrap();
+    Html(WalletsTemplate { overview, wallets }.to_string())
+}
+
+async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let health = queries::tracking_health(&conn).unwrap();
+    let stale = queries::stale_wallets(&conn).unwrap();
+    Html(TrackingTemplate { health, stale }.to_string())
+}
+
 // --- Router ---
 
 pub fn create_router() -> Router {
@@ -77,6 +117,9 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/partials/status", get(status_partial))
         .route("/partials/funnel", get(funnel_partial))
+        .route("/partials/markets", get(markets_partial))
+        .route("/partials/wallets", get(wallets_partial))
+        .route("/partials/tracking", get(tracking_partial))
         .with_state(state)
 }
 
@@ -216,5 +259,112 @@ mod tests {
         assert!(html.contains("Scored"));
         assert!(html.contains("Wallets"));
         assert!(html.contains("Ranked"));
+    }
+
+    #[tokio::test]
+    async fn test_markets_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/markets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_markets_partial_empty_shows_message() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/markets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("No markets scored today"));
+    }
+
+    #[tokio::test]
+    async fn test_wallets_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/wallets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_wallets_partial_contains_overview() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/wallets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Total"));
+        assert!(html.contains("Active"));
+        assert!(html.contains("Holders"));
+    }
+
+    #[tokio::test]
+    async fn test_tracking_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/tracking")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_tracking_partial_contains_data_types() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/tracking")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Trades"));
+        assert!(html.contains("Activity"));
+        assert!(html.contains("Positions"));
+        assert!(html.contains("Holders"));
     }
 }

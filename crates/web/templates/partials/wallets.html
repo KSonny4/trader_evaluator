@@ -1,0 +1,68 @@
+<div class="space-y-4">
+    <!-- Overview cards -->
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-200">{{ overview.total }}</div>
+            <div class="text-xs text-gray-500">Total</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-green-400">{{ overview.active }}</div>
+            <div class="text-xs text-gray-500">Active</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-300">{{ overview.from_holder }}</div>
+            <div class="text-xs text-gray-500">Holders</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-300">{{ overview.from_trader }}</div>
+            <div class="text-xs text-gray-500">Traders</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-300">{{ overview.from_leaderboard }}</div>
+            <div class="text-xs text-gray-500">Leaderboard</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-blue-400">{{ overview.discovered_today }}</div>
+            <div class="text-xs text-gray-500">Today</div>
+        </div>
+    </div>
+
+    <!-- Recent wallets table -->
+    {% if wallets.is_empty() %}
+    <p class="text-gray-500 text-sm italic">No wallets discovered yet.</p>
+    {% else %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-gray-500 border-b border-gray-800">
+                    <th class="text-left py-2 px-2">Wallet</th>
+                    <th class="text-left py-2 px-2">Source</th>
+                    <th class="text-left py-2 px-2">Market</th>
+                    <th class="text-right py-2 px-2">Trades</th>
+                    <th class="text-center py-2 px-2">Active</th>
+                    <th class="text-right py-2 px-2">Discovered</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for w in wallets %}
+                <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+                    <td class="py-1.5 px-2 font-mono text-gray-300" title="{{ w.proxy_wallet }}">{{ w.wallet_short }}</td>
+                    <td class="py-1.5 px-2">
+                        <span class="px-1.5 py-0.5 rounded text-xs
+                            {% if w.discovered_from == "HOLDER" %}bg-purple-900/50 text-purple-300
+                            {% else if w.discovered_from == "TRADER_RECENT" %}bg-blue-900/50 text-blue-300
+                            {% else %}bg-gray-800 text-gray-400{% endif %}">
+                            {{ w.discovered_from }}
+                        </span>
+                    </td>
+                    <td class="py-1.5 px-2 max-w-xs truncate text-gray-400">{% match w.discovered_market_title %}{% when Some with (t) %}{{ t }}{% when None %}-{% endmatch %}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-400">{{ w.trade_count }}</td>
+                    <td class="py-1.5 px-2 text-center">{% if w.is_active %}<span class="text-green-400">&#9679;</span>{% else %}<span class="text-gray-600">&#9679;</span>{% endif %}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-500">{{ w.discovered_at }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
