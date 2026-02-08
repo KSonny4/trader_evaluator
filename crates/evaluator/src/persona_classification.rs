@@ -226,6 +226,25 @@ pub fn detect_tail_risk_seller(
     }
 }
 
+/// Detects high-churn wallets with no statistical edge.
+/// High frequency + near-zero ROI = noise.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_noise_trader(
+    trades_per_week: f64,
+    abs_roi: f64,
+    max_trades_per_week: f64,
+    max_abs_roi: f64,
+) -> Option<ExclusionReason> {
+    if trades_per_week > max_trades_per_week && abs_roi < max_abs_roi {
+        Some(ExclusionReason::NoiseTrader {
+            trades_per_week,
+            abs_roi,
+        })
+    } else {
+        None
+    }
+}
+
 /// Detect the Patient Accumulator persona: long holds, low trading frequency.
 /// Returns Some(PatientAccumulator) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -773,6 +792,40 @@ mod tests {
     fn test_tail_risk_seller_boundary_at_thresholds() {
         // Exactly at both thresholds — should NOT trigger (> not >=)
         let result = detect_tail_risk_seller(0.80, 5.0, 0.80, 5.0);
+        assert_eq!(result, None);
+    }
+
+    // --- Task 10: Noise Trader ---
+
+    #[test]
+    fn test_detect_noise_trader() {
+        // 60 trades/week with near-zero ROI = pure noise
+        let result = detect_noise_trader(60.0, 0.005, 50.0, 0.02);
+        assert_eq!(
+            result,
+            Some(ExclusionReason::NoiseTrader {
+                trades_per_week: 60.0,
+                abs_roi: 0.005,
+            })
+        );
+    }
+
+    #[test]
+    fn test_not_noise_low_frequency() {
+        let result = detect_noise_trader(10.0, 0.005, 50.0, 0.02);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_not_noise_significant_roi() {
+        let result = detect_noise_trader(60.0, 0.10, 50.0, 0.02);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_noise_trader_boundary_at_thresholds() {
+        // Exactly at both thresholds — should NOT trigger (> and < are strict)
+        let result = detect_noise_trader(50.0, 0.02, 50.0, 0.02);
         assert_eq!(result, None);
     }
 }
