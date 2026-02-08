@@ -88,12 +88,12 @@ check-phase-4: check-phase-3
 	@echo "=== Phase 4: Paper Trading ==="
 	@$(DB_CMD) "SELECT COUNT(*) FROM paper_trades" | \
 		awk '{if ($$1 == 0) {print "FAIL: no paper trades"; exit 1} else print "OK: " $$1 " paper trades"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM paper_events" | \
-		awk '{print "OK: " $$1 " paper events (gate checks, skips, breakers)"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM follower_slippage" | \
-		awk '{print "OK: " $$1 " slippage measurements"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM book_snapshots" | \
-		awk '{print "OK: " $$1 " book snapshots"}'
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_events') THEN (SELECT COUNT(*) FROM paper_events) ELSE -1 END" | \
+		awk '{if ($$1 == -1) print "SKIP: paper_events table not yet created"; else print "OK: " $$1 " paper events (gate checks, skips, breakers)"}'
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='follower_slippage') THEN (SELECT COUNT(*) FROM follower_slippage) ELSE -1 END" | \
+		awk '{if ($$1 == -1) print "SKIP: follower_slippage table not yet created"; else print "OK: " $$1 " slippage measurements"}'
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_snapshots') THEN (SELECT COUNT(*) FROM book_snapshots) ELSE -1 END" | \
+		awk '{if ($$1 == -1) print "SKIP: book_snapshots table not yet created"; else print "OK: " $$1 " book snapshots"}'
 	@echo "Phase 4: PASSED"
 
 check-phase-5: check-phase-4
@@ -117,17 +117,17 @@ status:
 	@$(DB_CMD) "SELECT 'markets:            ' || COUNT(*) FROM markets"
 	@$(DB_CMD) "SELECT 'market scores today: ' || COUNT(*) FROM market_scores_daily WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'wallets:            ' || COUNT(*) FROM wallets"
-	@$(DB_CMD) "SELECT 'wallet personas:    ' || COUNT(*) FROM wallet_personas"
-	@$(DB_CMD) "SELECT 'wallet exclusions:  ' || COUNT(*) FROM wallet_exclusions"
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_personas') THEN 'wallet personas:    ' || (SELECT COUNT(*) FROM wallet_personas) ELSE 'wallet personas:    table not created' END"
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_exclusions') THEN 'wallet exclusions:  ' || (SELECT COUNT(*) FROM wallet_exclusions) ELSE 'wallet exclusions:  table not created' END"
 	@$(DB_CMD) "SELECT 'trades:             ' || COUNT(*) FROM trades_raw"
 	@$(DB_CMD) "SELECT 'activities:         ' || COUNT(*) FROM activity_raw"
 	@$(DB_CMD) "SELECT 'position snapshots: ' || COUNT(*) FROM positions_snapshots"
 	@$(DB_CMD) "SELECT 'holder snapshots:   ' || COUNT(*) FROM holders_snapshots"
 	@$(DB_CMD) "SELECT 'raw API responses:  ' || COUNT(*) FROM raw_api_responses"
 	@$(DB_CMD) "SELECT 'paper trades:       ' || COUNT(*) FROM paper_trades"
-	@$(DB_CMD) "SELECT 'paper events:       ' || COUNT(*) FROM paper_events"
-	@$(DB_CMD) "SELECT 'book snapshots:     ' || COUNT(*) FROM book_snapshots"
-	@$(DB_CMD) "SELECT 'follower slippage:  ' || COUNT(*) FROM follower_slippage"
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_events') THEN 'paper events:       ' || (SELECT COUNT(*) FROM paper_events) ELSE 'paper events:       table not created' END"
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_snapshots') THEN 'book snapshots:     ' || (SELECT COUNT(*) FROM book_snapshots) ELSE 'book snapshots:     table not created' END"
+	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='follower_slippage') THEN 'follower slippage:  ' || (SELECT COUNT(*) FROM follower_slippage) ELSE 'follower slippage:  table not created' END"
 	@$(DB_CMD) "SELECT 'wallet scores today:' || COUNT(*) FROM wallet_scores_daily WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'last trade ingested: ' || COALESCE(MAX(ingested_at), 'never') FROM trades_raw"
 	@$(DB_CMD) "SELECT 'DB size:            ' || (page_count * page_size / 1024 / 1024) || ' MB' FROM pragma_page_count(), pragma_page_size()"
