@@ -189,6 +189,37 @@ pub fn detect_informed_specialist(
     Some(Persona::InformedSpecialist)
 }
 
+/// Detect the Consistent Generalist persona: many markets, steady returns, low drawdown.
+/// Returns Some(ConsistentGeneralist) if criteria are met, None otherwise.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_consistent_generalist(
+    features: &WalletFeatures,
+    min_markets: u32,
+    min_win_rate: f64,
+    max_win_rate: f64,
+    max_drawdown: f64,
+    min_sharpe: f64,
+) -> Option<Persona> {
+    if features.unique_markets < min_markets {
+        return None;
+    }
+    let total_resolved = features.win_count + features.loss_count;
+    if total_resolved == 0 {
+        return None;
+    }
+    let win_rate = features.win_count as f64 / total_resolved as f64;
+    if win_rate < min_win_rate || win_rate > max_win_rate {
+        return None;
+    }
+    if features.max_drawdown_pct > max_drawdown {
+        return None;
+    }
+    if features.sharpe_ratio < min_sharpe {
+        return None;
+    }
+    Some(Persona::ConsistentGeneralist)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +511,96 @@ mod tests {
         );
         assert_eq!(Persona::ConsistentGeneralist.follow_mode(), "mirror");
         assert_eq!(Persona::PatientAccumulator.follow_mode(), "mirror_slow");
+    }
+
+    fn make_generalist_features(
+        unique_markets: u32,
+        win_count: u32,
+        loss_count: u32,
+        max_drawdown_pct: f64,
+        sharpe_ratio: f64,
+    ) -> WalletFeatures {
+        WalletFeatures {
+            proxy_wallet: "0xgen".to_string(),
+            window_days: 30,
+            trade_count: win_count + loss_count,
+            win_count,
+            loss_count,
+            total_pnl: 200.0,
+            avg_position_size: 100.0,
+            unique_markets,
+            avg_hold_time_hours: 12.0,
+            max_drawdown_pct,
+            trades_per_week: 25.0,
+            sharpe_ratio,
+        }
+    }
+
+    #[test]
+    fn test_detect_consistent_generalist() {
+        // 25 markets, 55% win rate, 10% drawdown, 1.2 sharpe
+        let features = make_generalist_features(25, 55, 45, 10.0, 1.2);
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, Some(Persona::ConsistentGeneralist));
+    }
+
+    #[test]
+    fn test_not_generalist_low_sharpe() {
+        let features = make_generalist_features(25, 55, 45, 10.0, 0.5); // sharpe < 1.0
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_generalist_too_few_markets() {
+        let features = make_generalist_features(15, 55, 45, 10.0, 1.2); // 15 < 20
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_generalist_win_rate_too_high() {
+        // 75% win rate > max 60% — too good, might be tail risk seller
+        let features = make_generalist_features(25, 75, 25, 10.0, 1.2);
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_generalist_win_rate_too_low() {
+        // 40% win rate < min 52%
+        let features = make_generalist_features(25, 40, 60, 10.0, 1.2);
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_generalist_high_drawdown() {
+        let features = make_generalist_features(25, 55, 45, 20.0, 1.2); // 20% > 15%
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_generalist_zero_resolved() {
+        let features = make_generalist_features(25, 0, 0, 10.0, 1.2);
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_generalist_boundary_exact_min_markets() {
+        // Exactly 20 markets = minimum threshold
+        let features = make_generalist_features(20, 55, 45, 10.0, 1.2);
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, Some(Persona::ConsistentGeneralist));
+    }
+
+    #[test]
+    fn test_generalist_boundary_exact_max_drawdown() {
+        // Exactly 15% drawdown = at threshold, should pass (not >)
+        let features = make_generalist_features(25, 55, 45, 15.0, 1.2);
+        let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
+        assert_eq!(persona, Some(Persona::ConsistentGeneralist));
     }
 }
