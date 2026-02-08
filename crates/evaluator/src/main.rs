@@ -7,8 +7,10 @@ mod jobs;
 mod market_scoring;
 mod metrics;
 mod paper_trading;
+mod persona_classification;
 mod scheduler;
 mod wallet_discovery;
+mod wallet_features;
 mod wallet_scoring;
 
 #[tokio::main]

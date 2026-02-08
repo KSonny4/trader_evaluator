@@ -216,6 +216,8 @@ CREATE TABLE IF NOT EXISTS wallet_features_daily (
     unique_markets INTEGER,
     avg_hold_time_hours REAL,
     max_drawdown_pct REAL,
+    trades_per_week REAL,
+    sharpe_ratio REAL,
     UNIQUE(proxy_wallet, feature_date, window_days)
 );
 
@@ -287,7 +289,8 @@ CREATE TABLE IF NOT EXISTS wallet_exclusions (
     reason TEXT NOT NULL,              -- e.g. "tail_risk_seller", "noise_trader", "too_young"
     metric_value REAL,                 -- the actual value that triggered exclusion
     threshold REAL,                    -- the threshold it was compared against
-    excluded_at TEXT NOT NULL DEFAULT (datetime('now'))
+    excluded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(proxy_wallet, reason)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
@@ -302,6 +305,32 @@ CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date ON wallet_scores_daily(score_date);
 CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_exclusions_wallet ON wallet_exclusions(proxy_wallet);
+
+CREATE TABLE IF NOT EXISTS copy_fidelity_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_wallet TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    their_trade_id INTEGER,
+    outcome TEXT NOT NULL,
+    outcome_detail TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS follower_slippage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_wallet TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    their_entry_price REAL NOT NULL,
+    our_entry_price REAL NOT NULL,
+    slippage_cents REAL NOT NULL,
+    fee_applied REAL,
+    their_trade_id INTEGER,
+    our_paper_trade_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_fidelity_wallet ON copy_fidelity_events(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_follower_slippage_wallet ON follower_slippage(proxy_wallet);
 "#;
 
 #[cfg(test)]
@@ -409,5 +438,69 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_copy_fidelity_events_table_exists() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let tables: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert!(tables.contains(&"copy_fidelity_events".to_string()));
+        assert!(tables.contains(&"follower_slippage".to_string()));
+    }
+
+    #[test]
+    fn test_copy_fidelity_events_schema() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO copy_fidelity_events (proxy_wallet, condition_id, their_trade_id, outcome, outcome_detail)
+                 VALUES ('0xabc', '0xdef', 1, 'COPIED', 'paper_trade_id=5')",
+                [],
+            )
+            .unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO copy_fidelity_events (proxy_wallet, condition_id, their_trade_id, outcome, outcome_detail)
+                 VALUES ('0xabc', '0xdef', 2, 'SKIPPED_PORTFOLIO_RISK', 'exposure=16.2%, limit=15.0%')",
+                [],
+            )
+            .unwrap();
+
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM copy_fidelity_events WHERE proxy_wallet = '0xabc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_follower_slippage_schema() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO follower_slippage (proxy_wallet, condition_id, their_entry_price, our_entry_price, slippage_cents, fee_applied)
+                 VALUES ('0xabc', '0xdef', 0.55, 0.56, 1.0, 0.008)",
+                [],
+            )
+            .unwrap();
     }
 }
