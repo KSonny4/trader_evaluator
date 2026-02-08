@@ -2,6 +2,7 @@ use anyhow::Result;
 
 mod ingestion;
 mod market_scoring;
+mod metrics;
 mod paper_trading;
 mod scheduler;
 mod wallet_discovery;
@@ -17,6 +18,9 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("trader_evaluator starting");
+
+    let _prom_handle = metrics::install_prometheus(config.observability.prometheus_port)?;
+    metrics::describe();
 
     if let Some(parent) = std::path::Path::new(&config.database.path).parent() {
         std::fs::create_dir_all(parent)?;
