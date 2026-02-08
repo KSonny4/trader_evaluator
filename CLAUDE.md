@@ -179,6 +179,9 @@ cargo run -p evaluator -- rankings # Show WScore rankings
 
 # Makefile shortcuts (preferred)
 make test                          # cargo test + clippy + fmt check
+make coverage                      # Run coverage locally (cargo-llvm-cov, 70% threshold)
+make worktree NAME=foo             # Create .worktrees/foo on branch feature/foo
+make worktree-clean NAME=foo       # Remove worktree and delete branch
 make deploy                        # Test, cross-compile musl, upload, restart
 make status                        # SSH: service status, DB size, disk, recent logs
 make check                         # Verify DB schema matches code expectations
@@ -191,14 +194,15 @@ make check                         # Verify DB schema matches code expectations
 **MANDATORY: Always use `superpowers` skills.**
 
 ### Branch & PR workflow (non-negotiable)
-1. Create a feature branch: `git checkout -b feature/<name>` or use `superpowers:using-git-worktrees`
+1. **Always use git worktrees** for feature work: `make worktree NAME=<feature-name>` — this creates `.worktrees/<feature-name>` on branch `feature/<feature-name>`. Never work directly in the main checkout for feature changes.
 2. Implement with TDD (red-green-refactor)
 3. Commit to the feature branch (never to `main`)
 4. Push the branch: `git push -u origin feature/<name>`
 5. Create a PR: `gh pr create`
-6. CI must pass (cargo test + clippy + fmt — runs automatically via GitHub Actions)
+6. CI must pass (cargo test + clippy + fmt + coverage — runs automatically via GitHub Actions)
 7. Human reviews and merges the PR
 8. **Claude/agents must NEVER push to `main` or merge PRs** — only the human merges
+9. After merge, clean up: `make worktree-clean NAME=<feature-name>`
 
 ### Skill workflow
 - **Before any work:** Run `evaluator-guidance` skill to check current phase and get recommendations
@@ -229,6 +233,33 @@ Rules:
 - **Snapshot tests for scoring** — record real wallet data, compute MScore/WScore, assert stability across code changes
 - **Data quality tests** — verify no gaps in ingestion, no duplicate trades, no null fields where we expect values
 - **Run `cargo test --all` before every commit** — broken tests block everything
+
+### Code coverage requirements
+
+**Minimum 70% line coverage enforced in CI** (target: 80%). Coverage is measured with `cargo-llvm-cov`.
+
+```bash
+make coverage   # Run locally to check coverage before pushing
+```
+
+Coverage baseline (2026-02-08): 73.39% overall. Key gaps:
+- `evaluator/src/main.rs` — 0% (entry point, hard to unit test)
+- `common/src/polymarket.rs` — 27% (network code, needs integration tests)
+- `evaluator/src/cli.rs` — 47% (needs CLI output tests)
+
+Ramp-up plan: 70% now → 75% after Strategy Enforcement plan → 80% target.
+
+### Test quality requirements (non-negotiable)
+
+Happy-path-only tests are insufficient. Every module must include:
+
+1. **Happy path** — normal inputs produce expected outputs
+2. **Error handling** — invalid inputs, network failures, malformed data, DB errors
+3. **Edge cases** — empty collections, zero values, maximum values, Unicode, special chars
+4. **Boundary conditions** — exactly at thresholds (e.g., MScore = 0.0, MScore = 1.0, wallet age = 30 days exactly)
+5. **State transitions** — what happens when data changes between calls (e.g., wallet goes from active to inactive)
+
+Test naming convention: `test_<function>_<scenario>` (e.g., `test_mscore_zero_liquidity_scores_low`, `test_ingest_trades_gracefully_handles_http_400`)
 
 ## Data saving and replay
 

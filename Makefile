@@ -1,14 +1,35 @@
 SHELL := /bin/bash
 
-.PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks
+.PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean
 
 # === Local enforcement ===
 setup-hooks:
 	ln -sf ../../hooks/pre-push .git/hooks/pre-push
-	@echo "Git hooks installed. Direct pushes to main are now blocked."
+	ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+	@echo "Git hooks installed:"
+	@echo "  pre-push:   blocks direct pushes to main"
+	@echo "  pre-commit: blocks feature/* commits outside worktrees"
 
 skills-sync:
 	./scripts/check_skills_sync.sh
+
+# === Coverage ===
+coverage:
+	cargo llvm-cov --workspace --fail-under-lines 70
+	@echo "Coverage passed (>= 70% line coverage)"
+
+# === Git worktrees ===
+worktree:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make worktree NAME=<feature-name>"; exit 1; fi
+	@git worktree add .worktrees/$(NAME) -b feature/$(NAME)
+	@echo "Worktree created at .worktrees/$(NAME) on branch feature/$(NAME)"
+	@echo "cd .worktrees/$(NAME) to start working"
+
+worktree-clean:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make worktree-clean NAME=<feature-name>"; exit 1; fi
+	git worktree remove .worktrees/$(NAME) --force 2>/dev/null || true
+	git branch -D feature/$(NAME) 2>/dev/null || true
+	@echo "Cleaned up worktree and branch for $(NAME)"
 
 # === Build ===
 build:
