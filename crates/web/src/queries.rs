@@ -443,6 +443,7 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
             };
 
             Ok(PaperTradeRow {
+                proxy_wallet: wallet.clone(),
                 wallet_short: shorten_wallet(&wallet),
                 market_title: row.get(1)?,
                 side,

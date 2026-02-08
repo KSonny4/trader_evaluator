@@ -87,6 +87,7 @@ pub struct TrackingHealth {
 
 /// Paper trade row
 pub struct PaperTradeRow {
+    pub proxy_wallet: String,
     pub wallet_short: String,
     pub market_title: String,
     pub side: String,
