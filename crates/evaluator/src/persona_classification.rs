@@ -157,7 +157,7 @@ pub fn record_exclusion(
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Persona {
     InformedSpecialist,
     ConsistentGeneralist,

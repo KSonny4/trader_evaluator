@@ -38,6 +38,29 @@ type_complexity = "warn"
 large_enum_variant = "warn"
 module_inception = "warn"
 needless_pass_by_value = "warn"
+
+# Zero-violation regression guards — prevent future regressions at zero cost
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+map_err_ignore = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+fn_to_numeric_cast_any = "deny"
+rc_buffer = "warn"
+rc_mutex = "deny"
+undocumented_unsafe_blocks = "deny"
+float_cmp_const = "deny"
+lossy_float_literal = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+redundant_type_annotations = "warn"
+large_stack_arrays = "warn"
+large_futures = "warn"
+significant_drop_tightening = "warn"
+significant_drop_in_scrutinee = "warn"
+derive_partial_eq_without_eq = "warn"
+mutex_atomic = "warn"
+
 # TODO: Enable after cleanup sprints:
 # cognitive_complexity = "warn"               # 1 function exceeds threshold (31/25)
 # redundant_closure_for_method_calls = "warn" # 5 violations
