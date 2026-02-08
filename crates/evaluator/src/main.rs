@@ -4,6 +4,7 @@ mod ingestion;
 mod market_scoring;
 mod paper_trading;
 mod wallet_discovery;
+mod wallet_scoring;
 
 #[tokio::main]
 async fn main() -> Result<()> {
