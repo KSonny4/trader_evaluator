@@ -1,0 +1,59 @@
+---
+description: Dispatch parallel agents for 2+ independent tasks without shared state
+globs:
+alwaysApply: false
+---
+
+# Dispatching Parallel Agents
+
+## When to Use
+
+- 3+ test files failing with different root causes
+- Multiple subsystems broken independently
+- Each problem can be understood without context from others
+- No shared state between investigations
+
+## When NOT to Use
+
+- Failures are related (fix one might fix others)
+- Need to understand full system state
+- Agents would edit same files
+
+## The Pattern
+
+### 1. Identify Independent Domains
+
+Group failures by what's broken:
+- Module A: Market scoring logic
+- Module B: API client parsing
+- Module C: Database queries
+
+### 2. Create Focused Agent Tasks
+
+Each agent gets:
+- **Specific scope:** One module or test file
+- **Clear goal:** Make these tests pass
+- **Constraints:** Don't change other code
+- **Expected output:** Summary of findings and fixes
+
+### 3. Dispatch in Parallel
+
+```
+Agent 1 -> Fix market_scoring tests
+Agent 2 -> Fix polymarket client tests
+Agent 3 -> Fix database query tests
+```
+
+### 4. Review and Integrate
+
+- Read each summary
+- Verify fixes don't conflict
+- Run full test suite: `cargo test --all`
+- Integrate all changes
+
+## Common Mistakes
+
+- **Too broad:** "Fix all the tests" -> agent gets lost
+- **No context:** "Fix the bug" -> agent doesn't know where
+- **No constraints:** Agent might refactor everything
+- **Vague output:** "Fix it" -> you don't know what changed

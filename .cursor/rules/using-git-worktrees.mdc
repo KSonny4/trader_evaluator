@@ -1,0 +1,62 @@
+---
+description: Create isolated git worktrees for feature development instead of committing directly to main
+globs:
+alwaysApply: false
+---
+
+# Using Git Worktrees
+
+## Purpose
+
+Create an isolated workspace on a feature branch. Keeps main clean, allows parallel development.
+
+## Workflow
+
+### 1. Check Current State
+
+```bash
+git status
+git branch -a
+```
+
+### 2. Create Worktree
+
+Worktrees go in `.worktrees/` directory (project-local, hidden).
+
+```bash
+git worktree add .worktrees/<feature-name> -b <feature-name>
+```
+
+**Naming conventions:**
+- `feature/<description>` - New features
+- `fix/<description>` - Bug fixes
+- `refactor/<description>` - Code refactoring
+
+### 3. Switch to Worktree
+
+```bash
+cd .worktrees/<feature-name>
+```
+
+### 4. Verify Setup
+
+```bash
+git branch        # Should show feature branch with *
+cargo build       # Should compile
+cargo test --all  # Baseline tests pass
+```
+
+## Rules
+
+- NEVER commit directly to main for feature work
+- Each feature gets its own worktree
+- Keep worktrees short-lived
+- Run `git worktree list` to see all active worktrees
+
+## Cleanup
+
+```bash
+cd /path/to/main/repo
+git worktree remove .worktrees/<feature-name>
+git branch -d <feature-name>  # After merging
+```

@@ -1,0 +1,140 @@
+---
+description: RED-GREEN-REFACTOR cycle for all implementation work
+globs:
+alwaysApply: false
+---
+
+# Test-Driven Development
+
+**This skill is AUTOMATIC** - Apply it before writing ANY implementation code.
+
+## The Iron Law
+
+```
+NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
+```
+
+## The Cycle
+
+### 1. RED - Write a Failing Test
+
+```rust
+#[test]
+fn test_new_feature() {
+    let result = new_feature();
+    assert_eq!(result, expected);
+}
+```
+
+Run it. It MUST fail. If it passes, you're testing the wrong thing.
+
+```bash
+cargo test test_new_feature
+# Expected: FAIL
+```
+
+### 2. GREEN - Write Minimal Code to Pass
+
+Write the absolute minimum code to make the test pass. No more.
+
+```rust
+fn new_feature() -> Expected {
+    expected  // Minimal implementation
+}
+```
+
+Run the test. It MUST pass now.
+
+```bash
+cargo test test_new_feature
+# Expected: PASS
+```
+
+### 3. REFACTOR - Improve Without Breaking
+
+Now improve the code quality:
+- Remove duplication
+- Improve naming
+- Simplify logic
+
+Run tests after EVERY change:
+
+```bash
+cargo test --all
+# Expected: Still PASS
+```
+
+## Rules
+
+### Before Writing Code
+
+Ask yourself:
+1. What test would prove this works?
+2. What's the simplest failing test I can write?
+
+### Code Written Before Test?
+
+**Delete it. Start over.**
+
+**No exceptions:**
+- Don't keep it as "reference"
+- Don't "adapt" it while writing tests
+- Don't look at it
+- Delete means delete
+
+### Test Passes Immediately?
+
+You're testing the wrong thing. Fix the test.
+
+## Test Structure
+
+Use Arrange-Act-Assert (AAA):
+
+```rust
+#[test]
+fn test_market_score_calculation() {
+    // Arrange
+    let market = Market { liquidity: dec!(100000), volume: dec!(50000), .. };
+
+    // Act
+    let score = compute_mscore(&market);
+
+    // Assert
+    assert!(score >= Decimal::ZERO && score <= Decimal::ONE);
+}
+```
+
+## What to Test
+
+| Layer | Test Focus |
+|-------|------------|
+| Domain | Business logic, scoring, risk rules |
+| API Client | Response parsing against real data |
+| Database | Query correctness, migrations |
+| Integration | End-to-end flows |
+
+## Coverage Requirements
+
+- Domain logic (scoring, risk): 90%+
+- API client/parsing: 80%+
+- Database operations: 70%+
+
+## Common Mistakes
+
+- Writing implementation first, then adding tests
+- Writing tests that can't fail
+- Testing implementation details instead of behavior
+- Skipping tests "to save time"
+- Not running tests after each change
+- Mocking Polymarket APIs when they're free and public
+
+## Red Flags - STOP and Start Over
+
+- Code before test
+- Test after implementation
+- Test passes immediately
+- "I already manually tested it"
+- "Tests after achieve the same purpose"
+- "This is different because..."
+
+**All of these mean: Delete code. Start over with TDD.**

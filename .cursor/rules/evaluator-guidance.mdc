@@ -1,0 +1,80 @@
+---
+description: Use when deciding what to work on next, checking phase progress, evaluating pipeline health, or when asked "what's next?"
+globs:
+alwaysApply: false
+---
+
+# Evaluator Guidance
+
+**The brain of the wallet evaluator pipeline.** Reads current system state, collected data (SQLite), and EVALUATION_STRATEGY.md to answer: "What phase are we in? Is it working? What should we do next?"
+
+Every recommendation is backed by specific numbers from the data. No vague suggestions.
+
+## When to Use
+
+- At the start of every session on trader_evaluator
+- After deploying new code or completing a plan task
+- When asked "what should I do next?" or "is it working?"
+- When deciding whether to advance to the next phase
+
+## The Process
+
+### 1. Determine Current Phase
+
+Read `docs/EVALUATION_STRATEGY.md`. Check what exists:
+
+```bash
+ls crates/ 2>/dev/null                      # What code exists?
+ls data/ 2>/dev/null                         # Does database exist?
+git log --oneline -20                        # What's been committed?
+```
+
+Map to phase:
+- No code -> Phase 0 (Foundation) - BUILD
+- Code but no data -> Phase 1/2 (Discovery) - COLLECT
+- Data flowing but no paper trades -> Phase 3/4 (Tracking/Paper) - EVALUATE
+- Paper results but no rankings -> Phase 5 (Ranking) - SCORE
+- Everything deployed -> Phase 6 (Production) - VALIDATE
+
+### 2. Check Exit Criteria
+
+Read exit criteria from EVALUATION_STRATEGY.md for current phase. For each criterion, run the appropriate SQL query against `data/evaluator.db`.
+
+### 3. Run Data Quality Checks
+
+```bash
+sqlite3 data/evaluator.db "
+  SELECT 'freshest_trade_age_hours',
+    ROUND((julianday('now') - julianday(MAX(datetime(timestamp, 'unixepoch')))) * 24, 1)
+  FROM trades_raw;
+  SELECT 'duplicate_trades', COUNT(*) FROM (
+    SELECT transaction_hash, proxy_wallet, condition_id, COUNT(*) as cnt
+    FROM trades_raw GROUP BY transaction_hash, proxy_wallet, condition_id HAVING cnt > 1
+  );
+"
+```
+
+### 4. Produce 3 Prioritized Recommendations
+
+Each recommendation:
+- **Do this:** Specific, concrete action
+- **Because:** What the data says (with numbers)
+- **Effort:** Hours/days estimate
+- **If it doesn't work:** Fallback plan
+
+### 5. Check Implementation Plan Progress
+
+```bash
+cat docs/plans/2026-02-08-wallet-evaluator-mvp.md
+git log --oneline -30
+```
+
+Report: "Tasks 1-N complete. Currently on Task M."
+
+## Prioritization Order
+
+1. Fix broken things (data quality, crashes)
+2. Complete current phase (unmet exit criteria)
+3. Advance to next phase
+4. Optimize within phase
+5. Research next opportunity

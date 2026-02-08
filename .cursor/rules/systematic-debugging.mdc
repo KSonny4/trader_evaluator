@@ -1,0 +1,64 @@
+---
+description: Find root cause before attempting fixes for any bug, test failure, or unexpected behavior
+globs:
+alwaysApply: false
+---
+
+# Systematic Debugging
+
+**This skill is AUTOMATIC** - Apply before proposing ANY fix.
+
+## The Iron Law
+
+```
+NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
+```
+
+## The Four Phases
+
+### Phase 1: Root Cause Investigation
+
+**BEFORE attempting ANY fix:**
+
+1. **Read Error Messages Carefully** - Don't skip past errors. Read stack traces completely.
+2. **Reproduce Consistently** - Can you trigger it reliably?
+3. **Check Recent Changes** - `git diff`, recent commits
+4. **Trace Data Flow** - Where does the bad value originate? Trace backward.
+
+### Phase 2: Pattern Analysis
+
+1. Find similar working code in same codebase
+2. Compare against references
+3. Identify differences between working and broken
+4. Understand dependencies
+
+### Phase 3: Hypothesis and Testing
+
+1. Form single hypothesis: "I think X because Y"
+2. Make SMALLEST possible change to test
+3. One variable at a time
+4. Verify before continuing
+
+### Phase 4: Implementation
+
+1. Create failing test case (TDD)
+2. Implement single fix at root cause
+3. Verify fix with test
+4. **If 3+ fixes fail:** STOP - question the architecture
+
+## Red Flags - STOP
+
+- "Quick fix for now, investigate later"
+- "Just try changing X and see"
+- Proposing solutions before tracing data flow
+- "One more fix attempt" (after 2+ failures)
+
+**ALL mean: STOP. Return to Phase 1.**
+
+## Verification Commands
+
+```bash
+cargo test --all                   # All tests pass
+cargo clippy --all-targets -- -D warnings  # No warnings
+RUST_LOG=debug cargo run -p evaluator  # Debug output
+```

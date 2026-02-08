@@ -1,0 +1,61 @@
+---
+description: Guide completion of development work - verify tests, present merge/PR/keep/discard options
+globs:
+alwaysApply: false
+---
+
+# Finishing a Development Branch
+
+## The Process
+
+### Step 1: Verify Tests
+
+```bash
+cargo test --all
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+**If tests fail:** Stop. Fix before proceeding.
+
+### Step 2: Present Options
+
+```
+Implementation complete. What would you like to do?
+
+1. Merge back to main locally
+2. Push and create a Pull Request
+3. Keep the branch as-is (I'll handle it later)
+4. Discard this work
+
+Which option?
+```
+
+### Step 3: Execute Choice
+
+**Merge locally:**
+```bash
+git checkout main && git pull && git merge <branch> && cargo test --all
+git branch -d <branch>
+```
+
+**Create PR:**
+```bash
+git push -u origin <branch>
+gh pr create --title "<title>" --body "## Summary\n- ..."
+```
+
+**Discard:** Confirm first, then `git branch -D <branch>`
+
+### Step 4: Cleanup Worktree
+
+```bash
+git worktree remove .worktrees/<feature-name>
+```
+
+## Rules
+
+- NEVER proceed with failing tests
+- NEVER merge without verifying tests on result
+- NEVER delete work without confirmation
+- Always present exactly 4 options

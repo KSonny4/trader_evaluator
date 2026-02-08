@@ -1,0 +1,72 @@
+---
+description: Use when committing, pushing, or deploying trader_evaluator code
+globs:
+alwaysApply: false
+---
+
+# Evaluator Deploy
+
+Commit, push, and deploy the trader_evaluator project.
+
+## Pre-flight
+
+```bash
+make test    # runs cargo test + clippy + fmt + skills-sync
+```
+
+All must pass. Never commit with failures.
+
+## Commit and Push
+
+```bash
+git add <specific-files>
+git commit -m "feat/fix/chore: description"
+git push origin main
+```
+
+Commit BEFORE deploying. Never commit `.env`, `data/`, or credentials.
+
+## Deploy (only for code/config changes)
+
+```bash
+make deploy SERVER=ubuntu@3.8.206.244
+```
+
+This cross-compiles musl, SCPs to `/opt/evaluator/`, restarts systemd service, runs `make check`.
+
+**Skip deploy for:** docs, skills, .cursor rules, README changes.
+
+## Post-deploy Checks
+
+```bash
+# Service alive
+ssh -i trading-bot.pem ubuntu@3.8.206.244 'systemctl is-active evaluator'
+
+# Metrics on port 9094
+ssh -i trading-bot.pem ubuntu@3.8.206.244 'curl -s localhost:9094/metrics | head -5'
+
+# No panics
+ssh -i trading-bot.pem ubuntu@3.8.206.244 'journalctl -u evaluator --no-pager -n 20'
+
+# Phase checks (run highest applicable)
+make check-phase-0 SERVER=ubuntu@3.8.206.244   # Tables exist
+make check-phase-1 SERVER=ubuntu@3.8.206.244   # Markets scored
+make check-phase-2 SERVER=ubuntu@3.8.206.244   # Wallets classified
+make check-phase-3 SERVER=ubuntu@3.8.206.244   # Ingestion running
+make check-phase-4 SERVER=ubuntu@3.8.206.244   # Paper trading
+make check-phase-5 SERVER=ubuntu@3.8.206.244   # Wallet scores
+
+# Pipeline overview
+make status SERVER=ubuntu@3.8.206.244
+```
+
+## Quick Reference
+
+| Step | Command | Pass |
+|------|---------|------|
+| Test | `make test` | 0 failures |
+| Commit | `git commit && push` | Clean tree |
+| Deploy | `make deploy SERVER=...` | No errors |
+| Service | `systemctl is-active evaluator` | `active` |
+| Metrics | `curl localhost:9094/metrics` | Non-empty |
+| Logs | `journalctl -u evaluator -n 20` | No panics |

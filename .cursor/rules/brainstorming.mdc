@@ -1,0 +1,40 @@
+---
+description: You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior
+globs:
+alwaysApply: false
+---
+
+# Brainstorming Ideas Into Designs
+
+**This skill is AUTOMATIC** - Apply it before ANY creative work.
+
+## The Process
+
+**Understanding the idea:**
+- Check out the current project state first (files, docs, recent commits)
+- Ask questions one at a time to refine the idea
+- Prefer multiple choice questions when possible
+- Only one question per message
+- Focus on: purpose, constraints, success criteria
+
+**Exploring approaches:**
+- Propose 2-3 different approaches with trade-offs
+- Lead with your recommended option and explain why
+
+**Presenting the design:**
+- Present in sections of 200-300 words
+- Ask after each section whether it looks right so far
+- Cover: architecture, components, data flow, error handling, testing
+
+## After the Design
+
+- Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+- Commit the design document to git
+
+## Key Principles
+
+- **One question at a time** - Don't overwhelm
+- **Multiple choice preferred** - Easier to answer
+- **YAGNI ruthlessly** - Remove unnecessary features
+- **Explore alternatives** - Always propose 2-3 approaches
+- **Incremental validation** - Present design in sections, validate each

@@ -1,0 +1,74 @@
+---
+description: Create implementation plans with bite-sized tasks before touching code
+globs:
+alwaysApply: false
+---
+
+# Writing Plans
+
+Write comprehensive implementation plans assuming the engineer has zero context. Document everything: which files to touch, code, testing, how to verify. Bite-sized tasks (2-5 min each). DRY. YAGNI. TDD. Frequent commits.
+
+**Save plans to:** `docs/plans/YYYY-MM-DD-<feature-name>.md`
+
+## Bite-Sized Task Granularity
+
+Each step is one action (2-5 minutes):
+- "Write the failing test" - step
+- "Run it to make sure it fails" - step
+- "Implement the minimal code to make the test pass" - step
+- "Run the tests and make sure they pass" - step
+- "Commit" - step
+
+## Plan Document Header
+
+```markdown
+# [Feature Name] Implementation Plan
+
+**Goal:** [One sentence]
+**Architecture:** [2-3 sentences]
+**Tech Stack:** Rust, Tokio, rusqlite, reqwest, rust_decimal
+
+---
+```
+
+## Task Structure
+
+```markdown
+### Task N: [Component Name]
+
+**Files:**
+- Create: `crates/common/src/module.rs`
+- Modify: `crates/evaluator/src/main.rs`
+- Test: inline `#[cfg(test)]` module
+
+**Step 1: Write the failing test**
+
+\`\`\`rust
+#[test]
+fn test_specific_behavior() {
+    let result = function(input);
+    assert_eq!(result, expected);
+}
+\`\`\`
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test test_specific_behavior`
+Expected: FAIL
+
+**Step 3: Write minimal implementation**
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test test_specific_behavior`
+Expected: PASS
+
+**Step 5: Commit**
+```
+
+## Remember
+
+- Exact file paths always
+- Complete code in plan
+- Exact commands with expected output
+- DRY, YAGNI, TDD, frequent commits
