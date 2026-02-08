@@ -1,0 +1,350 @@
+# CLAUDE.md
+
+## Project overview
+
+Polymarket wallet discovery and paper copy-trading evaluation system. Discovers "follow-worthy" markets, extracts wallets trading them, tracks those wallets long-term, runs risk-managed paper-copy portfolios, and ranks "who to follow" with evidence. Written in Rust. Deployed to the same AWS t3.micro as the `trading` project.
+
+**This is a greenfield project.** No code yet — only specs and plans. The `git_projects/trading` project is the reference implementation for Polymarket API patterns, Rust architecture, deployment, and observability.
+
+## The pipeline
+
+> **Grafana dashboard:** Build a funnel view showing: markets scored → markets selected → wallets discovered → wallets tracked → wallets paper-copied → wallets ranked. Show counts at each stage and drop-off rates.
+
+```
+Markets (Gamma API) → MScore ranking → Top-20 markets
+    ↓
+Wallet Discovery (Data API: holders + traders) → Watchlist
+    ↓
+Long-Term Tracking (trades, activity, positions, holders snapshots)
+    ↓
+Paper Copy Engine (mirror trades with risk caps)
+    ↓
+WScore Ranking → "Who to Follow" with evidence
+```
+
+## Key documents
+
+| Document | Purpose |
+|----------|---------|
+| `docs/prd.txt` | Full product requirements — goals, data sources, data model, acceptance criteria |
+| `docs/on_risk.txt` | Risk management framework |
+| `docs/EVALUATION_STRATEGY.md` | **Governing doc** — phase gates, evaluation metrics, decision rules, data quality checks |
+| `docs/plans/2026-02-08-wallet-evaluator-mvp.md` | Implementation plan — 15 tasks, TDD, bite-sized |
+| `docs/inspiration.txt` | Reference projects and links |
+
+## Polymarket APIs we use
+
+### Data API (`https://data-api.polymarket.com`) — PRIMARY
+
+| Endpoint | Purpose | Key params | Rate limit |
+|----------|---------|------------|------------|
+| `GET /trades` | Trade history by user or market | `user`, `market`, `limit` (max 10000), `offset` | Undocumented — use 200ms delay |
+| `GET /holders` | Top holders for markets | `market` (condition IDs), `limit` (max 20) | Undocumented |
+| `GET /activity` | User activity timeline | `user` (required), `type`, `limit` (max 500), `offset` | Undocumented |
+| `GET /positions` | Current positions for user | `user` (required), `limit` (max 500), `offset` | Undocumented |
+| `GET /v1/leaderboard` | Trader rankings | `category`, `timePeriod`, `limit` (max 50), `offset` | Undocumented |
+
+### Gamma API (`https://gamma-api.polymarket.com`) — Market discovery
+
+| Endpoint | Purpose | Key params |
+|----------|---------|------------|
+| `GET /markets` | List/filter markets | `limit`, `offset`, `liquidity_num_min`, `volume_num_min`, `end_date_min/max`, `closed` |
+
+### Key data types
+
+- **condition_id**: `0x`-prefixed 64-hex string — unique market identifier
+- **proxy_wallet**: `0x`-prefixed 40-hex address — user wallet identifier
+- **asset**: token identifier for a specific outcome
+- All APIs are **public** — no authentication required for read-only access
+- No rate limits documented — we use conservative 200ms delays between calls
+
+## Domain concepts
+
+- **MScore**: Market Score [0, 1] — ranks markets by follow-worthiness using liquidity, volume, trade density, whale concentration, time-to-expiry
+- **WScore**: Wallet Score [0, 1] — ranks wallets by copy-worthiness using edge, consistency, market skill, timing skill, behavior quality
+- **Paper copy**: Simulated portfolio that mirrors a wallet's trades with risk caps and slippage
+- **Discovery source**: How we found a wallet — HOLDER (top holders list), TRADER_RECENT (active in market), LEADERBOARD (global ranking)
+- **Mirror strategy**: Copy trades same direction, proportional size, with configurable delay
+- **Quartic taker fee**: `fee = price * 0.25 * (price * (1 - price))^2` — max ~1.44% at p=0.60, zero near p=0 or p=1
+
+## Technical stack
+
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| Language | Rust | Match `trading` project. Type safety for money. Performance. |
+| Async runtime | Tokio | Same as `trading`. `tokio::select!` for multiplexing jobs. |
+| Database | SQLite (rusqlite, bundled) | Zero-dep deployment. Same as `trading`. |
+| HTTP client | reqwest | Same as `trading`. |
+| Precision math | rust_decimal | Never floats for money. Same as `trading`. |
+| Config | TOML (toml + serde) | Same as `trading`. |
+| Logging | tracing + tracing-subscriber (JSON) | Same as `trading`. |
+| Metrics | metrics + metrics-exporter-prometheus | Same as `trading`. Port 9094 (trading uses 9090-9093). |
+| Deployment | AWS t3.micro, systemd, cross-compile musl | Same instance as `trading` bots. |
+
+## Project structure (target)
+
+```
+trader_evaluator/
+  CLAUDE.md                         # This file
+  Cargo.toml                        # Workspace root
+  config/
+    default.toml                    # All configuration
+  crates/
+    common/                         # Shared types, config, DB, API client
+      src/
+        lib.rs
+        config.rs                   # TOML config deserialization
+        db.rs                       # SQLite schema, migrations, queries
+        types.rs                    # API response types, enums
+        polymarket.rs               # Polymarket Data + Gamma API client
+    evaluator/                      # Main binary
+      src/
+        main.rs                     # Entry point, Tokio runtime
+        scheduler.rs                # Periodic job scheduling
+        market_scoring.rs           # MScore computation
+        wallet_discovery.rs         # Wallet extraction + watchlist
+        ingestion.rs                # Trade/activity/position/holder polling
+        paper_trading.rs            # Mirror strategy + risk engine
+        wallet_scoring.rs           # WScore computation
+        metrics.rs                  # Prometheus metric definitions
+        cli.rs                      # Subcommands for inspection
+  deploy/
+    deploy.sh                       # Cross-compile + upload
+    setup-evaluator.sh              # Server setup
+    systemd/
+      evaluator.service             # Systemd unit file
+  docs/
+    prd.txt                         # Product requirements
+    on_risk.txt                     # Risk framework
+    EVALUATION_STRATEGY.md          # Phase gates + decision rules
+    plans/
+      2026-02-08-wallet-evaluator-mvp.md  # Implementation plan
+  tests/
+    fixtures/                       # Real API response samples
+  data/                             # SQLite database (gitignored)
+```
+
+## Database tables (11 core)
+
+| Table | Purpose | Key columns |
+|-------|---------|-------------|
+| `markets` | Market metadata from Gamma API | condition_id (PK), title, liquidity, volume |
+| `wallets` | Discovered wallets + watchlist state | proxy_wallet (PK), discovered_from, is_active |
+| `trades_raw` | Append-only trade history | proxy_wallet, condition_id, size, price, timestamp |
+| `activity_raw` | Append-only activity timeline | proxy_wallet, activity_type, timestamp |
+| `positions_snapshots` | Periodic position state | proxy_wallet, condition_id, size, cash_pnl |
+| `holders_snapshots` | Periodic holder rankings | condition_id, proxy_wallet, amount |
+| `market_scores_daily` | MScore + factor breakdown | condition_id, mscore, rank |
+| `wallet_features_daily` | Derived features per window | proxy_wallet, window_days, trade_count, total_pnl |
+| `paper_trades` | Simulated copy trades | proxy_wallet, strategy, entry_price, pnl, status |
+| `paper_positions` | Current paper portfolio state | proxy_wallet, strategy, total_size_usdc |
+| `wallet_personas` | Persona classification per wallet | proxy_wallet, persona, confidence, feature_values_json, classified_at |
+| `wallet_exclusions` | Why a wallet was excluded | proxy_wallet, reason, metric_value, threshold, excluded_at |
+| `wallet_scores_daily` | WScore + factor breakdown | proxy_wallet, wscore, recommended_follow_mode |
+
+## Reference project: `git_projects/trading`
+
+The `trading` project has working implementations of:
+- **Polymarket CLOB client** (`crates/polymarket-client/`) — WebSocket + REST, EIP-712 signing
+- **Polymarket Data API patterns** — trade fetching, book snapshots, market discovery via Gamma API
+- **Risk management** — 3-tier circuit breaker, position limits, stop-loss
+- **Paper trading engine** — trade execution, PnL tracking, settlement
+- **SQLite patterns** — schema migrations, append-only storage, snapshot tables
+- **Config system** — TOML deserialization with nested sections
+- **Observability** — Prometheus metrics, Grafana dashboards, structured JSON logging
+- **Deployment** — cross-compile to musl, systemd hardened services, Grafana Alloy
+
+**Reuse patterns from trading, but do NOT share code directly** (separate repos, different Cargo workspaces).
+
+## Build / test / run
+
+```bash
+cargo build --release              # Build all crates
+cargo test --all                   # Run all tests
+cargo clippy --all-targets -- -D warnings  # Lint
+cargo fmt --check                  # Format check
+
+cargo run -p evaluator             # Run main process (starts all jobs)
+cargo run -p evaluator -- markets  # Show today's top markets
+cargo run -p evaluator -- wallets  # Show watchlist
+cargo run -p evaluator -- paper-pnl  # Show paper portfolio performance
+cargo run -p evaluator -- rankings # Show WScore rankings
+
+# Deploy
+bash deploy/deploy.sh              # Cross-compile and deploy to server
+```
+
+## Development workflow
+
+**MANDATORY: Always use `superpowers` skills.** See `git_projects/trading/CLAUDE.md` for full skill workflow.
+
+- **Before any work:** Run `evaluator-guidance` skill to check current phase and get recommendations
+- **Before writing code:** Use `superpowers:writing-plans` or follow the existing plan
+- **For any feature/bugfix:** Use `superpowers:test-driven-development` — TDD always
+- **For debugging:** Use `superpowers:systematic-debugging`
+- **Before claiming done:** Use `superpowers:verification-before-completion`
+- **After implementation:** Use `superpowers:requesting-code-review`
+
+All code changes must pass: `cargo test --all`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`
+
+## Testing philosophy
+
+**Test everything against real Polymarket API data. No exceptions.**
+
+All Polymarket APIs are public and free. There is zero reason to mock or assume response shapes — connect to the real endpoints and validate against actual data. Every test should prove the code works against production reality, not against our imagination of what the API returns.
+
+Rules:
+- **Every module gets tests before or alongside implementation** — TDD, not afterthought
+- **Integration tests hit real APIs** — use `tests/fixtures/` to cache responses for offline replay, but the first run always fetches live data
+- **No hardcoded assumptions about API response fields** — Polymarket returns inconsistent field names across endpoints (e.g., `conditionId` vs `condition_id` vs `marketId`). Tests must verify our parsing handles the actual response, not a hand-crafted mock
+- **Test edge cases from real data** — neg-risk markets, settled markets, markets with zero liquidity, wallets with thousands of trades, wallets with zero trades
+- **Snapshot tests for scoring** — record real wallet data, compute MScore/WScore, assert stability across code changes
+- **Data quality tests** — verify no gaps in ingestion, no duplicate trades, no null fields where we expect values
+- **Run `cargo test --all` before every commit** — broken tests block everything
+
+## Data saving and replay
+
+**Save everything. No exceptions.** We need the ability to replay following any account on any market after the fact — to tune risk management, test alternative strategies, and prove whether we could have profited.
+
+Follow the same architecture as `git_projects/trading` DataRecorder:
+- **Non-blocking async writes** via Tokio MPSC channel (10,000 buffer) → background SQLite writer
+- **WAL mode** (`PRAGMA journal_mode=WAL`) for concurrent reads during writes
+- **Batch inserts** (100 rows per transaction) for efficiency
+- **Git SHA on every row** for traceability (which code version produced this data)
+- **Raw JSON stored alongside parsed data** — if parsing changes, we can reparse from raw
+
+**What to save (append-only, never delete):**
+
+| Table | What | Why |
+|-------|------|-----|
+| `raw_api_responses` | Full JSON body from every API call | Reparse if fields change. Debug API issues. |
+| `trades_raw` | Every trade from every tracked wallet | Replay: reconstruct what any wallet did |
+| `activity_raw` | Every activity event per wallet | Catch neg-risk conversions the trades API misses |
+| `positions_snapshots` | Position state per wallet, polled regularly | Replay: reconstruct portfolio at any point in time |
+| `holders_snapshots` | Holder rankings per market, daily | Track how wallet rankings shift over time |
+| `book_snapshots` | Best bid/ask + depth at time of each copy decision | Replay: compute realistic slippage and fill probability |
+| `paper_trades` | Every paper trade decision (including skips with reason) | Replay: see exactly what we would have done and why |
+| `paper_events` | Every risk gate check, circuit breaker trigger, skip reason | Replay: tune risk parameters retroactively |
+| `market_metadata` | Market state at time of each decision | Replay: know what the market looked like when we traded |
+| `follower_slippage` | Per-wallet: our entry vs their entry, per trade | The critical metric — does copying actually work? |
+
+**Replay capability:**
+- Given a wallet address and a time range, we must be able to reconstruct:
+  1. What trades they made (from `trades_raw`)
+  2. What the market looked like when they traded (from `book_snapshots`, `market_metadata`)
+  3. What our paper engine would have done (from `paper_trades`, `paper_events`)
+  4. What the actual outcome was (from positions/settlement data)
+- This lets us ask: "If we had followed wallet X on market Y with risk config Z, would we have made money?"
+- **Every parameter change should be testable against historical data before going live**
+
+## Wallet persona taxonomy
+
+Every wallet is classified into a persona before paper-trading. This is the gatekeeper — only followable personas advance.
+
+| Persona | Follow? | Key signal | Follow mode |
+|---------|---------|-----------|-------------|
+| **Informed Specialist** | YES — primary target | Few markets, high win rate, enters before moves | Mirror with delay |
+| **Consistent Generalist** | YES | Many markets, steady returns, low drawdown | Mirror |
+| **Patient Accumulator** | YES — slow | Large positions, long holds, few trades | Delay (24h+) |
+| **Execution Master** | NO | >70% PnL from execution edge, not direction | Unreplicable fills |
+| **Tail Risk Seller** | NO | 80%+ win rate, occasional massive blowup | Will destroy you |
+| **Noise Trader** | NO | High churn, no statistical edge | No signal |
+| **Sniper/Insider** | AVOID | New wallet, suspicious timing, clustered entries | Adversarial |
+| **Sybil Cluster** | AVOID | Correlated trades, shared funding chain | Fake signal |
+
+**Obscurity bonus:** Wallets NOT on public leaderboards get 1.2x WScore multiplier (fewer copiers = less front-running = better fills).
+
+**Wallet age:** Younger wallets (< 90 days) get a trust penalty — not enough data to classify reliably. Wallets < 30 days with high win rates are flagged as potential snipers/insiders. Age is a confidence factor, not a hard filter.
+
+**Continuous re-evaluation:** Personas are re-classified weekly. Wallets can move between personas as behavior changes (e.g., a Consistent Generalist who starts tail-risk-selling gets reclassified and dropped).
+
+**Funnel:** Discover hundreds of wallets → classify all → track all → paper-trade only the best ~5-10 followable personas → rank those → follow the top handful with real money.
+
+Detection: rule-based SQL on `wallet_features_daily` first, ML classifier later once we have labeled outcomes.
+
+Full taxonomy with thresholds in `docs/EVALUATION_STRATEGY.md` Phase 2.
+
+## Evaluation strategy (summary)
+
+The system progresses through 7 phases. **Never skip a phase.**
+
+| Phase | Name | Key gate |
+|-------|------|----------|
+| 0 | Foundation | Build compiles, APIs reachable, tests pass |
+| 1 | Market Discovery | Markets scored daily for 3+ days. Handle rotating markets (e.g. BTC 15m markets change slug every 15 min). |
+| 2 | Wallet Discovery & Classification | All participants stored. Every wallet classified into persona. Only followable personas advance. |
+| 3 | Long-Term Tracking | 7 days continuous ingestion, no data gaps |
+| 4 | Paper Copy | Paper-trade only the best classified wallets (~5-10). Full risk management from `docs/on_risk2.txt`. |
+| 5 | Wallet Ranking | WScore stable across 3 consecutive days |
+| 6 | Production | Deployed on AWS, 72h no crashes, metrics in Grafana |
+
+**Full details in `docs/EVALUATION_STRATEGY.md`.**
+
+## Environment variables
+
+```bash
+# None required for V1 — all Polymarket APIs are public read-only
+# Future (real execution):
+# POLYMARKET_PRIVATE_KEY
+# POLYMARKET_API_KEY
+
+# Observability (shared with trading project):
+# GRAFANA_CLOUD_PROM_URL
+# GRAFANA_CLOUD_PROM_USER
+# GRAFANA_CLOUD_API_KEY
+# GRAFANA_CLOUD_LOKI_URL
+# GRAFANA_CLOUD_LOKI_USER
+```
+
+## Competitive landscape (reference projects analyzed in depth)
+
+All linked repos were cloned/fetched and analyzed at source-code level. Key findings:
+
+| Project | Stack | What it does | Key lessons for us |
+|---------|-------|-------------|-------------------|
+| **polymarket-intelligence** | Python/FastAPI, SQLite, httpx | Real-time dashboard: top holders, whale tracking, user analytics, AI debate | Hybrid cursor/offset pagination for positions API. Concurrent wallet enrichment with `asyncio.Semaphore(10)`. Field name fallback chains (Polymarket returns inconsistent names across endpoints). IPv4 monkey-patch for DNS. |
+| **polybot** | Java 21/Spring Boot, ClickHouse, Kafka | Reverse-engineer any trader's strategy from 44k+ trades | **PnL decomposition**: `actual = directional + execution` (90% of profit was execution edge, not prediction). Execution classification: MAKER_LIKE/TAKER_LIKE/INSIDE/OUTSIDE. Complete-set detection: `edge = 1 - (avg_up_price + avg_down_price)`. Monte Carlo with block bootstrap (20k iterations, block=50). Profile scraping via Next.js `__NEXT_DATA__`. |
+| **polymarket-trade-tracker** | Python/Flask, SQLite, requests | Per-market trade analysis with on-chain source classification | Multi-API fallback: trades → activity → on-chain. On-chain source classification from tx receipts: direct/neg-risk/split/merge/transfer/redeem. Batch RPC (10 tx/call) for maker/taker detection. Contract addresses + event topic registry. |
+| **polymarket-copy-trading-bot** | Python asyncio + Node.js v3 | Position-based copy trading with TP/SL | Position-based trade detection: poll `/positions?user=` every 4s, diff snapshots. 2-cent slippage buffer on limit orders. WebSocket auto-reconnect with re-subscription. EIP-712 + HMAC-SHA256 dual auth. |
+| **polyterm** | Python/click/rich, SQLite | Terminal wallet tracker with risk scoring | Wash trade detection (5 indicators: volume/liquidity ratio, trader concentration, size uniformity, side balance, volume discrepancy). Market risk scoring A-F (resolution clarity, liquidity, time, volume quality, spread, category). Insider risk score 0-100 (wallet age, position size, win rate anomaly, trading pattern). |
+| **polymarket-insider-tracker** | Python/asyncio, Postgres, Redis, scikit-learn | Production insider detection pipeline | DBSCAN clustering for sniper detection (coordinated wallets entering within 5 min). Funding chain tracing (USDC transfers backwards, 3 hops, stop at known CEX/bridge). Known entity registry (Binance, Coinbase, Polygon Bridge, etc). Composite risk scorer with multi-signal bonus (1.2x for 2 signals, 1.3x for 3+). Redis deduplication with 1h TTL. |
+| **predictfolio.com** | SaaS (closed source) | Wallet analytics: PnL, volume, win rate, leaderboard | Multi-timeframe PnL (1D/1W/1M/YTD/1Y/MAX). "Current" vs "Average" toggle. 180-day PnL projection. Leaderboard = PnL + Markets Traded + Win/Loss Ratio. Coverage: 1M+ users, 30K+ markets, 5 years. |
+| **Copy-Trade Docs** | SaaS documentation | Commercial copy-trading platform ($99-499/mo) | **Weighted composite trader score**: Win Rate 30% + ROI 25% + Consistency 20% + Volume 15% + Risk Score 10%. Tier system: Elite (70%+ WR, 50%+ ROI, 6mo), Professional (60%+, 30%+, 3mo), Rising Star (55%+, 15%+, 1mo). 4-phase pipeline: Detect (<50ms) → Analyze → Validate → Execute. |
+| **arb-copy-bot** | TypeScript + Rust stubs | Combined arbitrage + selective copy-trading | **Position-based trade detection as primary** (poll every 1s, diff snapshots). 4-method fallback chain: positions → on-chain → activity → trades. Arb detection: `yesPrice + noPrice < 0.99` (after 1% fee). Per-wallet config: minWinRate, maxPositionSizeUsd, positionSizeMultiplier, requireArbSignal gate. |
+
+## Key patterns extracted from competitive analysis
+
+### Trade detection (ranked by reliability)
+1. **Position diffing** (PRIMARY) — poll `/positions?user=` every 1-5s, diff snapshots → new/changed/closed positions
+2. **On-chain events** — `OrderFilled`, `PositionSplit`, `PositionsConverted` on CTF contract
+3. **Activity API** — `/activity?user=` catches neg-risk conversions the trades API misses
+4. **Trades API** — `/trades?user=` for historical trade logs with pagination
+
+### Wallet scoring formula (synthesized from all sources)
+```
+WScore = 0.25 * win_rate       # predictfolio + copy-trade-docs both use this
+       + 0.25 * roi            # copy-trade-docs weights 25%
+       + 0.20 * consistency    # Sharpe-like: stddev of per-trade returns
+       + 0.15 * volume         # filters low-activity wallets
+       + 0.10 * risk_score     # max drawdown + recovery time
+       + 0.05 * history_length # longer track record = more trustworthy
+```
+
+### PnL decomposition (from polybot)
+```
+actual_pnl    = Σ (settle_price - entry_price) * size    # total
+directional   = Σ (settle_price - mid_at_entry) * size   # would you profit at mid?
+execution     = Σ (mid_at_entry - entry_price) * size     # edge from buying below mid
+# actual = directional + execution
+```
+
+### Polygon on-chain contracts
+```
+CTF (ConditionalTokens):     0x4D97DCd97eC945f40cF65F87097ACe5EA0476045
+CTF Exchange:                0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E
+NegRisk Adapter:             0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296
+NegRisk CTF Exchange:        0xC5d563A36AE78145C45a50134d48A1215220f80a
+Proxy Wallet Factory:        0x56C79347e95530c01A2FC76E732f9566dA16E113
+```
+
+**Our differentiation:** We are the **closed loop** — market selection → wallet discovery → long-term tracking → paper copy → ranking with evidence. Most projects do only one piece.

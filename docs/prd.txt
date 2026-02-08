@@ -1,0 +1,411 @@
+# PRD: Polymarket Wallet Discovery + Long-Term Paper Copy Trading
+
+
+Human notes: please look in git_projects/trading ... use the code there and copy it here. I want to deploy to aws (same instance), use sqlite, I want to select individuals and papertrade e.g. for week before we pick person as worthy following. after we really validate we could execute on that person, we will start with some bankroll
+
+
+## 0) One-liner
+A system that selects "follow-worthy" Polymarket markets, extracts and monitors wallets trading them, and runs long-horizon, risk-managed paper-copy portfolios to rank "who to follow" with evidence.
+
+---
+
+## 1) Background and Motivation
+Polymarket exposes public market activity (trades, holders, activity). At the wallet level you can observe who traded what, when, and how size and conviction evolve. The goal is to turn this public data into a disciplined "who to follow" discovery pipeline.
+
+Core ideas we are applying:
+- **Market selection first**: only some markets are informative for following (liquidity, density, clarity).
+- **Wallet discovery from markets**: identify candidates via **top holders** and **active traders**.
+- **Long-term tracking**: build durable features across weeks/months, not just short bursts.
+- **Paper-copy trading with risk rules**: simulate copying behavior and score wallets out-of-sample.
+- **End result**: a ranked list of wallets worth following, with reasons and evidence.
+
+---
+
+## 2) Goals
+### Primary goals
+1) Produce a daily list of **"good markets to follow"** with explainable scoring.
+2) For each selected market, build and maintain a **watchlist of wallets** (holders + active traders).
+3) Track watched wallets over the long term (trades, activity, positions, exposure).
+4) Run **paper-copy portfolios** with mandatory risk management rules.
+5) Output a ranked list of **"who to follow"** with evidence, stability metrics, and recommended follow mode.
+
+### Secondary goals (later)
+- Alerts (wallet entered, size increased, consensus divergence).
+- Strategy variants (delay, slippage, consensus basket).
+- Subscriber-like UX (watchlists, notifications).
+
+---
+
+## 3) Non-goals
+- No real money auto execution in V1 (paper only).
+- No deanonymization (no mapping wallets to real identities).
+- No claims of inside information. Only observable behavior from public data.
+- No reliance on non-public endpoints.
+
+---
+
+## 4) Users
+### Primary user
+- Operator (you): wants to identify wallets to follow and validate via paper-copy.
+
+### Secondary user (future)
+- Subscriber: wants curated markets, wallet rankings, and alerts.
+
+---
+
+## 5) Definitions
+- **Market**: Polymarket event/market with outcomes and trading activity.
+- **Wallet**: proxyWallet / user wallet identifier visible in activity/trade contexts.
+- **Watchlist**: set of wallets being monitored, tagged with discovery source (holder, trader, leaderboard).
+- **Paper portfolio**: simulated portfolio that "copies" one or more wallets using defined rules.
+
+---
+
+## 6) Data Sources (first-class)
+### 6.1 Polymarket Data API (primary)
+Use Data API for most analytics and tracking:
+
+- Trades for user or markets: market-level and wallet-level trade history.
+  - Reference: "Get trades for a user or markets"
+  - https://docs.polymarket.com/api-reference/core/get-trades-for-a-user-or-markets
+
+- User activity timeline:
+  - Reference: "Get user activity"
+  - https://docs.polymarket.com/api-reference/core/get-user-activity
+
+- Top holders for markets:
+  - Reference: "Get top holders for markets"
+  - https://docs.polymarket.com/api-reference/core/get-top-holders-for-markets
+
+- Current positions for a user:
+  - Reference: "Get current positions for a user"
+  - https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user
+
+- Trader leaderboard rankings (seed list discovery):
+  - Reference: "Get trader leaderboard rankings"
+  - https://docs.polymarket.com/api-reference/core/get-trader-leaderboard-rankings
+
+- Total markets a user has traded (specialist vs generalist classification):
+  - Reference: "Get total markets a user has traded"
+  - https://docs.polymarket.com/api-reference/misc/get-total-markets-a-user-has-traded
+
+### 6.2 Polymarket CLOB API (secondary)
+For order book and trade mechanics and future execution/reconciliation:
+- CLOB docs entry point:
+  - https://docs.polymarket.com/developers/CLOB/introduction
+
+### 6.3 Polymarket Gamma API (secondary)
+For market discovery metadata if needed:
+- Gamma "Get markets":
+  - https://docs.polymarket.com/developers/gamma-markets-api/get-markets
+
+### 6.4 Community signals (optional, for product inspiration)
+Use Reddit for opinion patterns and UX ideas, not as truth:
+- Whale tracking website discussion:
+  - https://www.reddit.com/r/CryptoCurrency/comments/1ogw0dq/i_built_a_website_to_track_whales_and/
+- Copying whales discussion (limitations, slippage, timing):
+  - https://www.reddit.com/r/PolymarketTrading/comments/1qfzun0/anyone_had_success_copying_whales/
+
+---
+
+## 7) Competitive Landscape (existing projects)
+This product overlaps with several categories. Most tools cover one slice; the integrated closed-loop is rarer.
+
+### 7.1 Wallet tracking / analytics tools
+- Polyterm (terminal wallet tracker):
+  - https://github.com/NYTEMODEONLY/polyterm
+- polymarket-trade-tracker (analyze trading activity by wallet):
+  - https://github.com/leolopez007/polymarket-trade-tracker
+- PolymarketAnalytics (ETHGlobal; fetch/analyze all trades by account):
+  - https://ethglobal.com/showcase/polymarketanalytics-vt1dm
+
+### 7.2 Dashboards / on-chain analytics
+- Dune "poly" dashboard (Polymarket analytics):
+  - https://www.dune.com/seoul/poly
+- Dune wallet tracking dashboard:
+  - https://dune.com/no__hive/terminal-1
+
+### 7.3 Suspicious/insider style trackers
+- polymarket-insider-tracker:
+  - https://github.com/pselamy/polymarket-insider-tracker
+
+### 7.4 Copy trading bots
+- Polymarket copy trade documentation:
+  - https://github.com/mundoasdef/Polymarket-Copy-Trade---Documentation
+- polymarket-copy-trading-bot:
+  - https://github.com/Trum3it/polymarket-copy-trading-bot
+- polymarket-arbitrage-copy-bot:
+  - https://github.com/crypmancer/polymarket-arbitrage-copy-bot
+
+### 7.5 Reverse-engineering toolkits
+- polybot (strategy reverse-engineering toolkit):
+  - https://github.com/ent0n29/polybot
+- polymarket-intelligence (real-time tracker, large activity monitoring, holders analysis):
+  - https://github.com/luuisotorres/polymarket-intelligence
+
+### Key gap / differentiation
+Most projects do one of:
+- track wallets, OR
+- show whales/alerts, OR
+- provide copy bot scaffolding, OR
+- show dashboards
+
+This product aims to be the **closed loop**:
+1) Market selection -> 2) Wallet discovery -> 3) Long-horizon tracking -> 4) Risk-managed paper copy -> 5) "Who to follow" ranking and evidence.
+
+---
+
+## 8) Market Selection (what "good markets to follow" means)
+We rank markets daily and pick a top set to drive wallet discovery.
+
+### 8.1 Market Score (MScore)
+Compute a daily MScore for each market using weighted features:
+
+1) Liquidity and volume (higher is better)
+2) Trade density (trades/day, active wallets/day)
+3) Spread / price impact proxy (tighter is better)
+4) Time-to-expiry (avoid extremely short and extremely long markets)
+5) Resolution clarity (objective criteria preferred)
+6) Whale concentration (top holders dominate, may be informative)
+   - Use "Get top holders for markets"
+   - https://docs.polymarket.com/api-reference/core/get-top-holders-for-markets
+
+### 8.2 Output
+Daily "Follow-worthy markets" list:
+- market_id, title
+- MScore and feature breakdown (explainability)
+- recommended tracking cadence
+- notes (why this market is informative)
+
+---
+
+## 9) Wallet Discovery (build watchlists from markets)
+For each selected market:
+
+### 9.1 Candidate sources
+1) Top holders -> add wallets tagged HOLDER
+   - https://docs.polymarket.com/api-reference/core/get-top-holders-for-markets
+
+2) Recent market trades -> add wallets tagged TRADER_RECENT
+   - https://docs.polymarket.com/api-reference/core/get-trades-for-a-user-or-markets
+
+3) Wallet activity expansion (discover other markets they trade)
+   - https://docs.polymarket.com/api-reference/core/get-user-activity
+
+4) Total markets traded (classify specialist/generalist)
+   - https://docs.polymarket.com/api-reference/misc/get-total-markets-a-user-has-traded
+
+5) Leaderboard seeding (global candidate pool)
+   - https://docs.polymarket.com/api-reference/core/get-trader-leaderboard-rankings
+
+### 9.2 Pruning / quality filters
+Deprioritize wallets with:
+- too few total trades (insufficient signal)
+- pure noise behavior (many tiny trades across many markets)
+- sybil-like patterns (many new wallets with single trades) unless repeated and large
+
+### 9.3 Watchlist model
+Wallets can belong to:
+- market-specific watchlists
+- global watchlist (high WScore candidates)
+
+---
+
+## 10) Long-Term Tracking
+Goal: maintain a durable dataset and derived features for months.
+
+### 10.1 Ingestion jobs
+- Trades ingest:
+  - poll by market and/or by wallet
+  - https://docs.polymarket.com/api-reference/core/get-trades-for-a-user-or-markets
+
+- Activity ingest:
+  - poll per watched wallet at lower frequency
+  - https://docs.polymarket.com/api-reference/core/get-user-activity
+
+- Positions snapshot:
+  - poll per watched wallet daily/hourly depending on limits
+  - https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user
+
+- Holders snapshot:
+  - poll per selected market daily
+  - https://docs.polymarket.com/api-reference/core/get-top-holders-for-markets
+
+### 10.2 Retention strategy
+- Store raw JSON events append-only.
+- Maintain derived tables:
+  - rolling 7d, 30d, 180d wallet features
+  - per-market wallet participation features
+
+---
+
+## 11) Paper Trading Engine (copy behavior)
+Mandatory: paper-first. All wallet ranking is grounded in paper performance with risk rules.
+
+### 11.1 Supported copy strategies (V1)
+1) Mirror trades (same direction, proportional size)
+2) Mirror with delay (simulate execution lag)
+3) Conviction-weighted (size by wallet historical position sizing)
+4) Consensus basket (follow top K wallets in a market, size by agreement)
+
+### 11.2 Risk management rules (hard requirements)
+- Max exposure per market: X% of paper bankroll
+- Max exposure per wallet: Y%
+- Max daily turnover: cap trades/day
+- Slippage model: conservative slippage assumption
+- No chasing: do not increase position after adverse move beyond threshold
+- Portfolio stop: pause strategy if drawdown exceeds threshold
+
+### 11.3 Metrics
+- ROI, PnL
+- hit rate
+- max drawdown
+- stability across windows (7d/30d/90d)
+- timing skill (post-trade drift)
+- concentration risk metrics
+
+---
+
+## 12) "Who to Follow" Ranking (final output)
+### 12.1 Wallet Score (WScore)
+Rank wallets based on:
+- Edge (paper ROI vs baseline)
+- Consistency (variance, drawdown)
+- Market skill (edge across markets or single niche)
+- Timing skill (entries before repricing)
+- Behavior quality (few high-quality trades vs noise)
+
+### 12.2 Output
+A ranked list of wallets with:
+- recommended follow mode (mirror, delay, consensus)
+- best markets to follow them in
+- evidence summary (performance windows, drawdown, timing metrics)
+- risk flags (high leverage behavior, concentration, instability)
+
+---
+
+## 13) Product Experience (V1 UI)
+### Pages
+1) Market Explorer
+   - daily "good markets to follow" list
+   - explainable MScore breakdown
+
+2) Market Detail
+   - trades feed, top holders
+   - extracted wallet candidates and why they were selected
+
+3) Wallet Profile
+   - markets traded, activity timeline
+   - position history and exposures
+   - paper-copy results if followed
+
+4) Paper Portfolio Dashboard
+   - bankroll, allocations
+   - risk rule violations
+   - performance over time
+
+### Alerts (V1.5)
+- watched wallet entered a top market
+- watched wallet added size materially
+- consensus divergence (top wallets disagree strongly)
+
+---
+
+## 14) Functional Requirements
+### Must-have (MVP)
+- Daily market ranking (MScore) and selection
+- For top N markets:
+  - fetch trades and top holders
+  - build watchlists
+- Wallet tracking:
+  - ingest trades/activity/positions snapshots
+- Paper-copy engine:
+  - at least "mirror trades" strategy
+  - enforce risk caps
+- Wallet ranking (WScore) and reporting
+
+### Nice-to-have
+- leaderboard seeding
+- multiple copy strategies (delay, consensus)
+- alerts and notification system
+- richer slippage/impact modeling
+
+---
+
+## 15) Technical Requirements
+- Language: Python or TypeScript
+- Storage: Postgres
+- Job runner: cron or queue-based worker
+- Rate limiting and retries/backoff
+- Idempotent ingestion with deduplication keys
+- Observability:
+  - ingestion lag
+  - API error rates
+  - backfill progress
+
+---
+
+## 16) Data Model (high-level)
+### Core tables
+- markets
+- wallets
+- trades_raw (append-only)
+- activity_raw (append-only)
+- positions_snapshots
+- holders_snapshots
+- market_scores_daily
+- wallet_features_daily
+- paper_trades
+- paper_positions
+- wallet_scores_daily
+
+---
+
+## 17) Risks and Mitigations
+### 17.1 Selection bias / overfitting
+Mitigation:
+- rolling out-of-sample evaluation
+- require stability across windows
+
+### 17.2 Sybil/spoofing (bait wallets)
+Mitigation:
+- enforce per-wallet exposure caps
+- delay strategy as default baseline
+- require multi-window consistency
+
+### 17.3 Slippage and execution realism
+Mitigation:
+- conservative slippage model
+- simulate delays and size limits
+
+### 17.4 API changes or missing data
+Mitigation:
+- store raw JSON
+- schema versioning
+- integration tests against documented endpoints
+
+---
+
+## 18) Acceptance Criteria
+1) System outputs top 20 "follow-worthy markets" daily with explainable MScore.
+2) For each selected market, system extracts at least 50 candidate wallets (holders + traders) where data allows.
+3) For each watched wallet:
+   - continuous activity timeline (as ingested)
+   - periodic position snapshots
+4) Paper portfolio results reproducible from stored events.
+5) Wallet ranking page:
+   - WScore for 7d/30d/90d windows
+   - evidence metrics and recommended follow mode
+6) Risk management rules enforceable and audited (violations logged).
+
+---
+
+## 19) Implementation Plan (suggested order)
+1) Ingestion layer: trades/activity/holders/positions -> Postgres
+2) Market scoring (MScore) and daily selection
+3) Wallet discovery per market and watchlist persistence
+4) Paper-copy engine with risk caps
+5) Wallet scoring (WScore) and UI for rankings
+6) Alerts and strategy variants
+
+---
