@@ -5,6 +5,62 @@ pub struct Database {
     pub conn: Connection,
 }
 
+/// Async database wrapper around `tokio_rusqlite::Connection`.
+///
+/// Runs all SQLite operations on a dedicated background thread via
+/// `tokio_rusqlite`, keeping the Tokio runtime cooperative. Clone is
+/// cheap (shared mpsc sender to the background thread).
+#[derive(Clone)]
+pub struct AsyncDb {
+    conn: tokio_rusqlite::Connection,
+}
+
+impl AsyncDb {
+    /// Open a database at `path`, set PRAGMAs (WAL, foreign keys, busy_timeout),
+    /// and run migrations — all on the background thread.
+    pub async fn open(path: &str) -> Result<Self> {
+        let conn = tokio_rusqlite::Connection::open(path).await?;
+        conn.call(|conn| -> std::result::Result<(), rusqlite::Error> {
+            conn.busy_timeout(std::time::Duration::from_secs(30))?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+            conn.execute_batch(SCHEMA)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| match e {
+            tokio_rusqlite::Error::Error(err) => {
+                anyhow::Error::from(err).context("AsyncDb::open: migration failed")
+            }
+            other => anyhow::anyhow!("AsyncDb::open: {other}"),
+        })?;
+        Ok(Self { conn })
+    }
+
+    /// Run a closure on the background SQLite thread and return the result.
+    ///
+    /// The closure receives `&mut rusqlite::Connection` and can perform
+    /// arbitrary sync SQLite operations. The result is sent back via oneshot
+    /// channel.
+    pub async fn call<F, R>(&self, function: F) -> Result<R>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.conn.call(move |conn| function(conn)).await.map_err(
+            |e: tokio_rusqlite::Error<anyhow::Error>| match e {
+                tokio_rusqlite::Error::ConnectionClosed => {
+                    anyhow::anyhow!("database connection closed")
+                }
+                tokio_rusqlite::Error::Close((_, err)) => {
+                    anyhow::anyhow!("database close error: {err}")
+                }
+                tokio_rusqlite::Error::Error(err) => err,
+                other => anyhow::anyhow!("database error: {other}"),
+            },
+        )
+    }
+}
+
 impl Database {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -282,5 +338,71 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         db.run_migrations().unwrap();
         db.run_migrations().unwrap(); // second call must not fail
+    }
+
+    #[tokio::test]
+    async fn test_async_db_open_runs_migrations() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        let tables: Vec<String> = db
+            .call(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+                let rows = stmt
+                    .query_map([], |row| row.get(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        assert!(tables.contains(&"markets".to_string()));
+        assert!(tables.contains(&"wallets".to_string()));
+        assert!(tables.contains(&"trades_raw".to_string()));
+        assert!(tables.contains(&"paper_trades".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_async_db_is_clone_and_send() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        let db2 = db.clone();
+
+        // Write from one clone
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO markets (condition_id, title) VALUES ('0xabc', 'Test Market')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Read from the other clone — same underlying connection
+        let title: String = db2
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT title FROM markets WHERE condition_id = '0xabc'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(title, "Test Market");
+    }
+
+    #[tokio::test]
+    async fn test_async_db_call_returns_error_on_bad_sql() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        let result: Result<()> = db
+            .call(|conn| {
+                conn.execute("INVALID SQL", [])?;
+                Ok(())
+            })
+            .await;
+
+        assert!(result.is_err());
     }
 }

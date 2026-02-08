@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::sync::Arc;
 
 mod cli;
 mod ingestion;
@@ -25,11 +26,11 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let db = common::db::Database::open(&config.database.path)?;
-    db.run_migrations()?;
-
+    // CLI commands use sync Database — they exit immediately, no need for async.
     let cmd = cli::parse_args(std::env::args()).map_err(anyhow::Error::msg)?;
     if cmd != cli::Command::Run {
+        let db = common::db::Database::open(&config.database.path)?;
+        db.run_migrations()?;
         cli::run_command(&db, cmd)?;
         return Ok(());
     }
@@ -37,249 +38,214 @@ async fn main() -> Result<()> {
     let _prom_handle = metrics::install_prometheus(config.observability.prometheus_port)?;
     metrics::describe();
 
-    let cfg = std::rc::Rc::new(config);
+    // AsyncDb for the main evaluator process — dedicated background thread for SQLite.
+    let db = common::db::AsyncDb::open(&config.database.path).await?;
 
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async move {
-            let api = std::rc::Rc::new(common::polymarket::PolymarketClient::new_with_settings(
-                &cfg.polymarket.data_api_url,
-                &cfg.polymarket.gamma_api_url,
-                std::time::Duration::from_secs(15),
-                std::time::Duration::from_millis(cfg.ingestion.rate_limit_delay_ms),
-                cfg.ingestion.max_retries,
-                std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
-            ));
+    let cfg = Arc::new(config);
+    let api = Arc::new(common::polymarket::PolymarketClient::new_with_settings(
+        &cfg.polymarket.data_api_url,
+        &cfg.polymarket.gamma_api_url,
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(cfg.ingestion.rate_limit_delay_ms),
+        cfg.ingestion.max_retries,
+        std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
+    ));
 
-            // Single shared DB connection — avoids SQLite write-lock contention
-            // on the single-threaded LocalSet (busy_timeout can't help when the
-            // thread is blocked waiting for itself to release the lock).
-            let db =
-                std::rc::Rc::new(common::db::Database::open(&cfg.database.path).expect("open db"));
-            db.run_migrations().expect("migrations");
+    // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
+    tracing::info!("bootstrap: seeding markets and wallets");
 
-            // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
-            tracing::info!("bootstrap: seeding markets and wallets");
+    match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: market_scoring done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: market_scoring failed"),
+    }
 
-            match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
-                Ok(n) => tracing::info!(inserted = n, "bootstrap: market_scoring done"),
-                Err(e) => tracing::error!(error = %e, "bootstrap: market_scoring failed"),
+    match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref()).await {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
+    }
+
+    tracing::info!("bootstrap done — starting scheduler (ingestion runs immediately)");
+
+    // ── Periodic scheduler ──
+    let (market_scoring_tx, mut market_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (wallet_discovery_tx, mut wallet_discovery_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (trades_ingestion_tx, mut trades_ingestion_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (activity_ingestion_tx, mut activity_ingestion_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (positions_snapshot_tx, mut positions_snapshot_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (holders_snapshot_tx, mut holders_snapshot_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (paper_tick_tx, mut paper_tick_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (wallet_scoring_tx, mut wallet_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
+
+    let _scheduler_handles = scheduler::start(vec![
+        scheduler::JobSpec {
+            name: "market_scoring".to_string(),
+            interval: std::time::Duration::from_secs(cfg.market_scoring.refresh_interval_secs),
+            tick: market_scoring_tx,
+            run_immediately: false,
+        },
+        scheduler::JobSpec {
+            name: "wallet_discovery".to_string(),
+            interval: std::time::Duration::from_secs(cfg.wallet_discovery.refresh_interval_secs),
+            tick: wallet_discovery_tx,
+            run_immediately: false,
+        },
+        scheduler::JobSpec {
+            name: "trades_ingestion".to_string(),
+            interval: std::time::Duration::from_secs(cfg.ingestion.trades_poll_interval_secs),
+            tick: trades_ingestion_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "activity_ingestion".to_string(),
+            interval: std::time::Duration::from_secs(cfg.ingestion.activity_poll_interval_secs),
+            tick: activity_ingestion_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "positions_snapshot".to_string(),
+            interval: std::time::Duration::from_secs(cfg.ingestion.positions_poll_interval_secs),
+            tick: positions_snapshot_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "holders_snapshot".to_string(),
+            interval: std::time::Duration::from_secs(cfg.ingestion.holders_poll_interval_secs),
+            tick: holders_snapshot_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "paper_tick".to_string(),
+            interval: std::time::Duration::from_secs(60),
+            tick: paper_tick_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "wallet_scoring".to_string(),
+            interval: std::time::Duration::from_secs(86400),
+            tick: wallet_scoring_tx,
+            run_immediately: true,
+        },
+    ]);
+
+    tokio::spawn({
+        let api = api.clone();
+        let cfg = cfg.clone();
+        let db = db.clone();
+        async move {
+            while market_scoring_rx.recv().await.is_some() {
+                match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+                    Ok(n) => tracing::info!(inserted = n, "market_scoring done"),
+                    Err(e) => tracing::error!(error = %e, "market_scoring failed"),
+                }
             }
+        }
+    });
 
-            match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
+    tokio::spawn({
+        let api = api.clone();
+        let cfg = cfg.clone();
+        let db = db.clone();
+        async move {
+            while wallet_discovery_rx.recv().await.is_some() {
+                match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
+                    .await
+                {
+                    Ok(n) => tracing::info!(inserted = n, "wallet_discovery done"),
+                    Err(e) => tracing::error!(error = %e, "wallet_discovery failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let api = api.clone();
+        let db = db.clone();
+        async move {
+            while trades_ingestion_rx.recv().await.is_some() {
+                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
+                    Ok((_pages, inserted)) => {
+                        tracing::info!(inserted, "trades_ingestion done")
+                    }
+                    Err(e) => tracing::error!(error = %e, "trades_ingestion failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let api = api.clone();
+        let db = db.clone();
+        async move {
+            while activity_ingestion_rx.recv().await.is_some() {
+                match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
+                    Ok(inserted) => tracing::info!(inserted, "activity_ingestion done"),
+                    Err(e) => tracing::error!(error = %e, "activity_ingestion failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let api = api.clone();
+        let db = db.clone();
+        async move {
+            while positions_snapshot_rx.recv().await.is_some() {
+                match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
+                    Ok(inserted) => tracing::info!(inserted, "positions_snapshot done"),
+                    Err(e) => tracing::error!(error = %e, "positions_snapshot failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let api = api.clone();
+        let cfg = cfg.clone();
+        let db = db.clone();
+        async move {
+            while holders_snapshot_rx.recv().await.is_some() {
+                match jobs::run_holders_snapshot_once(
+                    &db,
+                    api.as_ref(),
+                    cfg.wallet_discovery.holders_per_market as u32,
+                )
                 .await
-            {
-                Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
-                Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
+                {
+                    Ok(inserted) => tracing::info!(inserted, "holders_snapshot done"),
+                    Err(e) => tracing::error!(error = %e, "holders_snapshot failed"),
+                }
             }
+        }
+    });
 
-            tracing::info!("bootstrap done — starting scheduler (ingestion runs immediately)");
-
-            // ── Periodic scheduler ──
-            let (market_scoring_tx, mut market_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
-            let (wallet_discovery_tx, mut wallet_discovery_rx) =
-                tokio::sync::mpsc::channel::<()>(8);
-            let (trades_ingestion_tx, mut trades_ingestion_rx) =
-                tokio::sync::mpsc::channel::<()>(8);
-            let (activity_ingestion_tx, mut activity_ingestion_rx) =
-                tokio::sync::mpsc::channel::<()>(8);
-            let (positions_snapshot_tx, mut positions_snapshot_rx) =
-                tokio::sync::mpsc::channel::<()>(8);
-            let (holders_snapshot_tx, mut holders_snapshot_rx) =
-                tokio::sync::mpsc::channel::<()>(8);
-            let (paper_tick_tx, mut paper_tick_rx) = tokio::sync::mpsc::channel::<()>(8);
-            let (wallet_scoring_tx, mut wallet_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
-
-            let _scheduler_handles = scheduler::start_local(vec![
-                scheduler::JobSpec {
-                    name: "market_scoring".to_string(),
-                    interval: std::time::Duration::from_secs(
-                        cfg.market_scoring.refresh_interval_secs,
-                    ),
-                    tick: market_scoring_tx,
-                    run_immediately: false,
-                },
-                scheduler::JobSpec {
-                    name: "wallet_discovery".to_string(),
-                    interval: std::time::Duration::from_secs(
-                        cfg.wallet_discovery.refresh_interval_secs,
-                    ),
-                    tick: wallet_discovery_tx,
-                    run_immediately: false,
-                },
-                scheduler::JobSpec {
-                    name: "trades_ingestion".to_string(),
-                    interval: std::time::Duration::from_secs(
-                        cfg.ingestion.trades_poll_interval_secs,
-                    ),
-                    tick: trades_ingestion_tx,
-                    run_immediately: true,
-                },
-                scheduler::JobSpec {
-                    name: "activity_ingestion".to_string(),
-                    interval: std::time::Duration::from_secs(
-                        cfg.ingestion.activity_poll_interval_secs,
-                    ),
-                    tick: activity_ingestion_tx,
-                    run_immediately: true,
-                },
-                scheduler::JobSpec {
-                    name: "positions_snapshot".to_string(),
-                    interval: std::time::Duration::from_secs(
-                        cfg.ingestion.positions_poll_interval_secs,
-                    ),
-                    tick: positions_snapshot_tx,
-                    run_immediately: true,
-                },
-                scheduler::JobSpec {
-                    name: "holders_snapshot".to_string(),
-                    interval: std::time::Duration::from_secs(
-                        cfg.ingestion.holders_poll_interval_secs,
-                    ),
-                    tick: holders_snapshot_tx,
-                    run_immediately: true,
-                },
-                scheduler::JobSpec {
-                    name: "paper_tick".to_string(),
-                    interval: std::time::Duration::from_secs(60),
-                    tick: paper_tick_tx,
-                    run_immediately: true,
-                },
-                scheduler::JobSpec {
-                    name: "wallet_scoring".to_string(),
-                    interval: std::time::Duration::from_secs(86400),
-                    tick: wallet_scoring_tx,
-                    run_immediately: true,
-                },
-            ]);
-
-            tokio::task::spawn_local({
-                let api = api.clone();
-                let cfg = cfg.clone();
-                let db = db.clone();
-                async move {
-                    while market_scoring_rx.recv().await.is_some() {
-                        match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
-                            Ok(n) => tracing::info!(inserted = n, "market_scoring done"),
-                            Err(e) => tracing::error!(error = %e, "market_scoring failed"),
-                        }
-                    }
+    tokio::spawn({
+        let cfg = cfg.clone();
+        let db = db.clone();
+        async move {
+            while paper_tick_rx.recv().await.is_some() {
+                match jobs::run_paper_tick_once(&db, cfg.as_ref()).await {
+                    Ok(inserted) => tracing::info!(inserted, "paper_tick done"),
+                    Err(e) => tracing::error!(error = %e, "paper_tick failed"),
                 }
-            });
+            }
+        }
+    });
 
-            tokio::task::spawn_local({
-                let api = api.clone();
-                let cfg = cfg.clone();
-                let db = db.clone();
-                async move {
-                    while wallet_discovery_rx.recv().await.is_some() {
-                        match jobs::run_wallet_discovery_once(
-                            &db,
-                            api.as_ref(),
-                            api.as_ref(),
-                            cfg.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(n) => tracing::info!(inserted = n, "wallet_discovery done"),
-                            Err(e) => tracing::error!(error = %e, "wallet_discovery failed"),
-                        }
-                    }
+    tokio::spawn({
+        let cfg = cfg.clone();
+        let db = db.clone();
+        async move {
+            while wallet_scoring_rx.recv().await.is_some() {
+                match jobs::run_wallet_scoring_once(&db, cfg.as_ref()).await {
+                    Ok(inserted) => tracing::info!(inserted, "wallet_scoring done"),
+                    Err(e) => tracing::error!(error = %e, "wallet_scoring failed"),
                 }
-            });
+            }
+        }
+    });
 
-            tokio::task::spawn_local({
-                let api = api.clone();
-                let db = db.clone();
-                async move {
-                    while trades_ingestion_rx.recv().await.is_some() {
-                        match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
-                            Ok((_pages, inserted)) => {
-                                tracing::info!(inserted, "trades_ingestion done")
-                            }
-                            Err(e) => tracing::error!(error = %e, "trades_ingestion failed"),
-                        }
-                    }
-                }
-            });
-
-            tokio::task::spawn_local({
-                let api = api.clone();
-                let db = db.clone();
-                async move {
-                    while activity_ingestion_rx.recv().await.is_some() {
-                        match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
-                            Ok(inserted) => tracing::info!(inserted, "activity_ingestion done"),
-                            Err(e) => tracing::error!(error = %e, "activity_ingestion failed"),
-                        }
-                    }
-                }
-            });
-
-            tokio::task::spawn_local({
-                let api = api.clone();
-                let db = db.clone();
-                async move {
-                    while positions_snapshot_rx.recv().await.is_some() {
-                        match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
-                            Ok(inserted) => tracing::info!(inserted, "positions_snapshot done"),
-                            Err(e) => tracing::error!(error = %e, "positions_snapshot failed"),
-                        }
-                    }
-                }
-            });
-
-            tokio::task::spawn_local({
-                let api = api.clone();
-                let cfg = cfg.clone();
-                let db = db.clone();
-                async move {
-                    while holders_snapshot_rx.recv().await.is_some() {
-                        match jobs::run_holders_snapshot_once(
-                            &db,
-                            api.as_ref(),
-                            cfg.wallet_discovery.holders_per_market as u32,
-                        )
-                        .await
-                        {
-                            Ok(inserted) => tracing::info!(inserted, "holders_snapshot done"),
-                            Err(e) => tracing::error!(error = %e, "holders_snapshot failed"),
-                        }
-                    }
-                }
-            });
-
-            tokio::task::spawn_local({
-                let cfg = cfg.clone();
-                let db = db.clone();
-                async move {
-                    while paper_tick_rx.recv().await.is_some() {
-                        match jobs::run_paper_tick_once(&db, cfg.as_ref()) {
-                            Ok(inserted) => tracing::info!(inserted, "paper_tick done"),
-                            Err(e) => tracing::error!(error = %e, "paper_tick failed"),
-                        }
-                    }
-                }
-            });
-
-            tokio::task::spawn_local({
-                let cfg = cfg.clone();
-                let db = db.clone();
-                async move {
-                    while wallet_scoring_rx.recv().await.is_some() {
-                        match jobs::run_wallet_scoring_once(&db, cfg.as_ref()) {
-                            Ok(inserted) => tracing::info!(inserted, "wallet_scoring done"),
-                            Err(e) => tracing::error!(error = %e, "wallet_scoring failed"),
-                        }
-                    }
-                }
-            });
-
-            tokio::signal::ctrl_c().await?;
-            tracing::info!("shutting down");
-            Ok::<(), anyhow::Error>(())
-        })
-        .await?;
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("shutting down");
 
     Ok(())
 }

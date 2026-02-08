@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::db::Database;
+use common::db::AsyncDb;
 use rusqlite::OptionalExtension;
 
 #[allow(dead_code)]
@@ -41,108 +41,12 @@ fn apply_slippage(entry_price: f64, side: Side, slippage_pct: f64) -> (f64, f64)
     (clamp01(adjusted), slippage_pct)
 }
 
-#[allow(dead_code)]
-fn market_exposure_usdc(db: &Database, condition_id: &str) -> Result<f64> {
-    let v: Option<f64> = db.conn.query_row(
-        "SELECT SUM(total_size_usdc) FROM paper_positions WHERE condition_id = ?1",
-        rusqlite::params![condition_id],
-        |row| row.get(0),
-    )?;
-    Ok(v.unwrap_or(0.0))
-}
-
-#[allow(dead_code)]
-fn wallet_exposure_usdc(db: &Database, proxy_wallet: &str, strategy: &str) -> Result<f64> {
-    let v: Option<f64> = db.conn.query_row(
-        "SELECT SUM(total_size_usdc) FROM paper_positions WHERE proxy_wallet = ?1 AND strategy = ?2",
-        rusqlite::params![proxy_wallet, strategy],
-        |row| row.get(0),
-    )?;
-    Ok(v.unwrap_or(0.0))
-}
-
-#[allow(dead_code)]
-fn realized_pnl_usdc(db: &Database, strategy: &str) -> Result<f64> {
-    let v: Option<f64> = db.conn.query_row(
-        "SELECT SUM(pnl) FROM paper_trades WHERE strategy = ?1 AND status != 'open'",
-        rusqlite::params![strategy],
-        |row| row.get(0),
-    )?;
-    Ok(v.unwrap_or(0.0))
-}
-
-#[allow(dead_code)]
-fn today_trade_count(db: &Database, strategy: &str) -> Result<u32> {
-    let v: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM paper_trades WHERE strategy = ?1 AND date(created_at) = date('now')",
-        rusqlite::params![strategy],
-        |row| row.get(0),
-    )?;
-    Ok(v as u32)
-}
-
-#[allow(dead_code)]
-fn upsert_position(
-    db: &Database,
-    proxy_wallet: &str,
-    strategy: &str,
-    condition_id: &str,
-    side: Side,
-    add_size_usdc: f64,
-    entry_price: f64,
-) -> Result<()> {
-    let existing: Option<(i64, f64, f64)> = db
-        .conn
-        .query_row(
-            r#"
-            SELECT id, total_size_usdc, avg_entry_price
-            FROM paper_positions
-            WHERE proxy_wallet = ?1 AND strategy = ?2 AND condition_id = ?3 AND side = ?4
-            "#,
-            rusqlite::params![proxy_wallet, strategy, condition_id, side.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-
-    match existing {
-        Some((id, total_size, avg_entry)) => {
-            let new_total = total_size + add_size_usdc;
-            let new_avg = if new_total > 0.0 {
-                (total_size * avg_entry + add_size_usdc * entry_price) / new_total
-            } else {
-                entry_price
-            };
-            db.conn.execute(
-                "UPDATE paper_positions SET total_size_usdc = ?1, avg_entry_price = ?2, last_updated_at = datetime('now') WHERE id = ?3",
-                rusqlite::params![new_total, new_avg, id],
-            )?;
-        }
-        None => {
-            db.conn.execute(
-                r#"
-                INSERT INTO paper_positions
-                    (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
-                VALUES
-                    (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
-                rusqlite::params![
-                    proxy_wallet,
-                    strategy,
-                    condition_id,
-                    side.as_str(),
-                    add_size_usdc,
-                    entry_price
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
+/// All DB reads + writes for a single mirror decision run inside one `db.call()`
+/// closure, keeping them atomic on the SQLite background thread.
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
-pub fn mirror_trade_to_paper(
-    db: &Database,
+pub async fn mirror_trade_to_paper(
+    db: &AsyncDb,
     proxy_wallet: &str,
     condition_id: &str,
     side: Side,
@@ -158,93 +62,156 @@ pub fn mirror_trade_to_paper(
     max_daily_trades: u32,
     portfolio_stop_drawdown_pct: f64,
 ) -> Result<MirrorDecision> {
-    let strategy = "mirror";
+    // Clone owned values for the 'static Send closure
+    let proxy_wallet = proxy_wallet.to_string();
+    let condition_id = condition_id.to_string();
+    let outcome = outcome.map(|s| s.to_string());
 
-    // Portfolio stop: halt if realized drawdown exceeds threshold.
-    let realized = realized_pnl_usdc(db, strategy)?;
-    let stop_usdc = bankroll_usdc * (portfolio_stop_drawdown_pct / 100.0);
-    if realized < 0.0 && realized.abs() > stop_usdc {
-        return Ok(MirrorDecision {
-            inserted: false,
-            reason: Some("portfolio_stop".to_string()),
-        });
-    }
+    db.call(move |conn| {
+        let strategy = "mirror";
 
-    // Daily trade cap.
-    if today_trade_count(db, strategy)? >= max_daily_trades {
-        return Ok(MirrorDecision {
-            inserted: false,
-            reason: Some("max_daily_trades".to_string()),
-        });
-    }
+        // Portfolio stop: halt if realized drawdown exceeds threshold.
+        let realized: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM paper_trades WHERE strategy = ?1 AND status != 'open'",
+                rusqlite::params![strategy],
+                |row| row.get(0),
+            )?;
+        let stop_usdc = bankroll_usdc * (portfolio_stop_drawdown_pct / 100.0);
+        if realized < 0.0 && realized.abs() > stop_usdc {
+            return Ok(MirrorDecision {
+                inserted: false,
+                reason: Some("portfolio_stop".to_string()),
+            });
+        }
 
-    // Exposure caps.
-    let market_cap = bankroll_usdc * (max_exposure_per_market_pct / 100.0);
-    let wallet_cap = bankroll_usdc * (max_exposure_per_wallet_pct / 100.0);
+        // Daily trade cap.
+        let today_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM paper_trades WHERE strategy = ?1 AND date(created_at) = date('now')",
+            rusqlite::params![strategy],
+            |row| row.get(0),
+        )?;
+        if today_count as u32 >= max_daily_trades {
+            return Ok(MirrorDecision {
+                inserted: false,
+                reason: Some("max_daily_trades".to_string()),
+            });
+        }
 
-    let market_exposure = market_exposure_usdc(db, condition_id)?;
-    if market_exposure + position_size_usdc > market_cap {
-        return Ok(MirrorDecision {
-            inserted: false,
-            reason: Some("market_exposure_cap".to_string()),
-        });
-    }
+        // Exposure caps.
+        let market_cap = bankroll_usdc * (max_exposure_per_market_pct / 100.0);
+        let wallet_cap = bankroll_usdc * (max_exposure_per_wallet_pct / 100.0);
 
-    let wallet_exposure = wallet_exposure_usdc(db, proxy_wallet, strategy)?;
-    if wallet_exposure + position_size_usdc > wallet_cap {
-        return Ok(MirrorDecision {
-            inserted: false,
-            reason: Some("wallet_exposure_cap".to_string()),
-        });
-    }
+        let market_exposure: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_size_usdc), 0.0) FROM paper_positions WHERE condition_id = ?1",
+                rusqlite::params![condition_id],
+                |row| row.get(0),
+            )?;
+        if market_exposure + position_size_usdc > market_cap {
+            return Ok(MirrorDecision {
+                inserted: false,
+                reason: Some("market_exposure_cap".to_string()),
+            });
+        }
 
-    let (entry_price, slippage_applied) = apply_slippage(observed_price, side, slippage_pct);
+        let wallet_exposure: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_size_usdc), 0.0) FROM paper_positions WHERE proxy_wallet = ?1 AND strategy = ?2",
+                rusqlite::params![proxy_wallet, strategy],
+                |row| row.get(0),
+            )?;
+        if wallet_exposure + position_size_usdc > wallet_cap {
+            return Ok(MirrorDecision {
+                inserted: false,
+                reason: Some("wallet_exposure_cap".to_string()),
+            });
+        }
 
-    db.conn.execute(
-        r#"
-        INSERT INTO paper_trades
-            (proxy_wallet, strategy, condition_id, side, outcome, outcome_index, size_usdc, entry_price, slippage_applied, triggered_by_trade_id, status)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open')
-        "#,
-        rusqlite::params![
-            proxy_wallet,
-            strategy,
-            condition_id,
-            side.as_str(),
-            outcome,
-            outcome_index,
-            position_size_usdc,
-            entry_price,
-            slippage_applied,
-            triggered_by_trade_id
-        ],
-    )?;
+        let (entry_price, slippage_applied) = apply_slippage(observed_price, side, slippage_pct);
 
-    upsert_position(
-        db,
-        proxy_wallet,
-        strategy,
-        condition_id,
-        side,
-        position_size_usdc,
-        entry_price,
-    )?;
+        conn.execute(
+            r#"
+            INSERT INTO paper_trades
+                (proxy_wallet, strategy, condition_id, side, outcome, outcome_index, size_usdc, entry_price, slippage_applied, triggered_by_trade_id, status)
+            VALUES
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'open')
+            "#,
+            rusqlite::params![
+                proxy_wallet,
+                strategy,
+                condition_id,
+                side.as_str(),
+                outcome,
+                outcome_index,
+                position_size_usdc,
+                entry_price,
+                slippage_applied,
+                triggered_by_trade_id
+            ],
+        )?;
 
-    Ok(MirrorDecision {
-        inserted: true,
-        reason: None,
+        // Upsert position (inline — same transaction).
+        let existing: Option<(i64, f64, f64)> = conn
+            .query_row(
+                r#"
+                SELECT id, total_size_usdc, avg_entry_price
+                FROM paper_positions
+                WHERE proxy_wallet = ?1 AND strategy = ?2 AND condition_id = ?3 AND side = ?4
+                "#,
+                rusqlite::params![proxy_wallet, strategy, condition_id, side.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        match existing {
+            Some((id, total_size, avg_entry)) => {
+                let new_total = total_size + position_size_usdc;
+                let new_avg = if new_total > 0.0 {
+                    (total_size * avg_entry + position_size_usdc * entry_price) / new_total
+                } else {
+                    entry_price
+                };
+                conn.execute(
+                    "UPDATE paper_positions SET total_size_usdc = ?1, avg_entry_price = ?2, last_updated_at = datetime('now') WHERE id = ?3",
+                    rusqlite::params![new_total, new_avg, id],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    r#"
+                    INSERT INTO paper_positions
+                        (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
+                    VALUES
+                        (?1, ?2, ?3, ?4, ?5, ?6)
+                    "#,
+                    rusqlite::params![
+                        proxy_wallet,
+                        strategy,
+                        condition_id,
+                        side.as_str(),
+                        position_size_usdc,
+                        entry_price
+                    ],
+                )?;
+            }
+        }
+
+        Ok(MirrorDecision {
+            inserted: true,
+            reason: None,
+        })
     })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mirror_trade_creates_paper_trade() {
-        let db = Database::open(":memory:").unwrap();
-        db.run_migrations().unwrap();
+    #[tokio::test]
+    async fn test_mirror_trade_creates_paper_trade() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
 
         let res = mirror_trade_to_paper(
             &db,
@@ -263,42 +230,46 @@ mod tests {
             100,
             15.0,
         )
+        .await
         .unwrap();
 
         assert!(res.inserted);
 
-        let cnt: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))
+        let (cnt, entry_price): (i64, f64) = db
+            .call(|conn| {
+                let cnt =
+                    conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?;
+                let entry_price =
+                    conn.query_row("SELECT entry_price FROM paper_trades LIMIT 1", [], |row| {
+                        row.get(0)
+                    })?;
+                Ok((cnt, entry_price))
+            })
+            .await
             .unwrap();
         assert_eq!(cnt, 1);
-
-        let entry_price: f64 = db
-            .conn
-            .query_row("SELECT entry_price FROM paper_trades LIMIT 1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
         assert!((entry_price - 0.606).abs() < 1e-9); // 0.60 * (1 + 0.01)
     }
 
-    #[test]
-    fn test_risk_cap_blocks_oversized_trade() {
-        let db = Database::open(":memory:").unwrap();
-        db.run_migrations().unwrap();
+    #[tokio::test]
+    async fn test_risk_cap_blocks_oversized_trade() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
 
         // Existing exposure in market is $900, cap is $1,000.
-        db.conn
-            .execute(
+        db.call(|conn| {
+            conn.execute(
                 r#"
-            INSERT INTO paper_positions
-                (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
-            VALUES
-                (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
+                INSERT INTO paper_positions
+                    (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
+                VALUES
+                    (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
                 rusqlite::params!["0xwallet", "mirror", "0xcond", "BUY", 900.0, 0.50],
-            )
-            .unwrap();
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 
         let res = mirror_trade_to_paper(
             &db,
@@ -317,42 +288,48 @@ mod tests {
             100,
             15.0,
         )
+        .await
         .unwrap();
 
         assert!(!res.inserted);
         assert_eq!(res.reason.as_deref(), Some("market_exposure_cap"));
 
         let cnt: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
             .unwrap();
         assert_eq!(cnt, 0);
     }
 
-    #[test]
-    fn test_portfolio_stop_halts_trading() {
-        let db = Database::open(":memory:").unwrap();
-        db.run_migrations().unwrap();
+    #[tokio::test]
+    async fn test_portfolio_stop_halts_trading() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
 
         // Realized PnL is -1600 on a 10k bankroll => 16% drawdown, threshold is 15%.
-        db.conn.execute(
-            r#"
-            INSERT INTO paper_trades
-                (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
-            VALUES
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
-            "#,
-            rusqlite::params![
-                "0xwallet",
-                "mirror",
-                "0xcond",
-                "BUY",
-                100.0,
-                0.50,
-                "settled_loss",
-                -1600.0
-            ],
-        )
+        db.call(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO paper_trades
+                    (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
+                VALUES
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
+                "#,
+                rusqlite::params![
+                    "0xwallet",
+                    "mirror",
+                    "0xcond",
+                    "BUY",
+                    100.0,
+                    0.50,
+                    "settled_loss",
+                    -1600.0
+                ],
+            )?;
+            Ok(())
+        })
+        .await
         .unwrap();
 
         let res = mirror_trade_to_paper(
@@ -372,6 +349,7 @@ mod tests {
             100,
             15.0,
         )
+        .await
         .unwrap();
 
         assert!(!res.inserted);
