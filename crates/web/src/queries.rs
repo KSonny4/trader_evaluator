@@ -671,7 +671,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let summary = paper_summary(&conn, 10000.0).unwrap();
+        let summary = paper_summary(&conn, 1000.0).unwrap();
         assert_eq!(summary.total_pnl, 25.0);
         assert_eq!(summary.settled_wins, 1);
         assert_eq!(summary.settled_losses, 0);

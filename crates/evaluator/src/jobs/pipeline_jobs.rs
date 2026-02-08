@@ -843,7 +843,7 @@ mod tests {
                 INSERT INTO paper_trades
                     (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
                 VALUES
-                    (?1, 'mirror', ?2, 'BUY', 100.0, 0.5, 'settled_win', 50.0, datetime('now'), datetime('now'))
+                    (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 50.0, datetime('now'), datetime('now'))
                 ",
                 rusqlite::params!["0xw", "0xcond"],
             )?;

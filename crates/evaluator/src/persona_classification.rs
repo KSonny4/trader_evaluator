@@ -694,7 +694,7 @@ mod tests {
             win_count,
             loss_count,
             total_pnl: 200.0,
-            avg_position_size: 100.0,
+            avg_position_size: 25.0,
             unique_markets,
             avg_hold_time_hours: 12.0,
             max_drawdown_pct,

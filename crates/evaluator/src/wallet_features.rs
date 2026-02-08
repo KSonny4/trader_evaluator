@@ -169,8 +169,8 @@ mod tests {
         let now = 1_700_000_000i64;
         let day = 86_400i64;
         let trades = vec![
-            ("0xabc", "0xm1", "BUY", 100.0, 0.60, now - 5 * day),
-            ("0xabc", "0xm1", "SELL", 100.0, 0.70, now - 4 * day),
+            ("0xabc", "0xm1", "BUY", 25.0, 0.60, now - 5 * day),
+            ("0xabc", "0xm1", "SELL", 25.0, 0.70, now - 4 * day),
             ("0xabc", "0xm2", "BUY", 50.0, 0.40, now - 3 * day),
             ("0xabc", "0xm2", "SELL", 50.0, 0.30, now - 2 * day),
         ];
@@ -204,7 +204,7 @@ mod tests {
             win_count: 7,
             loss_count: 3,
             total_pnl: 150.0,
-            avg_position_size: 100.0,
+            avg_position_size: 25.0,
             unique_markets: 5,
             avg_hold_time_hours: 24.0,
             max_drawdown_pct: 8.0,

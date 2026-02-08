@@ -170,7 +170,7 @@ async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
 
 async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = open_readonly(&state).unwrap();
-    let summary = queries::paper_summary(&conn, 10000.0).unwrap();
+    let summary = queries::paper_summary(&conn, 1000.0).unwrap();
     let trades = queries::recent_paper_trades(&conn, 20).unwrap();
     Html(PaperTemplate { summary, trades }.to_string())
 }
