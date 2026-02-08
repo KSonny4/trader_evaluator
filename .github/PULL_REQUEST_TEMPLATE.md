@@ -13,6 +13,7 @@
 - [ ] `cargo test --all` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
 - [ ] `cargo fmt --check` clean
+- [ ] `requesting-code-review` skill was used
 
 ## Code Review
 
