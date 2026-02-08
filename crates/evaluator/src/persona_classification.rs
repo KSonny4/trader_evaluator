@@ -245,6 +245,28 @@ pub fn detect_noise_trader(
     }
 }
 
+/// Detects suspiciously new wallets with anomalous win rates.
+/// Young + high win rate + few trades = likely insider or lucky sniper.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_sniper_insider(
+    wallet_age_days: u32,
+    win_rate: f64,
+    trade_count: u32,
+    max_age_days: u32,
+    min_win_rate: f64,
+    max_trades: u32,
+) -> Option<ExclusionReason> {
+    if wallet_age_days < max_age_days && win_rate > min_win_rate && trade_count < max_trades {
+        Some(ExclusionReason::SniperInsider {
+            age_days: wallet_age_days,
+            win_rate,
+            trade_count,
+        })
+    } else {
+        None
+    }
+}
+
 /// Detect the Patient Accumulator persona: long holds, low trading frequency.
 /// Returns Some(PatientAccumulator) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -826,6 +848,48 @@ mod tests {
     fn test_noise_trader_boundary_at_thresholds() {
         // Exactly at both thresholds — should NOT trigger (> and < are strict)
         let result = detect_noise_trader(50.0, 0.02, 50.0, 0.02);
+        assert_eq!(result, None);
+    }
+
+    // --- Task 11: Sniper/Insider ---
+
+    #[test]
+    fn test_detect_sniper() {
+        // New wallet (15 days), 90% win rate on 12 trades = suspicious
+        let result = detect_sniper_insider(15, 0.90, 12, 30, 0.85, 20);
+        assert_eq!(
+            result,
+            Some(ExclusionReason::SniperInsider {
+                age_days: 15,
+                win_rate: 0.90,
+                trade_count: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn test_not_sniper_old_wallet() {
+        let result = detect_sniper_insider(180, 0.90, 12, 30, 0.85, 20);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_not_sniper_normal_win_rate() {
+        let result = detect_sniper_insider(15, 0.55, 12, 30, 0.85, 20);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_not_sniper_too_many_trades() {
+        // 25 trades > max 20 — enough history to not be suspicious
+        let result = detect_sniper_insider(15, 0.90, 25, 30, 0.85, 20);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_sniper_boundary_at_thresholds() {
+        // Exactly at all thresholds — should NOT trigger (all use strict < and >)
+        let result = detect_sniper_insider(30, 0.85, 20, 30, 0.85, 20);
         assert_eq!(result, None);
     }
 }
