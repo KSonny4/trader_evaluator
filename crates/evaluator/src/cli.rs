@@ -50,7 +50,15 @@ pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
     }
 }
 
-fn show_markets(db: &Database) -> Result<()> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketRow {
+    pub condition_id: String,
+    pub score_date: String,
+    pub mscore: f64,
+    pub rank: Option<i64>,
+}
+
+pub fn query_markets_today(db: &Database) -> Result<Vec<MarketRow>> {
     let mut stmt = db.conn.prepare(
         r#"
         SELECT condition_id, score_date, mscore, rank
@@ -61,17 +69,26 @@ fn show_markets(db: &Database) -> Result<()> {
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, f64>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-        ))
+        Ok(MarketRow {
+            condition_id: row.get(0)?,
+            score_date: row.get(1)?,
+            mscore: row.get(2)?,
+            rank: row.get(3)?,
+        })
     })?;
 
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn show_markets(db: &Database) -> Result<()> {
     println!("Top markets (today):");
-    for r in rows {
-        let (condition_id, score_date, mscore, rank) = r?;
+    for r in query_markets_today(db)? {
+        let MarketRow {
+            condition_id,
+            score_date,
+            mscore,
+            rank,
+        } = r;
         println!(
             "{rank:>3?}  {mscore:>6.3}  {score_date}  {condition_id}",
             rank = rank
@@ -80,7 +97,15 @@ fn show_markets(db: &Database) -> Result<()> {
     Ok(())
 }
 
-fn show_wallets(db: &Database) -> Result<()> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct WalletRow {
+    pub proxy_wallet: String,
+    pub discovered_from: String,
+    pub is_active: i64,
+    pub discovered_at: String,
+}
+
+pub fn query_wallets(db: &Database) -> Result<Vec<WalletRow>> {
     let mut stmt = db.conn.prepare(
         r#"
         SELECT proxy_wallet, discovered_from, is_active, discovered_at
@@ -90,18 +115,23 @@ fn show_wallets(db: &Database) -> Result<()> {
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-        ))
+        Ok(WalletRow {
+            proxy_wallet: row.get(0)?,
+            discovered_from: row.get(1)?,
+            is_active: row.get(2)?,
+            discovered_at: row.get(3)?,
+        })
     })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
 
+fn show_wallets(db: &Database) -> Result<()> {
     println!("Wallet watchlist:");
-    for r in rows {
-        let (w, src, active, at) = r?;
-        println!("{w}  src={src}  active={active}  discovered_at={at}");
+    for r in query_wallets(db)? {
+        println!(
+            "{}  src={}  active={}  discovered_at={}",
+            r.proxy_wallet, r.discovered_from, r.is_active, r.discovered_at
+        );
     }
     Ok(())
 }
@@ -183,6 +213,36 @@ fn show_rankings(db: &Database) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_query_markets_today_returns_rows() {
+        let db = common::db::Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn.execute(
+            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES ('0x1', date('now'), 0.9, 1)",
+            [],
+        ).unwrap();
+
+        let rows = query_markets_today(&db).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].condition_id, "0x1");
+    }
+
+    #[test]
+    fn test_query_wallets_returns_rows() {
+        let db = common::db::Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw', 'HOLDER', 1)",
+            [],
+        ).unwrap();
+
+        let rows = query_wallets(&db).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].proxy_wallet, "0xw");
+    }
 
     #[test]
     fn test_parse_args_defaults_to_run() {

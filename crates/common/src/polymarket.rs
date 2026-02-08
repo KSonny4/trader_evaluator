@@ -15,6 +15,14 @@ pub struct PolymarketClient {
 }
 
 impl PolymarketClient {
+    pub fn data_api_url(&self) -> &str {
+        &self.data_api_url
+    }
+
+    pub fn gamma_api_url(&self) -> &str {
+        &self.gamma_api_url
+    }
+
     pub fn new(data_api_url: &str, gamma_api_url: &str) -> Self {
         Self::new_with_settings(
             data_api_url,
@@ -49,12 +57,20 @@ impl PolymarketClient {
         }
     }
 
-    pub fn trades_url(&self, user: &str, market: Option<&str>, limit: u32, offset: u32) -> String {
+    pub fn trades_url_any(
+        &self,
+        user: Option<&str>,
+        market: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> String {
         let mut url = Url::parse(&format!("{}/trades", self.data_api_url))
             .expect("data_api_url must be a valid absolute URL");
         {
             let mut qp = url.query_pairs_mut();
-            qp.append_pair("user", user);
+            if let Some(u) = user {
+                qp.append_pair("user", u);
+            }
             if let Some(m) = market {
                 qp.append_pair("market", m);
             }
@@ -62,6 +78,10 @@ impl PolymarketClient {
             qp.append_pair("offset", &offset.to_string());
         }
         url.to_string()
+    }
+
+    pub fn trades_url(&self, user: &str, market: Option<&str>, limit: u32, offset: u32) -> String {
+        self.trades_url_any(Some(user), market, limit, offset)
     }
 
     #[allow(dead_code)]
@@ -72,9 +92,23 @@ impl PolymarketClient {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<ApiTrade>> {
-        let url = self.trades_url(user, market, limit, offset);
-        let body = self.get_text_with_retry(url).await?;
-        Ok(serde_json::from_str(&body)?)
+        let (trades, _raw) = self
+            .fetch_trades_raw_any(Some(user), market, limit, offset)
+            .await?;
+        Ok(trades)
+    }
+
+    #[allow(dead_code)]
+    pub async fn fetch_trades_raw_any(
+        &self,
+        user: Option<&str>,
+        market: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<ApiTrade>, Vec<u8>)> {
+        let url = self.trades_url_any(user, market, limit, offset);
+        let body = self.get_bytes_with_retry(url).await?;
+        Ok((serde_json::from_slice(&body)?, body))
     }
 
     #[allow(dead_code)]
@@ -89,8 +123,24 @@ impl PolymarketClient {
             qp.append_pair("market", condition_ids);
             qp.append_pair("limit", &limit.to_string());
         }
-        let body = self.get_text_with_retry(url).await?;
-        Ok(serde_json::from_str(&body)?)
+        let (holders, _raw) = self.fetch_holders_raw(condition_ids, limit).await?;
+        Ok(holders)
+    }
+
+    #[allow(dead_code)]
+    pub async fn fetch_holders_raw(
+        &self,
+        condition_ids: &str,
+        limit: u32,
+    ) -> Result<(Vec<ApiHolderResponse>, Vec<u8>)> {
+        let mut url = Url::parse(&format!("{}/holders", self.data_api_url))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("market", condition_ids);
+            qp.append_pair("limit", &limit.to_string());
+        }
+        let body = self.get_bytes_with_retry(url).await?;
+        Ok((serde_json::from_slice(&body)?, body))
     }
 
     #[allow(dead_code)]
@@ -100,6 +150,17 @@ impl PolymarketClient {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<ApiActivity>> {
+        let (activity, _raw) = self.fetch_activity_raw(user, limit, offset).await?;
+        Ok(activity)
+    }
+
+    #[allow(dead_code)]
+    pub async fn fetch_activity_raw(
+        &self,
+        user: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<ApiActivity>, Vec<u8>)> {
         let mut url = Url::parse(&format!("{}/activity", self.data_api_url))?;
         {
             let mut qp = url.query_pairs_mut();
@@ -107,8 +168,8 @@ impl PolymarketClient {
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = self.get_text_with_retry(url).await?;
-        Ok(serde_json::from_str(&body)?)
+        let body = self.get_bytes_with_retry(url).await?;
+        Ok((serde_json::from_slice(&body)?, body))
     }
 
     #[allow(dead_code)]
@@ -118,6 +179,17 @@ impl PolymarketClient {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<ApiPosition>> {
+        let (positions, _raw) = self.fetch_positions_raw(user, limit, offset).await?;
+        Ok(positions)
+    }
+
+    #[allow(dead_code)]
+    pub async fn fetch_positions_raw(
+        &self,
+        user: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<ApiPosition>, Vec<u8>)> {
         let mut url = Url::parse(&format!("{}/positions", self.data_api_url))?;
         {
             let mut qp = url.query_pairs_mut();
@@ -125,8 +197,8 @@ impl PolymarketClient {
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = self.get_text_with_retry(url).await?;
-        Ok(serde_json::from_str(&body)?)
+        let body = self.get_bytes_with_retry(url).await?;
+        Ok((serde_json::from_slice(&body)?, body))
     }
 
     #[allow(dead_code)]
@@ -151,14 +223,24 @@ impl PolymarketClient {
 
     #[allow(dead_code)]
     pub async fn fetch_gamma_markets(&self, limit: u32, offset: u32) -> Result<Vec<GammaMarket>> {
+        let (markets, _raw) = self.fetch_gamma_markets_raw(limit, offset).await?;
+        Ok(markets)
+    }
+
+    #[allow(dead_code)]
+    pub async fn fetch_gamma_markets_raw(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<GammaMarket>, Vec<u8>)> {
         let mut url = Url::parse(&format!("{}/markets", self.gamma_api_url))?;
         {
             let mut qp = url.query_pairs_mut();
             qp.append_pair("limit", &limit.to_string());
             qp.append_pair("offset", &offset.to_string());
         }
-        let body = self.get_text_with_retry(url).await?;
-        Ok(serde_json::from_str(&body)?)
+        let body = self.get_bytes_with_retry(url).await?;
+        Ok((serde_json::from_slice(&body)?, body))
     }
 
     async fn get_text_with_retry<U: IntoUrlLike>(&self, url: U) -> Result<String> {
@@ -180,6 +262,49 @@ impl PolymarketClient {
                     }
 
                     // Retry on transient statuses.
+                    if attempt <= self.max_retries
+                        && (status == StatusCode::TOO_MANY_REQUESTS
+                            || status.is_server_error()
+                            || status == StatusCode::REQUEST_TIMEOUT)
+                    {
+                        let backoff = self.backoff_base.mul_f64(2_f64.powi((attempt - 1) as i32));
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+
+                    return Err(anyhow::anyhow!("HTTP {} for {}", status, url));
+                }
+                Err(e) => {
+                    if attempt <= self.max_retries {
+                        let backoff = self.backoff_base.mul_f64(2_f64.powi((attempt - 1) as i32));
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+
+    async fn get_bytes_with_retry<U: IntoUrlLike>(&self, url: U) -> Result<Vec<u8>> {
+        let url = url.into_url()?;
+        let mut attempt: u32 = 0;
+
+        loop {
+            attempt += 1;
+            if !self.rate_limit_delay.is_zero() {
+                tokio::time::sleep(self.rate_limit_delay).await;
+            }
+
+            let req = self.client.get(url.clone());
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        let b = resp.bytes().await?;
+                        return Ok(b.to_vec());
+                    }
+
                     if attempt <= self.max_retries
                         && (status == StatusCode::TOO_MANY_REQUESTS
                             || status.is_server_error()
@@ -235,6 +360,18 @@ mod tests {
         assert!(url.contains("/trades"));
         assert!(url.contains("user=0xabc123"));
         assert!(url.contains("limit=100"));
+    }
+
+    #[test]
+    fn test_client_constructs_market_trades_url_without_user() {
+        let client = PolymarketClient::new(
+            "https://data-api.polymarket.com",
+            "https://gamma-api.polymarket.com",
+        );
+        let url = client.trades_url_any(None, Some("0xcond"), 5, 0);
+        assert!(url.contains("/trades"));
+        assert!(url.contains("market=0xcond"));
+        assert!(!url.contains("user="));
     }
 
     #[test]
