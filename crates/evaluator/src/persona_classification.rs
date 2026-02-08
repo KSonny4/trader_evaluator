@@ -189,6 +189,23 @@ pub fn detect_informed_specialist(
     Some(Persona::InformedSpecialist)
 }
 
+/// Detect the Patient Accumulator persona: long holds, low trading frequency.
+/// Returns Some(PatientAccumulator) if criteria are met, None otherwise.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn detect_patient_accumulator(
+    features: &WalletFeatures,
+    min_hold_hours: f64,
+    max_trades_per_week: f64,
+) -> Option<Persona> {
+    if features.avg_hold_time_hours < min_hold_hours {
+        return None;
+    }
+    if features.trades_per_week > max_trades_per_week {
+        return None;
+    }
+    Some(Persona::PatientAccumulator)
+}
+
 /// Detect the Consistent Generalist persona: many markets, steady returns, low drawdown.
 /// Returns Some(ConsistentGeneralist) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -602,5 +619,61 @@ mod tests {
         let features = make_generalist_features(25, 55, 45, 15.0, 1.2);
         let persona = detect_consistent_generalist(&features, 20, 0.52, 0.60, 15.0, 1.0);
         assert_eq!(persona, Some(Persona::ConsistentGeneralist));
+    }
+
+    // --- Task 7: Patient Accumulator ---
+
+    fn make_accumulator_features(avg_hold_time_hours: f64, trades_per_week: f64) -> WalletFeatures {
+        WalletFeatures {
+            proxy_wallet: "0xacc".to_string(),
+            window_days: 30,
+            trade_count: 12,
+            win_count: 8,
+            loss_count: 4,
+            total_pnl: 800.0,
+            avg_position_size: 2000.0,
+            unique_markets: 3,
+            avg_hold_time_hours,
+            max_drawdown_pct: 5.0,
+            trades_per_week,
+            sharpe_ratio: 0.8,
+        }
+    }
+
+    #[test]
+    fn test_detect_patient_accumulator() {
+        let features = make_accumulator_features(72.0, 3.0); // holds >48h, <5 trades/week
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        assert_eq!(persona, Some(Persona::PatientAccumulator));
+    }
+
+    #[test]
+    fn test_not_accumulator_too_frequent() {
+        let features = make_accumulator_features(72.0, 15.0); // >5 trades/week
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_accumulator_short_holds() {
+        let features = make_accumulator_features(12.0, 3.0); // holds <48h
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_accumulator_boundary_exact_min_hold() {
+        // Exactly 48h = at threshold, should pass (not <)
+        let features = make_accumulator_features(48.0, 3.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        assert_eq!(persona, Some(Persona::PatientAccumulator));
+    }
+
+    #[test]
+    fn test_accumulator_boundary_exact_max_frequency() {
+        // Exactly 5 trades/week = at threshold, should pass (not >)
+        let features = make_accumulator_features(72.0, 5.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        assert_eq!(persona, Some(Persona::PatientAccumulator));
     }
 }
