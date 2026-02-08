@@ -16,7 +16,7 @@ test: skills-sync
 	cargo fmt --check
 
 build-linux:
-	cargo build --release --target x86_64-unknown-linux-musl
+	cross build --release --target x86_64-unknown-linux-musl
 
 # === Deploy ===
 SERVER ?= ubuntu@YOUR_SERVER_IP
