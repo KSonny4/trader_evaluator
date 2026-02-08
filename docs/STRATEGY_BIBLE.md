@@ -416,12 +416,20 @@ WScore = 0.30 * edge_score
        * obscurity_bonus
 ```
 
-### Quartic Taker Fee
+### Taker Fees
+
+**Most Polymarket markets have ZERO trading fees.** The quartic taker fee formula applies ONLY to 15-minute crypto price prediction markets (BTC, ETH). Source: https://docs.polymarket.com/polymarket-learn/trading/fees
 
 ```
+# Only for 15-minute crypto markets (BTC, ETH price predictions):
 fee = price * 0.25 * (price * (1 - price))^2
+# Max ~1.56% at p=0.50, approaches zero near p=0 or p=1.
+
+# For all other markets (political, sports, weather, etc.):
+fee = 0
 ```
-Max ~1.44% at p=0.60, approaches zero near p=0 or p=1.
+
+Detection: check market title/slug for crypto asset names (BTC, ETH, bitcoin, ethereum) AND 15-minute time frame indicators (15m, 15 min). If both present → quartic fee. Otherwise → zero.
 
 ### PnL Decomposition
 
