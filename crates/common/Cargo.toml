@@ -9,6 +9,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
+tokio-rusqlite = { workspace = true }
 rust_decimal = { workspace = true }
 tracing = { workspace = true }
 toml = { workspace = true }
