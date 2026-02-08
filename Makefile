@@ -1,8 +1,12 @@
 SHELL := /bin/bash
 
-.PHONY: build test build-linux deploy check status check-tables skills-sync
+.PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks
 
 # === Local enforcement ===
+setup-hooks:
+	ln -sf ../../hooks/pre-push .git/hooks/pre-push
+	@echo "Git hooks installed. Direct pushes to main are now blocked."
+
 skills-sync:
 	./scripts/check_skills_sync.sh
 
