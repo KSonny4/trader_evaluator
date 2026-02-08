@@ -18,6 +18,24 @@
 
 ---
 
+## Progress (as of 2026-02-08)
+
+- [x] Task 1: Project Skeleton & Workspace Setup
+- [x] Task 2: Config System
+- [x] Task 3: Database Schema & Migrations
+- [x] Task 4: Core Types
+- [x] Task 5: Makefile + Deployment Setup (DEPLOY EARLY)
+- [x] Task 6: Polymarket API Client
+- [x] Task 7: Market Scoring (MScore) (pure logic + tests)
+- [x] Task 8: Wallet Discovery (pure logic + tests)
+- [x] Task 9: Ingestion Jobs (pure logic + tests; raw responses stored before parse inside ingestion functions)
+- [x] Task 10: Paper Trading Engine (pure logic + tests)
+- [x] Task 11: Wallet Scoring (WScore) (pure logic + tests)
+- [ ] Task 12: Main Event Loop & Job Scheduler (scheduler exists + tests; **job logic is not yet wired into ticks**)
+- [ ] Task 13: Observability (Prometheus Metrics) (exporter + metric descriptions exist; **module-level instrumentation not yet added**)
+- [ ] Task 14: CLI Commands for Manual Inspection (commands exist; **needs seeded DB data to validate outputs**)
+- [x] Task 15: Integration Test with Real APIs (ignored-by-default tests added; can be run via `cargo test -p common --test integration_real_apis -- --ignored`)
+
 ## Task 1: Project Skeleton & Workspace Setup
 
 **Files:**

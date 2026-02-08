@@ -14,12 +14,12 @@ The system progresses through discrete phases. Each phase has entry criteria (wh
 **Entry:** Nothing exists yet.
 **What to build:** Database schema, Polymarket API client, config system, basic CLI.
 **Exit criteria:**
-- [ ] SQLite database created with all core tables
-- [ ] Polymarket Data API client can fetch trades, holders, activity, positions
-- [ ] Gamma API client can list and filter markets
-- [ ] Config system loads from TOML
-- [ ] `cargo test --all` passes
-- [ ] At least one real API response saved as test fixture
+- [x] SQLite database created with all core tables
+- [x] Polymarket Data API client can fetch trades, holders, activity, positions
+- [x] Gamma API client can list and filter markets
+- [x] Config system loads from TOML
+- [x] `cargo test --all` passes
+- [x] At least one real API response saved as test fixture
 
 ### Phase 1: Market Discovery (COLLECT)
 **Entry:** Phase 0 complete.
