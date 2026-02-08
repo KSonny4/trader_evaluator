@@ -207,6 +207,25 @@ CREATE TABLE IF NOT EXISTS wallet_scores_daily (
     UNIQUE(proxy_wallet, score_date, window_days)
 );
 
+CREATE TABLE IF NOT EXISTS wallet_personas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_wallet TEXT NOT NULL,
+    persona TEXT NOT NULL,             -- Informed Specialist, Consistent Generalist, etc.
+    confidence REAL NOT NULL,          -- 0.0 to 1.0
+    feature_values_json TEXT,          -- JSON: trade_count, win_rate, unique_markets, etc.
+    classified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(proxy_wallet, classified_at)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_exclusions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_wallet TEXT NOT NULL,
+    reason TEXT NOT NULL,              -- e.g. "tail_risk_seller", "noise_trader", "too_young"
+    metric_value REAL,                 -- the actual value that triggered exclusion
+    threshold REAL,                    -- the threshold it was compared against
+    excluded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_timestamp ON trades_raw(timestamp);
@@ -217,6 +236,8 @@ CREATE INDEX IF NOT EXISTS idx_raw_api_responses_fetched_at ON raw_api_responses
 CREATE INDEX IF NOT EXISTS idx_paper_trades_wallet ON paper_trades(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date ON wallet_scores_daily(score_date);
+CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_wallet_exclusions_wallet ON wallet_exclusions(proxy_wallet);
 "#;
 
 #[cfg(test)]
@@ -249,6 +270,8 @@ mod tests {
         assert!(tables.contains(&"paper_trades".to_string()));
         assert!(tables.contains(&"paper_positions".to_string()));
         assert!(tables.contains(&"wallet_scores_daily".to_string()));
+        assert!(tables.contains(&"wallet_personas".to_string()));
+        assert!(tables.contains(&"wallet_exclusions".to_string()));
     }
 
     #[test]
