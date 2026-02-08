@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 mod market_scoring;
+mod wallet_discovery;
 
 #[tokio::main]
 async fn main() -> Result<()> {
