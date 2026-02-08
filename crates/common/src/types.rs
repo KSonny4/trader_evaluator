@@ -183,4 +183,3 @@ mod tests {
         assert_eq!(PaperTradeStatus::SettledWin.as_str(), "settled_win");
     }
 }
-

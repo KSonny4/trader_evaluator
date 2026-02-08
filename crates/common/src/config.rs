@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Deserialize;
+use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -105,11 +106,19 @@ pub struct Polymarket {
 impl Config {
     pub fn load() -> Result<Self> {
         let content = std::fs::read_to_string("config/default.toml")?;
-        Self::from_str(&content)
+        Self::from_toml_str(&content)
     }
 
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn from_toml_str(s: &str) -> Result<Self> {
         Ok(toml::from_str(s)?)
+    }
+}
+
+impl FromStr for Config {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::from_toml_str(s)
     }
 }
 
@@ -119,10 +128,9 @@ mod tests {
 
     #[test]
     fn test_load_default_config() {
-        let config = Config::from_str(include_str!("../../../config/default.toml")).unwrap();
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
         assert_eq!(config.general.mode, "paper");
         assert!(config.risk.max_exposure_per_market_pct > 0.0);
         assert!(config.ingestion.trades_poll_interval_secs > 0);
     }
 }
-

@@ -258,4 +258,3 @@ mod tests {
         db.run_migrations().unwrap(); // second call must not fail
     }
 }
-

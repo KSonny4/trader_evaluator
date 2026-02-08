@@ -15,4 +15,3 @@ async fn main() -> Result<()> {
     tracing::info!("shutting down");
     Ok(())
 }
-
