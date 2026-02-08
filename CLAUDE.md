@@ -24,10 +24,13 @@ WScore Ranking → "Who to Follow" with evidence
 
 | Document | Purpose |
 |----------|---------|
+| `docs/STRATEGY_BIBLE.md` | **Governing doc** — the single source of truth for what the system does, why, and how. Persona taxonomy, risk levels, copy fidelity, WScore/MScore formulas. If code contradicts this, the code is wrong. |
+| `docs/plans/2026-02-08-strategy-enforcement.md` | **Current implementation plan** — 24 tasks to bridge Strategy Bible to code. TDD, bite-sized. |
+| `docs/EVALUATION_STRATEGY.md` | Phase gates, evaluation metrics, decision rules. Superseded by Strategy Bible for strategic decisions, but still valid for phase progression. |
 | `docs/prd.txt` | Full product requirements — goals, data sources, data model, acceptance criteria |
 | `docs/on_risk.txt` | Risk management framework |
-| `docs/EVALUATION_STRATEGY.md` | **Governing doc** — phase gates, evaluation metrics, decision rules, data quality checks |
-| `docs/plans/2026-02-08-wallet-evaluator-mvp.md` | Implementation plan — 15 tasks, TDD, bite-sized |
+| `docs/plans/2026-02-08-wallet-evaluator-mvp.md` | Original MVP plan — 15 tasks, mostly complete |
+| `docs/plans/2026-02-08-evaluator-frontend-dashboard.md` | Dashboard implementation plan |
 | `docs/inspiration.txt` | Reference projects and links |
 
 ## Polymarket APIs we use
@@ -106,17 +109,27 @@ trader_evaluator/
         wallet_scoring.rs           # WScore computation
         metrics.rs                  # Prometheus metric definitions
         cli.rs                      # Subcommands for inspection
+        jobs.rs                     # Scheduled job runners (ingestion, scoring, WAL checkpoint)
+    web/                            # Dashboard web server (htmx + basic auth)
+      src/
+        main.rs                     # Axum HTTP server on port 8080
+        queries.rs                  # Dashboard SQL queries
+        models.rs                   # View models (funnel, wallet, market)
   deploy/
     deploy.sh                       # Cross-compile + upload
+    purge-raw.sh                    # One-time: purge raw_api_responses on server
     setup-evaluator.sh              # Server setup
     systemd/
       evaluator.service             # Systemd unit file
   docs/
+    STRATEGY_BIBLE.md               # Governing strategy document
+    EVALUATION_STRATEGY.md          # Phase gates + decision rules
     prd.txt                         # Product requirements
     on_risk.txt                     # Risk framework
-    EVALUATION_STRATEGY.md          # Phase gates + decision rules
     plans/
-      2026-02-08-wallet-evaluator-mvp.md  # Implementation plan
+      2026-02-08-strategy-enforcement.md  # Current plan: 24 tasks
+      2026-02-08-wallet-evaluator-mvp.md  # Original MVP plan (mostly done)
+      2026-02-08-evaluator-frontend-dashboard.md  # Dashboard plan
   tests/
     fixtures/                       # Real API response samples
   data/                             # SQLite database (gitignored)
@@ -139,6 +152,7 @@ trader_evaluator/
 | `wallet_personas` | Persona classification per wallet | proxy_wallet, persona, confidence, feature_values_json, classified_at |
 | `wallet_exclusions` | Why a wallet was excluded | proxy_wallet, reason, metric_value, threshold, excluded_at |
 | `wallet_scores_daily` | WScore + factor breakdown | proxy_wallet, wscore, recommended_follow_mode |
+| `raw_api_responses` | **DEPRECATED** — schema exists but no code writes to it. Was removed to fix storage crisis (3.7GB in 28h). Parsed data in per-row `raw_json` columns in trades_raw, activity_raw, etc. is sufficient. |
 
 ## Reference implementations
 
@@ -163,8 +177,11 @@ cargo run -p evaluator -- wallets  # Show watchlist
 cargo run -p evaluator -- paper-pnl  # Show paper portfolio performance
 cargo run -p evaluator -- rankings # Show WScore rankings
 
-# Deploy
-bash deploy/deploy.sh              # Cross-compile and deploy to server
+# Makefile shortcuts (preferred)
+make test                          # cargo test + clippy + fmt check
+make deploy                        # Test, cross-compile musl, upload, restart
+make status                        # SSH: service status, DB size, disk, recent logs
+make check                         # Verify DB schema matches code expectations
 ```
 
 ## Development workflow
@@ -197,35 +214,38 @@ Rules:
 
 ## Data saving and replay
 
-**Save everything. No exceptions.** We need the ability to replay following any account on any market after the fact — to tune risk management, test alternative strategies, and prove whether we could have profited.
+**Save parsed data per-row. No separate raw response table.** We need the ability to replay following any account on any market after the fact — to tune risk management, test alternative strategies, and prove whether we could have profited.
 
-Follow the same architecture as proven data recording systems:
-- **Non-blocking async writes** via Tokio MPSC channel (10,000 buffer) → background SQLite writer
+Architecture:
 - **WAL mode** (`PRAGMA journal_mode=WAL`) for concurrent reads during writes
-- **Batch inserts** (100 rows per transaction) for efficiency
+- **Periodic WAL checkpoint** (every 5 min, TRUNCATE mode) to prevent WAL bloat
 - **Git SHA on every row** for traceability (which code version produced this data)
-- **Raw JSON stored alongside parsed data** — if parsing changes, we can reparse from raw
+- **Raw JSON stored per-row** in `raw_json` columns on individual tables — NOT in a separate `raw_api_responses` table (that approach caused a 3.7 GB storage crisis in 28h and was removed)
+- **Early-stop pagination** — ingestion queries `MAX(timestamp)` first and stops fetching when all trades on a page are already known
 
-**What to save (append-only, never delete):**
+**What to save (append-only):**
 
 | Table | What | Why |
 |-------|------|-----|
-| `raw_api_responses` | Full JSON body from every API call | Reparse if fields change. Debug API issues. |
-| `trades_raw` | Every trade from every tracked wallet | Replay: reconstruct what any wallet did |
-| `activity_raw` | Every activity event per wallet | Catch neg-risk conversions the trades API misses |
+| `trades_raw` | Every trade from every tracked wallet (+ `raw_json`) | Replay: reconstruct what any wallet did |
+| `activity_raw` | Every activity event per wallet (+ `raw_json`) | Catch neg-risk conversions the trades API misses |
 | `positions_snapshots` | Position state per wallet, polled regularly | Replay: reconstruct portfolio at any point in time |
 | `holders_snapshots` | Holder rankings per market, daily | Track how wallet rankings shift over time |
-| `book_snapshots` | Best bid/ask + depth at time of each copy decision | Replay: compute realistic slippage and fill probability |
 | `paper_trades` | Every paper trade decision (including skips with reason) | Replay: see exactly what we would have done and why |
+
+**Future tables (not yet implemented):**
+
+| Table | What | Why |
+|-------|------|-----|
+| `book_snapshots` | Best bid/ask + depth at time of each copy decision | Replay: compute realistic slippage and fill probability |
 | `paper_events` | Every risk gate check, circuit breaker trigger, skip reason | Replay: tune risk parameters retroactively |
-| `market_metadata` | Market state at time of each decision | Replay: know what the market looked like when we traded |
 | `follower_slippage` | Per-wallet: our entry vs their entry, per trade | The critical metric — does copying actually work? |
 
 **Replay capability:**
 - Given a wallet address and a time range, we must be able to reconstruct:
   1. What trades they made (from `trades_raw`)
-  2. What the market looked like when they traded (from `book_snapshots`, `market_metadata`)
-  3. What our paper engine would have done (from `paper_trades`, `paper_events`)
+  2. What the market looked like when they traded (from `book_snapshots` — future)
+  3. What our paper engine would have done (from `paper_trades`, `paper_events` — future)
   4. What the actual outcome was (from positions/settlement data)
 - This lets us ask: "If we had followed wallet X on market Y with risk config Z, would we have made money?"
 - **Every parameter change should be testable against historical data before going live**
