@@ -155,7 +155,7 @@ Paper trading is a **proof system**, not a game. Every paper trade must answer: 
 | Aspect | What We Do | Why |
 |--------|-----------|-----|
 | **Slippage** | Apply estimated slippage to entry price | We won't get their exact price |
-| **Fees** | Conditional: quartic for 15m crypto, zero for everything else | Real cost on Polymarket (most markets = zero) |
+| **Fees** | Quartic taker fee: `price * 0.25 * (price * (1-price))^2` | Real cost on Polymarket |
 | **Fill probability** | Check orderbook at detection time (when available) | Don't paper-trade fills that couldn't happen |
 | **Detection delay** | Record time delta: their trade timestamp vs our detection | Measure realistic lag |
 | **Copy fidelity** | Track: trades_we_copied / trades_they_made | If < 80%, paper PnL diverges from reality |
@@ -416,20 +416,12 @@ WScore = 0.30 * edge_score
        * obscurity_bonus
 ```
 
-### Taker Fees
-
-**Most Polymarket markets have ZERO trading fees.** The quartic taker fee formula applies ONLY to 15-minute crypto price prediction markets (BTC, ETH). Source: https://docs.polymarket.com/polymarket-learn/trading/fees
+### Quartic Taker Fee
 
 ```
-# Only for 15-minute crypto markets (BTC, ETH price predictions):
 fee = price * 0.25 * (price * (1 - price))^2
-# Max ~1.56% at p=0.50, approaches zero near p=0 or p=1.
-
-# For all other markets (political, sports, weather, etc.):
-fee = 0
 ```
-
-Detection: check market title/slug for crypto asset names (BTC, ETH, bitcoin, ethereum) AND 15-minute time frame indicators (15m, 15 min). If both present → quartic fee. Otherwise → zero.
+Max ~1.44% at p=0.60, approaches zero near p=0 or p=1.
 
 ### PnL Decomposition
 
@@ -457,6 +449,6 @@ All thresholds referenced in this document are configurable. See `config/default
 | Document | Relationship |
 |----------|-------------|
 | `docs/EVALUATION_STRATEGY.md` | Phase gates and evaluation framework — this bible supersedes for strategic decisions |
-| `docs/on_risk2.txt` | Detailed risk management — this bible summarizes; refer to on_risk2.txt for circuit breaker specifics |
+| `docs/on_risk.txt` | Detailed risk management — this bible summarizes; refer to on_risk.txt for circuit breaker specifics |
 | `docs/prd.txt` | Product requirements — this bible is the operational translation |
 | `CLAUDE.md` | Development guide — references this bible for strategy |
