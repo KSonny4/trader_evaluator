@@ -218,7 +218,7 @@ mirror_delay_secs = 0
 
 ## 7. Risk Management (Two Levels)
 
-### Level 1: Per-Wallet Risk
+### 7.1. Level 1: Per-Wallet Risk
 
 Each followed wallet has its own risk envelope. One bad wallet cannot destroy the portfolio.
 
@@ -231,7 +231,7 @@ Each followed wallet has its own risk envelope. One bad wallet cannot destroy th
 | Follower slippage | avg slippage > their avg edge | `per_wallet_max_slippage_vs_edge` | **KILL** — we lose even copying perfectly |
 | Copy fidelity | < 80% over 7 days | `min_copy_fidelity_pct` | **FLAG** — paper PnL unreliable |
 
-### Level 2: Portfolio Risk (all wallets combined)
+### 7.2. Level 2: Portfolio Risk (all wallets combined)
 
 | Control | Default Threshold | Config Key | Action on Breach |
 |---------|------------------|-----------|-----------------|
@@ -241,7 +241,7 @@ Each followed wallet has its own risk envelope. One bad wallet cannot destroy th
 | Concurrent positions | 20 | `max_concurrent_positions` | Skip new trades |
 | Correlation cap | 5% per theme | `max_theme_exposure_pct` | Skip over-represented themes |
 
-### Follower Slippage (the critical metric)
+### 7.3. Follower Slippage & Position Enforcement (the critical metric)
 
 ```
 follower_slippage = (our_avg_entry - their_avg_entry) + our_fees
@@ -250,6 +250,8 @@ follower_slippage = (our_avg_entry - their_avg_entry) + our_fees
 If `follower_slippage` consistently exceeds the trader's edge → we lose money even copying perfectly → **KILL** that wallet.
 
 Track per wallet, per market, and in aggregate. This is the metric that determines if copy-trading is viable at all.
+
+**Position Size Enforcement:** Individual trade sizes must not exceed 50% of total bankroll to prevent single-event catastrophic failure (see `mirror_trade_to_paper` implementation).
 
 ---
 
