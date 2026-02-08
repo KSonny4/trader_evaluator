@@ -4,7 +4,7 @@
 
 **Goal:** Build a Polymarket wallet discovery and paper copy-trading evaluation system that selects "follow-worthy" markets, discovers wallets trading them, tracks those wallets long-term, and runs risk-managed paper-copy portfolios to rank "who to follow" with evidence.
 
-**Architecture:** Rust workspace with shared crates, mirroring the structure of `git_projects/trading`. SQLite for storage, TOML for config, Prometheus for metrics, deployed to the same AWS t3.micro instance. The system runs as a single long-lived async process with Tokio-scheduled periodic jobs (market scoring, wallet discovery, trade ingestion, position snapshots, paper trading, wallet ranking).
+**Architecture:** Rust workspace with shared crates. SQLite for storage, TOML for config, Prometheus for metrics, deployed to AWS t3.micro. The system runs as a single long-lived async process with Tokio-scheduled periodic jobs (market scoring, wallet discovery, trade ingestion, position snapshots, paper trading, wallet ranking).
 
 **Deploy-early philosophy:** We deploy to AWS as soon as the binary compiles and can create the DB. Every subsequent task adds a feature, deploys, and verifies the SQLite DB has the expected data. `make deploy` is our workflow — it builds, ships, restarts, and runs `make check-phase-N` to confirm the DB is filling up correctly. Data collection starts immediately; we build the analysis on top of a growing dataset.
 
@@ -12,7 +12,7 @@
 
 **Tech Stack:** Rust, Tokio, SQLite (rusqlite), reqwest, serde/serde_json, rust_decimal, tracing, metrics/metrics-exporter-prometheus, TOML config (toml + serde).
 
-**Reference project:** `git_projects/trading` — reuse Polymarket API client patterns, config structure, deployment scripts, observability setup.
+**Reference project:** Proven Polymarket API patterns and deployment architecture.
 
 **Governing document:** `docs/EVALUATION_STRATEGY.md` — all evaluation metrics, phase gates, and decision rules live there.
 

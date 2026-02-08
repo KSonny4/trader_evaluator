@@ -6,3 +6,7 @@ data/
 !.env.example
 *.swp
 .DS_Store
+
+# Sensitive files - never commit
+*.pem
+.server-info

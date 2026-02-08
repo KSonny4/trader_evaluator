@@ -2,9 +2,7 @@
 
 ## Project overview
 
-Polymarket wallet discovery and paper copy-trading evaluation system. Discovers "follow-worthy" markets, extracts wallets trading them, tracks those wallets long-term, runs risk-managed paper-copy portfolios, and ranks "who to follow" with evidence. Written in Rust. Deployed to the same AWS t3.micro as the `trading` project.
-
-**This is a greenfield project.** No code yet — only specs and plans. The `git_projects/trading` project is the reference implementation for Polymarket API patterns, Rust architecture, deployment, and observability.
+Polymarket wallet discovery and paper copy-trading evaluation system. Discovers "follow-worthy" markets, extracts wallets trading them, tracks those wallets long-term, runs risk-managed paper-copy portfolios, and ranks "who to follow" with evidence. Written in Rust. Deployed to AWS t3.micro.
 
 ## The pipeline
 
@@ -71,15 +69,15 @@ WScore Ranking → "Who to Follow" with evidence
 
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
-| Language | Rust | Match `trading` project. Type safety for money. Performance. |
-| Async runtime | Tokio | Same as `trading`. `tokio::select!` for multiplexing jobs. |
-| Database | SQLite (rusqlite, bundled) | Zero-dep deployment. Same as `trading`. |
-| HTTP client | reqwest | Same as `trading`. |
-| Precision math | rust_decimal | Never floats for money. Same as `trading`. |
-| Config | TOML (toml + serde) | Same as `trading`. |
-| Logging | tracing + tracing-subscriber (JSON) | Same as `trading`. |
-| Metrics | metrics + metrics-exporter-prometheus | Same as `trading`. Port 9094 (trading uses 9090-9093). |
-| Deployment | AWS t3.micro, systemd, cross-compile musl | Same instance as `trading` bots. |
+| Language | Rust | Type safety for money. Performance. Compiled to static binaries. |
+| Async runtime | Tokio | Non-blocking I/O, multiplexing via `tokio::select!`. |
+| Database | SQLite (rusqlite, bundled) | Zero-dep deployment. Append-only data recording. |
+| HTTP client | reqwest | Async HTTP with connection pooling. |
+| Precision math | rust_decimal | Never floats for money. |
+| Config | TOML (toml + serde) | Simple, strongly-typed configuration. |
+| Logging | tracing + tracing-subscriber (JSON) | Structured JSON logs to stdout for Grafana Loki. |
+| Metrics | metrics + metrics-exporter-prometheus | Prometheus exposition format on port 9094. |
+| Deployment | AWS t3.micro, systemd, cross-compile musl | Zero-dependency Linux binaries. |
 
 ## Project structure (target)
 
@@ -142,19 +140,14 @@ trader_evaluator/
 | `wallet_exclusions` | Why a wallet was excluded | proxy_wallet, reason, metric_value, threshold, excluded_at |
 | `wallet_scores_daily` | WScore + factor breakdown | proxy_wallet, wscore, recommended_follow_mode |
 
-## Reference project: `git_projects/trading`
+## Reference implementations
 
-The `trading` project has working implementations of:
-- **Polymarket CLOB client** (`crates/polymarket-client/`) — WebSocket + REST, EIP-712 signing
-- **Polymarket Data API patterns** — trade fetching, book snapshots, market discovery via Gamma API
-- **Risk management** — 3-tier circuit breaker, position limits, stop-loss
-- **Paper trading engine** — trade execution, PnL tracking, settlement
-- **SQLite patterns** — schema migrations, append-only storage, snapshot tables
-- **Config system** — TOML deserialization with nested sections
-- **Observability** — Prometheus metrics, Grafana dashboards, structured JSON logging
-- **Deployment** — cross-compile to musl, systemd hardened services, Grafana Alloy
-
-**Reuse patterns from trading, but do NOT share code directly** (separate repos, different Cargo workspaces).
+This project applies proven Polymarket patterns from production systems. Key architectural patterns include:
+- SQLite append-only storage with WAL mode for concurrent reads/writes
+- Tokio-based async jobs with configurable scheduling
+- Prometheus metrics for observability
+- Cross-compiled musl binaries for zero-dependency deployment
+- Systemd service management on AWS t3.micro
 
 ## Build / test / run
 
@@ -176,7 +169,7 @@ bash deploy/deploy.sh              # Cross-compile and deploy to server
 
 ## Development workflow
 
-**MANDATORY: Always use `superpowers` skills.** See `git_projects/trading/CLAUDE.md` for full skill workflow.
+**MANDATORY: Always use `superpowers` skills.**
 
 - **Before any work:** Run `evaluator-guidance` skill to check current phase and get recommendations
 - **Before writing code:** Use `superpowers:writing-plans` or follow the existing plan
@@ -206,7 +199,7 @@ Rules:
 
 **Save everything. No exceptions.** We need the ability to replay following any account on any market after the fact — to tune risk management, test alternative strategies, and prove whether we could have profited.
 
-Follow the same architecture as `git_projects/trading` DataRecorder:
+Follow the same architecture as proven data recording systems:
 - **Non-blocking async writes** via Tokio MPSC channel (10,000 buffer) → background SQLite writer
 - **WAL mode** (`PRAGMA journal_mode=WAL`) for concurrent reads during writes
 - **Batch inserts** (100 rows per transaction) for efficiency
@@ -288,7 +281,7 @@ The system progresses through 7 phases. **Never skip a phase.**
 # POLYMARKET_PRIVATE_KEY
 # POLYMARKET_API_KEY
 
-# Observability (shared with trading project):
+# Observability (Grafana Cloud):
 # GRAFANA_CLOUD_PROM_URL
 # GRAFANA_CLOUD_PROM_USER
 # GRAFANA_CLOUD_API_KEY

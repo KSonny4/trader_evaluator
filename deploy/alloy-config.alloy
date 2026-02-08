@@ -1,0 +1,84 @@
+// Grafana Alloy configuration for evaluator metrics and logs.
+// Scrapes Prometheus metrics from evaluator and web services,
+// remote-writes to Grafana Cloud.
+
+// Environment variables (loaded from /home/ubuntu/evaluator/.env):
+//   GRAFANA_CLOUD_PROM_URL    - Prometheus remote write URL
+//   GRAFANA_CLOUD_PROM_USER   - Prometheus username (instance ID)
+//   GRAFANA_CLOUD_API_KEY      - Grafana Cloud API key
+//   GRAFANA_CLOUD_LOKI_URL     - Loki push URL
+//   GRAFANA_CLOUD_LOKI_USER    - Loki username (instance ID)
+
+prometheus.scrape "evaluator" {
+  targets = [{
+    __address__ = "localhost:9094",
+  }]
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "15s"
+  job_name = "evaluator"
+}
+
+prometheus.scrape "evaluator_web" {
+  targets = [{
+    __address__ = "localhost:3000",
+  }]
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "15s"
+  job_name = "evaluator-web"
+}
+
+prometheus.scrape "node" {
+  targets = [{
+    __address__ = "localhost:9100",
+  }]
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "15s"
+  job_name = "node"
+}
+
+// ── Loki log shipping ──────────────────────────────────
+// Ship systemd journal logs for evaluator services to Grafana Cloud Loki.
+
+loki.source.journal "evaluator_logs" {
+  forward_to    = [loki.write.grafana_cloud.receiver]
+  relabel_rules = loki.relabel.journal_labels.rules
+  matches       = "_SYSTEMD_UNIT=evaluator.service"
+}
+
+loki.source.journal "evaluator_web_logs" {
+  forward_to    = [loki.write.grafana_cloud.receiver]
+  relabel_rules = loki.relabel.journal_labels.rules
+  matches       = "_SYSTEMD_UNIT=evaluator-web.service"
+}
+
+loki.relabel "journal_labels" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    target_label  = "service"
+  }
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_LOKI_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_LOKI_USER")
+      password = env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_PROM_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_PROM_USER")
+      password = env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
