@@ -1,8 +1,29 @@
+#[allow(dead_code)]
+mod models;
+#[allow(dead_code)]
+mod queries;
+
 use anyhow::Result;
 use askama::Template;
 use axum::response::{Html, IntoResponse};
 use axum::{routing::get, Router};
+use rusqlite::{Connection, OpenFlags};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+
+pub struct AppState {
+    pub db_path: PathBuf,
+}
+
+/// Open a read-only connection to the evaluator DB.
+/// Each request gets a fresh connection — SQLite WAL handles concurrent reads fine.
+pub fn open_readonly(state: &AppState) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        &state.db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    Ok(conn)
+}
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
