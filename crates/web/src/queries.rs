@@ -36,7 +36,10 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
 }
 
 pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
-    let db_size_mb = std::fs::metadata(db_path).map_or_else(|_| "?".to_string(), |m| format!("{:.1}", m.len() as f64 / 1_048_576.0));
+    let db_size_mb = std::fs::metadata(db_path).map_or_else(
+        |_| "?".to_string(),
+        |m| format!("{:.1}", m.len() as f64 / 1_048_576.0),
+    );
 
     // Determine phase from data presence
     let has_scores: bool = conn
@@ -285,16 +288,12 @@ pub fn tracking_health(conn: &Connection) -> Result<Vec<TrackingHealth>> {
     let mut result = Vec::new();
     for (label, table, ts_col) in data_types {
         let count_1h: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {table} WHERE {ts_col} > datetime('now', '-1 hour')"
-            ),
+            &format!("SELECT COUNT(*) FROM {table} WHERE {ts_col} > datetime('now', '-1 hour')"),
             [],
             |r| r.get(0),
         )?;
         let count_24h: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {table} WHERE {ts_col} > datetime('now', '-1 day')"
-            ),
+            &format!("SELECT COUNT(*) FROM {table} WHERE {ts_col} > datetime('now', '-1 day')"),
             [],
             |r| r.get(0),
         )?;

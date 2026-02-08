@@ -89,9 +89,7 @@ fn show_markets(db: &Database) -> Result<()> {
             mscore,
             rank,
         } = r;
-        println!(
-            "{rank:>3?}  {mscore:>6.3}  {score_date}  {condition_id}"
-        );
+        println!("{rank:>3?}  {mscore:>6.3}  {score_date}  {condition_id}");
     }
     Ok(())
 }
@@ -201,9 +199,7 @@ fn show_rankings(db: &Database) -> Result<()> {
     println!("Wallet rankings (30d):");
     for r in rows {
         let (w, window_days, wscore, mode) = r?;
-        println!(
-            "{wscore:>6.3}  window={window_days}  mode={mode:?}  {w}"
-        );
+        println!("{wscore:>6.3}  window={window_days}  mode={mode:?}  {w}");
     }
     Ok(())
 }

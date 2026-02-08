@@ -68,9 +68,7 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         // Safety: verify descending order before relying on the optimisation.
         // If the API ever changes sort order, we fall back to full pagination.
         let is_descending = if trades.len() >= 2 {
-            let first_ts = trades
-                .first()
-                .map_or(0, |t| t.timestamp.unwrap_or(0));
+            let first_ts = trades.first().map_or(0, |t| t.timestamp.unwrap_or(0));
             let last_ts = trades.last().map_or(0, |t| t.timestamp.unwrap_or(0));
             first_ts >= last_ts
         } else {

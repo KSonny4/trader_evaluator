@@ -275,8 +275,7 @@ mod tests {
     }
 
     fn basic_auth_header(user: &str, pass: &str) -> String {
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
         format!("Basic {encoded}")
     }
 
