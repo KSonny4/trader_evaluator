@@ -520,4 +520,51 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("No wallet scores for today"));
     }
+
+    #[tokio::test]
+    #[ignore] // requires real DB at data/evaluator.db
+    async fn test_dashboard_with_real_db() {
+        let db_path = "data/evaluator.db";
+        if !std::path::Path::new(db_path).exists() {
+            eprintln!("Skipping: no real DB found at {}", db_path);
+            return;
+        }
+
+        let state = Arc::new(AppState {
+            db_path: db_path.into(),
+        });
+        let app = create_router_with_state(state);
+
+        // Full page
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // All partials
+        let routes = vec![
+            "/partials/status",
+            "/partials/funnel",
+            "/partials/markets",
+            "/partials/wallets",
+            "/partials/tracking",
+            "/partials/paper",
+            "/partials/rankings",
+        ];
+        for route in routes {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Route {} failed with real DB",
+                route
+            );
+        }
+    }
 }
