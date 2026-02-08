@@ -48,3 +48,19 @@ jobs:
 
       - name: Format check
         run: cargo fmt --check
+
+  review-check:
+    name: Code Review Evidence
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PR body for Code Review section
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR_NUMBER" --json body --jq '.body' | bash ./scripts/check_pr_review.sh
