@@ -8,7 +8,9 @@
 
 **Tech Stack:** Rust, Tokio, SQLite (tokio-rusqlite), rust_decimal, serde, tracing, metrics.
 
-**Current state:** 42 tests pass. MVP pipeline is end-to-end (market scoring → wallet discovery → ingestion → paper trading → wallet scoring). But: persona classification doesn't exist, paper trades never settle, WScore uses 2/5 factors, MScore has 3 hardcoded inputs, no copy fidelity tracking, no anomaly detection.
+**Current state:** 141 tests pass. Phase 1 complete: all persona classification detectors implemented (Informed Specialist, Consistent Generalist, Patient Accumulator + 4 exclusion personas), config sections for personas/risk/anomaly/copy fidelity loaded from TOML, wallet feature computation from trades_raw + paper_trades, Stage 1 fast filters (age/trade count/activity) with exclusion recording to DB. Schema extended with copy_fidelity_events and follower_slippage tables.
+
+**What's missing:** Classification orchestrator isn't wired to run automatically (Task 12), paper trades never settle (Task 13), WScore uses 2/5 factors (Task 18), MScore has 3 hardcoded inputs (Task 20), no copy fidelity tracking yet (Task 15), no anomaly detection yet (Task 19).
 
 **Strategy Bible:** `docs/STRATEGY_BIBLE.md` is the governing document. Every threshold and formula in this plan comes from there.
 
@@ -16,18 +18,25 @@
 
 ## Progress
 
-- [ ] Task 1: Config — Add persona, risk, copy fidelity, and anomaly config sections
-- [ ] Task 2: Schema — Add copy_fidelity_events table and missing columns
-- [ ] Task 3: Wallet Feature Computation
-- [ ] Task 4: Stage 1 Fast Filters (inline exclusion)
-- [ ] Task 5: Informed Specialist Detector
-- [ ] Task 6: Consistent Generalist Detector
-- [ ] Task 7: Patient Accumulator Detector
-- [ ] Task 8: Execution Master Detector
-- [ ] Task 9: Tail Risk Seller Detector
-- [ ] Task 10: Noise Trader Detector
-- [ ] Task 11: Sniper/Insider Detector
-- [ ] Task 12: Persona Classification Orchestrator + Stage 2 Job
+### ✅ Phase 1: Foundation (Tasks 1-11) — COMPLETE
+*Merged in PR #6: `cf8ed5f feat: Strategy enforcement — config, schema, wallet features, persona classification`*
+
+- [x] Task 1: Config — Add persona, risk, copy fidelity, and anomaly config sections
+- [x] Task 2: Schema — Add copy_fidelity_events table and missing columns
+- [x] Task 3: Wallet Feature Computation
+- [x] Task 4: Stage 1 Fast Filters (inline exclusion)
+- [x] Task 5: Informed Specialist Detector
+- [x] Task 6: Consistent Generalist Detector
+- [x] Task 7: Patient Accumulator Detector
+- [x] Task 8: Execution Master Detector
+- [x] Task 9: Tail Risk Seller Detector
+- [x] Task 10: Noise Trader Detector
+- [x] Task 11: Sniper/Insider Detector
+
+### 🚧 Phase 2: Integration & Settlement (Tasks 12-21) — IN PROGRESS
+*Current focus: wiring classification logic and enabling paper trade settlement*
+
+- [ ] Task 12: Persona Classification Orchestrator + Stage 2 Job — **NEXT**
 - [ ] Task 13: Paper Trade Settlement
 - [ ] Task 14: Conditional Taker Fee (Quartic for Crypto, Zero for Everything Else)
 - [ ] Task 15: Copy Fidelity Tracking
@@ -37,6 +46,10 @@
 - [ ] Task 19: Weekly Re-evaluation + Anomaly Detection
 - [ ] Task 20: MScore — Real Inputs (density, whale concentration)
 - [ ] Task 21: Wire New Jobs into Scheduler
+
+### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
+*Requires CLOB API access and WebSocket infrastructure*
+
 - [ ] Task 22: CLOB API Client + `book_snapshots` Table
 - [ ] Task 23: WebSocket Book Streaming + Recording
 - [ ] Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)

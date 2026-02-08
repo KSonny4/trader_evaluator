@@ -1,5 +1,11 @@
 # Wallet Evaluator MVP Implementation Plan
 
+> **🗄️ ARCHIVED — COMPLETED**
+> 
+> All 15 tasks implemented. This plan established the foundation: project skeleton, config system, database schema, API clients, market scoring, wallet discovery, ingestion, paper trading, wallet scoring, scheduler, metrics, CLI, and integration tests.
+> 
+> **Current work:** See `../2026-02-08-strategy-enforcement.md` for active development (persona classification, paper settlement, risk management).
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build a Polymarket wallet discovery and paper copy-trading evaluation system that selects "follow-worthy" markets, discovers wallets trading them, tracks those wallets long-term, and runs risk-managed paper-copy portfolios to rank "who to follow" with evidence.

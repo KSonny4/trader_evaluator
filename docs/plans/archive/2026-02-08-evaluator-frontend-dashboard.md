@@ -1,5 +1,11 @@
 # Evaluator Frontend Dashboard — Implementation Plan
 
+> **🗄️ ARCHIVED — COMPLETED**
+> 
+> All 15 tasks implemented and deployed. Dashboard is live at port 8080 (requires auth). Features: system status strip, funnel bar with drop-off rates, 5 stage sections (markets, wallets, tracking, paper, rankings), htmx polling, Tailwind dark mode.
+> 
+> **Current work:** See `../2026-02-08-strategy-enforcement.md` for active development.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build a live operations dashboard that visualizes the entire evaluator pipeline as a funnel — from market discovery through wallet ranking — so you can see what's happening at each stage, spot problems, and track system health at a glance.
