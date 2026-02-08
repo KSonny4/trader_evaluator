@@ -25,7 +25,7 @@ WScore Ranking → "Who to Follow" with evidence
 | Document | Purpose |
 |----------|---------|
 | `docs/STRATEGY_BIBLE.md` | **Governing doc** — the single source of truth for what the system does, why, and how. Persona taxonomy, risk levels, copy fidelity, WScore/MScore formulas. If code contradicts this, the code is wrong. |
-| `docs/plans/2026-02-08-strategy-enforcement.md` | **Current implementation plan** — 24 tasks to bridge Strategy Bible to code. TDD, bite-sized. |
+| `docs/plans/MASTER_STRATEGY_IMPLEMENTATION_PLAN.md` | **Current implementation plan** — 24 tasks to bridge Strategy Bible to code. TDD, bite-sized. |
 | `docs/EVALUATION_STRATEGY.md` | Phase gates, evaluation metrics, decision rules. Superseded by Strategy Bible for strategic decisions, but still valid for phase progression. |
 | `docs/prd.txt` | Full product requirements — goals, data sources, data model, acceptance criteria |
 | `docs/on_risk2.txt` | Risk management framework — supplementary to Strategy Bible §7 |

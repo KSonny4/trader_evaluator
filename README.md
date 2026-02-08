@@ -37,7 +37,7 @@ For each task in the implementation plan:
 
 ```
 1. READ the task
-   Open docs/plans/2026-02-08-strategy-enforcement.md
+   Open docs/plans/MASTER_STRATEGY_IMPLEMENTATION_PLAN.md
    Find the next unchecked task, understand what it asks for
 
 2. WRITE A FAILING TEST
@@ -102,7 +102,7 @@ After every meaningful deploy: `make deploy && make check-phase-N` to verify the
 | Priority | Document | Purpose |
 |----------|----------|---------|
 | 1 | `docs/STRATEGY_BIBLE.md` | **The law.** All formulas, personas, risk rules, thresholds. If code contradicts it, fix the code. |
-| 2 | `docs/plans/2026-02-08-strategy-enforcement.md` | **Current task list.** 24 TDD tasks bridging Strategy Bible to code. |
+| 2 | `docs/plans/MASTER_STRATEGY_IMPLEMENTATION_PLAN.md` | **Current task list.** 24 TDD tasks bridging Strategy Bible to code. |
 | 3 | `docs/EVALUATION_STRATEGY.md` | Phase gates, evaluation metrics, decision rules. |
 | 4 | `CLAUDE.md` | Full project context: APIs, DB schema, domain concepts, competitive analysis. |
 | 5 | `config/default.toml` | All configurable parameters: risk limits, scoring weights, ingestion intervals. |

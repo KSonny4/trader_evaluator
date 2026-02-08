@@ -4,7 +4,7 @@
 > 
 > All 15 tasks implemented and deployed. Dashboard is live at port 8080 (requires auth). Features: system status strip, funnel bar with drop-off rates, 5 stage sections (markets, wallets, tracking, paper, rankings), htmx polling, Tailwind dark mode.
 > 
-> **Current work:** See `../2026-02-08-strategy-enforcement.md` for active development.
+> **Current work:** See `../MASTER_STRATEGY_IMPLEMENTATION_PLAN.md` for active development.
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 

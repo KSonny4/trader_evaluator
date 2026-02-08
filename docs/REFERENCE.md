@@ -67,7 +67,7 @@ trader_evaluator/
     prd.txt                         # Product requirements
     on_risk2.txt                    # Risk framework
     plans/
-      2026-02-08-strategy-enforcement.md  # Current plan: 24 tasks
+      MASTER_STRATEGY_IMPLEMENTATION_PLAN.md  # Current plan: 24 tasks
       2026-02-08-wallet-evaluator-mvp.md  # Original MVP plan (mostly done)
       2026-02-08-evaluator-frontend-dashboard.md  # Dashboard plan
   tests/
