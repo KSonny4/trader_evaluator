@@ -1,0 +1,38 @@
+#!/bin/bash
+# Pre-commit hook: blocks feature/* branch commits from the main checkout.
+# Feature work must happen in git worktrees (.worktrees/<name>).
+# Install with: make setup-hooks
+# Bypass in emergency: git commit --no-verify
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+# Only enforce on feature/* branches
+case "$branch" in
+    feature/*) ;;
+    *) exit 0 ;;
+esac
+
+# Check if we're in a linked worktree (not the main checkout).
+# git rev-parse --git-common-dir returns the shared .git dir.
+# git rev-parse --git-dir returns .git for main checkout, or .git/worktrees/<name> for linked ones.
+git_dir=$(git rev-parse --git-dir 2>/dev/null)
+git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+
+# In the main checkout, git-dir == git-common-dir (both are ".git").
+# In a linked worktree, git-dir is ".git/worktrees/<name>" which differs from git-common-dir ".git".
+if [ "$git_dir" = "$git_common_dir" ]; then
+    echo ""
+    echo "  BLOCKED: Feature branch commits must happen in a git worktree."
+    echo ""
+    echo "  You're on branch '$branch' in the main checkout."
+    echo "  Use a worktree instead:"
+    echo ""
+    echo "    make worktree NAME=$(echo $branch | sed 's|feature/||')"
+    echo "    cd .worktrees/$(echo $branch | sed 's|feature/||')"
+    echo ""
+    echo "  To bypass in an emergency: git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+exit 0

@@ -12,22 +12,36 @@ env:
 
 jobs:
   test:
-    name: Test + Lint
+    name: Test + Lint + Coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Build
         run: cargo build --all
 
-      - name: Test
-        run: cargo test --all
+      - name: Test with coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 70
+
+      - name: Generate coverage report
+        if: always()
+        run: cargo llvm-cov --workspace --html
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html/
+          retention-days: 14
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
