@@ -40,6 +40,7 @@ OVERLENGTH_ALLOWLIST := \
 	crates/web/src/main.rs \
 	crates/web/src/queries.rs \
 	crates/evaluator/src/ingestion.rs \
+	crates/evaluator/src/paper_trading.rs \
 	crates/evaluator/src/persona_classification.rs \
 	crates/common/src/db.rs
 
