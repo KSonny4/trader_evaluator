@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, Tokio, SQLite (tokio-rusqlite), rust_decimal, serde, tracing, metrics.
 
-**Current state:** 141 tests pass. Phase 1 complete: all persona classification detectors implemented (Informed Specialist, Consistent Generalist, Patient Accumulator + 4 exclusion personas), config sections for personas/risk/anomaly/copy fidelity loaded from TOML, wallet feature computation from trades_raw + paper_trades, Stage 1 fast filters (age/trade count/activity) with exclusion recording to DB. Schema extended with copy_fidelity_events and follower_slippage tables.
+**Current state:** 141+ tests pass. Phase 1 complete: all persona classification detectors implemented (Informed Specialist, Consistent Generalist, Patient Accumulator + 4 exclusion personas), config sections for personas/risk/anomaly/copy fidelity loaded from TOML, wallet feature computation from trades_raw + paper_trades, Stage 1 fast filters (age/trade count/activity) with exclusion recording to DB. Schema extended with copy_fidelity_events and follower_slippage tables. **Durability & recovery:** startup recovery runs once before the scheduler (paper_tick for in-flight work after a kill); doc in `docs/REFERENCE.md` § Durability and recovery.
 
 **What's missing:** Classification orchestrator isn't wired to run automatically (Task 12), paper trades never settle (Task 13), WScore uses 2/5 factors (Task 18), MScore has 3 hardcoded inputs (Task 20), no copy fidelity tracking yet (Task 15), no anomaly detection yet (Task 19).
 
@@ -38,6 +38,7 @@
 ### 🚧 Phase 2: Integration & Settlement (Tasks 12-21) — IN PROGRESS
 *Current focus: wiring classification logic and enabling paper trade settlement*
 
+- [x] **Durability & recovery:** Startup recovery (run paper_tick once before scheduler); REFERENCE.md § Durability and recovery; metric `evaluator_recovery_paper_trades_total`.
 - [ ] Task 12: Persona Classification Orchestrator + Stage 2 Job — **NEXT**
 - [ ] Task 13: Paper Trade Settlement
 - [ ] Task 14: Conditional Taker Fee (Quartic for Crypto, Zero for Everything Else)
@@ -53,6 +54,7 @@
 - [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
 - [ ] Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
 - [ ] Task 29: Wallet scorecard screen (per-wallet detail page)
+- [ ] Task 30: Proportional sizing in mirror copy (Strategy Bible §6)
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
@@ -2872,6 +2874,31 @@ Add a dedicated dashboard screen that shows a **scorecard for a single wallet**:
 
 ```bash
 git commit -am "feat(web): wallet scorecard screen — per-wallet detail page with WScore, persona, copy fidelity, journey"
+```
+
+---
+
+## Task 30: Proportional sizing in mirror copy (Strategy Bible §6)
+
+Strategy Bible §6 requires mirror to copy **direction, timing, and sizing**: our_size = their_size × (our_bankroll / estimated_their_bankroll), then clamp to our risk limits. Flat sizing cannot replicate their edge when they vary stake (e.g. small when uncertain, large when confident). Paper and live must use the same formula so paper is representative.
+
+**Files:**
+- Modify: `crates/evaluator/src/jobs/pipeline_jobs.rs` — pass their trade size from `trades_raw` into mirror; compute our_size from proportional formula or config fallback
+- Modify: `crates/evaluator/src/paper_trading.rs` — accept `their_size_usd` (or derive our_size from caller); keep caps (50% bankroll, per-wallet %, portfolio %)
+- Modify: `crates/common/src/config.rs` and `config/default.toml` — add `mirror_use_proportional_sizing`, `mirror_default_their_bankroll_usd` (and/or per-wallet estimate source)
+- Optional: store or compute per-wallet "estimated bankroll" (e.g. rolling exposure, or default) for the scale factor
+
+**Implementation outline:**
+1. Read `size` (USD) from `trades_raw` for each copied trade. If missing, use flat `per_trade_size_usd`.
+2. Estimate their bankroll per wallet: config default, or rolling sum of their position sizes, or conservative heuristic. Config key `mirror_default_their_bankroll_usd` when no estimate.
+3. our_size_usd = their_size * (our_bankroll / estimated_their_bankroll), clamped to max single-trade % and other risk caps.
+4. When `mirror_use_proportional_sizing = false` or estimate unavailable, fall back to current flat `position_size_usdc`.
+5. TDD: test proportional result within caps; test fallback when size or estimate missing.
+
+**Step 5: Commit**
+
+```bash
+git commit -am "feat: proportional sizing in mirror copy (Strategy Bible §6)"
 ```
 
 ---
