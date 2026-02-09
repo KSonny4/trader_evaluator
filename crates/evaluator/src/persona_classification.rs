@@ -183,17 +183,26 @@ impl Persona {
     }
 }
 
-/// Detect the Informed Specialist persona: few markets, high win rate.
+/// Detect the Informed Specialist persona: concentrated positions, high win rate.
+/// Combines active_positions count AND concentration_ratio to identify true specialists.
 /// Returns Some(InformedSpecialist) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn detect_informed_specialist(
     features: &WalletFeatures,
-    max_markets: u32,
+    max_active_positions: u32,
+    min_concentration_ratio: f64,
     min_win_rate: f64,
 ) -> Option<Persona> {
-    if features.unique_markets > max_markets {
+    // Check active positions limit (catches "dabbler" with scattered trades)
+    if features.active_positions > max_active_positions {
         return None;
     }
+
+    // Check concentration ratio (catches "generalist" trading many markets equally)
+    if features.concentration_ratio < min_concentration_ratio {
+        return None;
+    }
+
     let total_resolved = features.win_count + features.loss_count;
     if total_resolved == 0 {
         return None;
@@ -614,49 +623,61 @@ mod tests {
             max_drawdown_pct: 8.0,
             trades_per_week: 10.0,
             sharpe_ratio: 1.5,
+            active_positions: 3,
+            concentration_ratio: 0.75,
         }
     }
 
     #[test]
     fn test_detect_informed_specialist() {
         let features = make_features(5, 28, 12); // 5 markets, 70% win rate
-        let persona = detect_informed_specialist(&features, 10, 0.60);
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
         assert_eq!(persona, Some(Persona::InformedSpecialist));
     }
 
     #[test]
-    fn test_not_specialist_too_many_markets() {
-        let features = make_features(25, 28, 12); // 25 markets > 10
-        let persona = detect_informed_specialist(&features, 10, 0.60);
+    fn test_not_specialist_too_many_active_positions() {
+        let mut features = make_features(5, 28, 12); // 5 markets, 70% win rate
+        features.active_positions = 10; // Too many active positions
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
+        assert_eq!(persona, None);
+    }
+
+    #[test]
+    fn test_not_specialist_low_concentration() {
+        let mut features = make_features(5, 28, 12); // 5 markets, 70% win rate
+        features.concentration_ratio = 0.30; // Too low concentration
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
         assert_eq!(persona, None);
     }
 
     #[test]
     fn test_not_specialist_low_win_rate() {
         let features = make_features(5, 10, 30); // 25% win rate < 60%
-        let persona = detect_informed_specialist(&features, 10, 0.60);
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
         assert_eq!(persona, None);
     }
 
     #[test]
     fn test_not_specialist_zero_resolved_trades() {
         let features = make_features(5, 0, 0); // no wins or losses
-        let persona = detect_informed_specialist(&features, 10, 0.60);
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
         assert_eq!(persona, None);
     }
 
     #[test]
-    fn test_specialist_boundary_exact_max_markets() {
-        let features = make_features(10, 28, 12); // exactly 10 markets = max
-        let persona = detect_informed_specialist(&features, 10, 0.60);
+    fn test_specialist_boundary_exact_max_positions() {
+        let mut features = make_features(5, 28, 12); // 5 markets, 70% win rate
+        features.active_positions = 5; // exactly 5 positions = max
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
         assert_eq!(persona, Some(Persona::InformedSpecialist));
     }
 
     #[test]
-    fn test_specialist_boundary_exact_min_win_rate() {
-        // 60% win rate = exactly at threshold (3/5)
-        let features = make_features(5, 3, 2);
-        let persona = detect_informed_specialist(&features, 10, 0.60);
+    fn test_specialist_boundary_exact_min_concentration() {
+        let mut features = make_features(5, 28, 12);
+        features.concentration_ratio = 0.60; // exactly 60% concentration
+        let persona = detect_informed_specialist(&features, 5, 0.60, 0.60);
         assert_eq!(persona, Some(Persona::InformedSpecialist));
     }
 
@@ -700,6 +721,8 @@ mod tests {
             max_drawdown_pct,
             trades_per_week: 25.0,
             sharpe_ratio,
+            active_positions: 8,
+            concentration_ratio: 0.50,
         }
     }
 
@@ -787,6 +810,8 @@ mod tests {
             max_drawdown_pct: 5.0,
             trades_per_week,
             sharpe_ratio: 0.8,
+            active_positions: 2,
+            concentration_ratio: 0.80,
         }
     }
 

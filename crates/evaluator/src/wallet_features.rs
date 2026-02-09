@@ -16,6 +16,8 @@ pub struct WalletFeatures {
     pub max_drawdown_pct: f64,
     pub trades_per_week: f64,
     pub sharpe_ratio: f64,
+    pub active_positions: u32,
+    pub concentration_ratio: f64,
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -97,6 +99,40 @@ pub fn compute_wallet_features(
     let max_drawdown_pct = 0.0;
     let sharpe_ratio = 0.0;
 
+    // Active positions: count of currently open paper_positions
+    let active_positions: u32 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT condition_id) FROM paper_positions
+             WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    // Concentration ratio: % of volume in top 3 markets
+    let concentration_ratio: f64 = conn
+        .query_row(
+            "WITH market_volumes AS (
+                SELECT condition_id, SUM(size) as volume
+                FROM trades_raw
+                WHERE proxy_wallet = ?1 AND timestamp >= ?2
+                GROUP BY condition_id
+            ),
+            total AS (
+                SELECT SUM(volume) as total_volume FROM market_volumes
+            ),
+            top3 AS (
+                SELECT SUM(volume) as top3_volume
+                FROM (SELECT volume FROM market_volumes ORDER BY volume DESC LIMIT 3)
+            )
+            SELECT 
+                CASE WHEN t.total_volume > 0 THEN CAST(t3.top3_volume AS REAL) / t.total_volume ELSE 0.0 END
+            FROM total t, top3 t3",
+            rusqlite::params![proxy_wallet, cutoff],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
     Ok(WalletFeatures {
         proxy_wallet: proxy_wallet.to_string(),
         window_days,
@@ -110,6 +146,8 @@ pub fn compute_wallet_features(
         max_drawdown_pct,
         trades_per_week,
         sharpe_ratio,
+        active_positions,
+        concentration_ratio,
     })
 }
 
@@ -123,8 +161,8 @@ pub fn save_wallet_features(
         "INSERT OR REPLACE INTO wallet_features_daily
          (proxy_wallet, feature_date, window_days, trade_count, win_count, loss_count,
           total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct,
-          trades_per_week, sharpe_ratio)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+          trades_per_week, sharpe_ratio, active_positions, concentration_ratio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             features.proxy_wallet,
             feature_date,
@@ -139,6 +177,8 @@ pub fn save_wallet_features(
             features.max_drawdown_pct,
             features.trades_per_week,
             features.sharpe_ratio,
+            features.active_positions,
+            features.concentration_ratio,
         ],
     )?;
     Ok(())
@@ -210,6 +250,8 @@ mod tests {
             max_drawdown_pct: 8.0,
             trades_per_week: 2.5,
             sharpe_ratio: 1.2,
+            active_positions: 3,
+            concentration_ratio: 0.75,
         };
 
         save_wallet_features(&db.conn, &features, "2026-02-08").unwrap();

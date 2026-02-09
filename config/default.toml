@@ -87,7 +87,8 @@ stage1_min_wallet_age_days = 30
 stage1_min_total_trades = 10
 stage1_max_inactive_days = 30
 # Informed Specialist
-specialist_max_markets = 10
+specialist_max_active_positions = 5    # max currently open positions
+specialist_min_concentration = 0.60    # min % of volume in top 3 markets
 specialist_min_win_rate = 0.60
 # Consistent Generalist
 generalist_min_markets = 20
@@ -120,6 +121,7 @@ max_weekly_drawdown_pct = 20.0
 frequency_change_multiplier = 3.0
 size_change_multiplier = 10.0
 
+# Dashboard: cookie-based session auth when auth_password is set
 [web]
 port = 8080
 host = "127.0.0.1"

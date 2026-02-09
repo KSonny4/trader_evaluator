@@ -113,7 +113,7 @@ After every meaningful deploy: `make deploy && make check-phase-N` to verify the
 crates/
   common/       # Shared: config, DB schema, API client, types
   evaluator/    # Main binary: scheduler, scoring, discovery, ingestion, paper trading
-  web/          # Dashboard: Axum + htmx, basic auth, port 8080
+  web/          # Dashboard: Axum + htmx, cookie-based auth, port 8080
 config/
   default.toml  # All configuration
 deploy/         # Cross-compile, systemd units, server setup scripts
