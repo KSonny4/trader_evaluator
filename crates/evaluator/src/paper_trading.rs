@@ -214,9 +214,121 @@ pub async fn mirror_trade_to_paper(
     .await
 }
 
+/// Settle all open paper trades for a market that has resolved.
+/// `settle_price` is 1.0 (outcome won) or 0.0 (outcome lost).
+/// Returns the number of trades settled.
+#[allow(dead_code)] // Called from ingestion or resolution job when wired
+pub fn settle_paper_trades_for_market(
+    conn: &rusqlite::Connection,
+    condition_id: &str,
+    settle_price: f64,
+) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entry_price, size_usdc, side FROM paper_trades
+         WHERE condition_id = ?1 AND status = 'open'",
+    )?;
+
+    let trades: Vec<(i64, f64, f64, String)> = stmt
+        .query_map(rusqlite::params![condition_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+
+    let mut settled = 0;
+
+    for (id, entry_price, size_usdc, side) in &trades {
+        let pnl = if side == "BUY" {
+            (settle_price - entry_price) * size_usdc
+        } else {
+            (entry_price - settle_price) * size_usdc
+        };
+
+        let status = if pnl >= 0.0 {
+            "settled_win"
+        } else {
+            "settled_loss"
+        };
+
+        conn.execute(
+            "UPDATE paper_trades SET status = ?1, exit_price = ?2, pnl = ?3, settled_at = datetime('now')
+             WHERE id = ?4",
+            rusqlite::params![status, settle_price, pnl, id],
+        )?;
+
+        settled += 1;
+    }
+
+    if settled > 0 {
+        conn.execute(
+            "DELETE FROM paper_positions WHERE condition_id = ?1",
+            [condition_id],
+        )?;
+    }
+
+    Ok(settled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::db::Database;
+
+    #[test]
+    fn test_settle_paper_trades_win() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, outcome, entry_price, size_usdc, status)
+                 VALUES ('0xabc', 'mirror', '0xmarket1', 'BUY', 'Yes', 0.60, 25.0, 'open')",
+                [],
+            )
+            .unwrap();
+
+        let settled = settle_paper_trades_for_market(&db.conn, "0xmarket1", 1.0).unwrap();
+        assert_eq!(settled, 1);
+
+        let (status, pnl): (String, f64) = db
+            .conn
+            .query_row(
+                "SELECT status, pnl FROM paper_trades WHERE condition_id = '0xmarket1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "settled_win");
+        assert!((pnl - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_settle_paper_trades_loss() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, outcome, entry_price, size_usdc, status)
+                 VALUES ('0xabc', 'mirror', '0xmarket2', 'BUY', 'Yes', 0.60, 25.0, 'open')",
+                [],
+            )
+            .unwrap();
+
+        let settled = settle_paper_trades_for_market(&db.conn, "0xmarket2", 0.0).unwrap();
+        assert_eq!(settled, 1);
+
+        let (status, pnl): (String, f64) = db
+            .conn
+            .query_row(
+                "SELECT status, pnl FROM paper_trades WHERE condition_id = '0xmarket2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "settled_loss");
+        assert!((pnl - (-15.0)).abs() < 0.01);
+    }
 
     #[tokio::test]
     async fn test_mirror_trade_creates_paper_trade() {
