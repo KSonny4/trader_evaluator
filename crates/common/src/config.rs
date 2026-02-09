@@ -136,7 +136,8 @@ pub struct Personas {
     pub stage1_min_total_trades: u32,
     pub stage1_max_inactive_days: u32,
     // Informed Specialist
-    pub specialist_max_markets: u32,
+    pub specialist_max_active_positions: u32,
+    pub specialist_min_concentration: f64,
     pub specialist_min_win_rate: f64,
     // Consistent Generalist
     pub generalist_min_markets: u32,
@@ -341,7 +342,8 @@ gamma_api_url = "https://gamma-api.polymarket.com"
 stage1_min_wallet_age_days = 30
 stage1_min_total_trades = 10
 stage1_max_inactive_days = 30
-specialist_max_markets = 10
+specialist_max_active_positions = 5
+specialist_min_concentration = 0.60
 specialist_min_win_rate = 0.60
 generalist_min_markets = 20
 generalist_min_win_rate = 0.52

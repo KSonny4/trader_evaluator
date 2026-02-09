@@ -56,16 +56,23 @@ Only three personas advance to paper trading. Everything else is excluded.
 
 | Persona | Key Signals | Follow Mode | Trust Level |
 |---------|------------|-------------|-------------|
-| **Informed Specialist** | todo what about unique mstkrt domains? unique_markets < 10, win_rate > 60%, enters before price moves | Mirror with 5-30s delay | PRIMARY target |
+<<<<<<< Updated upstream
+| **Informed Specialist** | active_positions ≤ 5, concentration ≥ 60%, win_rate > 60% | Mirror with 5-30s delay | PRIMARY target |
 | **Consistent Generalist** | unique_markets > 20, win_rate 52-60%, low drawdown, Sharpe > 1 | Mirror | SECONDARY |
 | **Patient Accumulator** | avg_hold_time > 48h, large positions (>90th percentile), < 5 trades/week | Mirror with 24h+ delay | SLOW but reliable |
 
 ### Classification thresholds (configurable in `default.toml`)
 
 **Informed Specialist:**
-- `unique_markets < specialist_max_markets` (default: 10)
+- `active_positions <= specialist_max_active_positions` (default: 5) — limits currently open positions
+- `concentration_ratio >= specialist_min_concentration` (default: 0.60) — % of volume in top 3 markets
 - `win_rate > specialist_min_win_rate` (default: 0.60)
-- `avg_entry_before_move > specialist_entry_timing_threshold` (default: true — enters before significant price move)
+
+**Why active_positions + concentration_ratio?**
+- `unique_markets` fails for old accounts (5 years = many historical markets)
+- `active_positions` catches current focus (prevents "dabbler" with scattered trades)
+- `concentration_ratio` catches true specialists (prevents "generalist" trading many markets equally)
+- Combined: wallet with 3 active positions and 75% in top 3 markets = specialist
 
 **Consistent Generalist:**
 - `unique_markets > generalist_min_markets` (default: 20)

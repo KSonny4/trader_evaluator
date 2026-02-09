@@ -218,6 +218,8 @@ CREATE TABLE IF NOT EXISTS wallet_features_daily (
     max_drawdown_pct REAL,
     trades_per_week REAL,
     sharpe_ratio REAL,
+    active_positions INTEGER,
+    concentration_ratio REAL,
     UNIQUE(proxy_wallet, feature_date, window_days)
 );
 
