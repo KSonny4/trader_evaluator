@@ -24,6 +24,8 @@ pub struct FunnelStage {
     pub bg_color: String,
     /// Tailwind text color class for drop-off
     pub drop_color: String,
+    /// Tooltip text: code-derived criteria and what this stage represents
+    pub info: String,
 }
 
 /// A job heartbeat for the status strip
@@ -144,6 +146,16 @@ pub fn shorten_wallet(addr: &str) -> String {
     }
 }
 
+/// Code-derived tooltip text for each funnel stage (see queries.rs, pipeline_jobs, market_scoring, wallet_discovery, paper_trading, wallet_scoring).
+const FUNNEL_STAGE_INFO: [&str; 6] = [
+    "Markets fetched from Gamma API: open only, min liquidity/volume, end date ≥ tomorrow. All passing markets are stored.",
+    "Markets scored today with MScore (liquidity, volume, density, time-to-expiry). Only top N by score (config: top_n_markets) are written to market_scores_daily.",
+    "Wallets discovered from today's scored markets: top holders from Data API + traders with ≥ min_total_trades in that market; capped per market (config).",
+    "Wallets with is_active=1. Trades, activity, positions and holders are ingested only for these watchlist wallets.",
+    "Total paper trades. Each row is one mirrored trade: paper tick copies trades_raw for tracked wallets when risk rules pass (position size, exposure caps, portfolio stop).",
+    "Wallets with a WScore row today. Score is computed from paper PnL over configured windows (edge + consistency; hit-rate penalty).",
+];
+
 impl FunnelCounts {
     pub fn to_stages(&self) -> Vec<FunnelStage> {
         let pairs = [
@@ -186,6 +198,7 @@ impl FunnelCounts {
                     drop_pct,
                     bg_color: bg.to_string(),
                     drop_color,
+                    info: FUNNEL_STAGE_INFO[i].to_string(),
                 }
             })
             .collect()
@@ -219,6 +232,29 @@ mod tests {
         // 20/100 = 20%
         assert_eq!(stages[0].drop_pct.as_deref(), Some("20.0%"));
         assert_eq!(stages[0].drop_color, "text-yellow-400");
+        assert!(!stages[0].info.is_empty());
+    }
+
+    #[test]
+    fn test_funnel_stages_have_info_tooltips() {
+        let counts = FunnelCounts {
+            markets_fetched: 1,
+            markets_scored: 1,
+            wallets_discovered: 1,
+            wallets_active: 1,
+            paper_trades_total: 1,
+            wallets_ranked: 1,
+        };
+        let stages = counts.to_stages();
+        assert_eq!(stages.len(), FUNNEL_STAGE_INFO.len());
+        for (i, stage) in stages.iter().enumerate() {
+            assert!(
+                !stage.info.is_empty(),
+                "stage {} ({}) must have non-empty info",
+                i,
+                stage.label
+            );
+        }
     }
 
     #[test]
