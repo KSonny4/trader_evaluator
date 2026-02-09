@@ -10,3 +10,7 @@ data/
 # Sensitive files - never commit
 *.pem
 .server-info
+
+# Local tool configurations
+.gemini/
+.opencode/
