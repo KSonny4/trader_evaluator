@@ -36,6 +36,8 @@ This cross-compiles musl, SCPs to `/opt/evaluator/`, restarts systemd service, r
 
 **Skip deploy for:** docs, skills, .cursor rules, README changes.
 
+If the dashboard is behind a reverse proxy (cloudflared, nginx, ALB, etc.), the proxy must forward the `Cookie` and `Host` headers so login and CSRF work.
+
 ## Post-deploy Checks
 
 ```bash
