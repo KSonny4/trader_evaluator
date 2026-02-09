@@ -4,17 +4,19 @@ mod queries;
 use anyhow::Result;
 use askama::Template;
 use axum::body::Body;
+use axum::extract::Request;
 use axum::extract::State;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Response};
-use axum::{routing::get, Router};
-use base64::Engine as _;
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::get;
+use axum::{Form, Router};
 use models::{
     FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
     WalletOverview, WalletRow,
 };
 use rusqlite::{Connection, OpenFlags};
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,46 +36,62 @@ pub fn open_readonly(state: &AppState) -> Result<Connection> {
     Ok(conn)
 }
 
-// --- Basic Auth Middleware ---
+// --- Cookie-based Auth Middleware ---
 
-/// Returns 401 Unauthorized if auth_password is configured and credentials don't match.
+const AUTH_COOKIE_NAME: &str = "evaluator_auth";
+
+/// Simple auth token (in production, use a proper session store)
+fn generate_auth_token(password: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    password.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Redirects to /login if auth_password is configured and user is not authenticated.
 /// If auth_password is None, all requests pass through (no auth).
-async fn basic_auth_middleware(
+async fn auth_middleware(
     State(state): State<Arc<AppState>>,
-    request: Request<Body>,
+    request: Request,
     next: Next,
 ) -> Response {
-    let Some(password) = &state.auth_password else {
+    // If no password is configured, allow all requests
+    if state.auth_password.is_none() {
         return next.run(request).await;
-    };
+    }
 
-    let auth_header = request
+    // Check auth cookie
+    let auth_token = generate_auth_token(state.auth_password.as_ref().unwrap());
+    let is_authenticated = request
         .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let authenticated = auth_header
-        .and_then(|h| h.strip_prefix("Basic "))
-        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .is_some_and(|decoded| {
-            // Format is "username:password" — we only check the password part
-            decoded
-                .split_once(':')
-                .is_some_and(|(_, pw)| pw == password)
+        .get(header::COOKIE)
+        .and_then(|cookie_header| cookie_header.to_str().ok())
+        .is_some_and(|cookie_str| {
+            cookie_str.split(';').any(|cookie| {
+                let cookie = cookie.trim();
+                cookie.starts_with(&format!("{AUTH_COOKIE_NAME}="))
+                    && cookie == format!("{AUTH_COOKIE_NAME}={auth_token}")
+            })
         });
 
-    if authenticated {
+    if is_authenticated {
         next.run(request).await
     } else {
-        Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .header(
-                header::WWW_AUTHENTICATE,
-                "Basic realm=\"Evaluator Dashboard\"",
-            )
-            .body(Body::from("Unauthorized"))
-            .unwrap()
+        // Check if this is an HTMX request (indicated by HX-Request header)
+        let is_htmx = request.headers().get("HX-Request").is_some();
+
+        if is_htmx {
+            // For HTMX requests, return a special response that triggers a full page redirect
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("HX-Redirect", "/login")
+                .body(Body::from("Session expired. Please log in again."))
+                .unwrap()
+        } else {
+            // Regular request - redirect to login
+            Redirect::to("/login").into_response()
+        }
     }
 }
 
@@ -82,6 +100,12 @@ async fn basic_auth_middleware(
 #[derive(Template)]
 #[template(path = "dashboard.html")]
 struct DashboardTemplate;
+
+#[derive(Template)]
+#[template(path = "login.html")]
+struct LoginTemplate {
+    error: Option<String>,
+}
 
 #[derive(Template)]
 #[template(path = "partials/status_strip.html")]
@@ -134,6 +158,68 @@ async fn index() -> impl IntoResponse {
     Html(DashboardTemplate.to_string())
 }
 
+async fn login_form(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // If no auth configured, redirect to dashboard
+    if state.auth_password.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    Html(LoginTemplate { error: None }.to_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    password: String,
+}
+
+async fn login_submit(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<LoginForm>,
+) -> impl IntoResponse {
+    // If no auth configured, just redirect
+    if state.auth_password.is_none() {
+        return Redirect::to("/").into_response();
+    }
+
+    // Verify password
+    if form.password == *state.auth_password.as_ref().unwrap() {
+        // Set auth cookie
+        let auth_token = generate_auth_token(&form.password);
+        let cookie = format!(
+            "{AUTH_COOKIE_NAME}={auth_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"
+        );
+
+        Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(header::SET_COOKIE, cookie)
+            .header(header::LOCATION, "/")
+            .body(Body::empty())
+            .unwrap()
+            .into_response()
+    } else {
+        // Show error
+        Html(
+            LoginTemplate {
+                error: Some("Invalid password".to_string()),
+            }
+            .to_string(),
+        )
+        .into_response()
+    }
+}
+
+async fn logout() -> impl IntoResponse {
+    // Clear auth cookie
+    let cookie = format!("{AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::SET_COOKIE, cookie)
+        .header(header::LOCATION, "/login")
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = open_readonly(&state).unwrap();
     let db_path_str = state.db_path.to_str().unwrap_or(":memory:");
@@ -184,12 +270,17 @@ async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
 // --- Router ---
 
 pub fn create_router() -> Router {
-    // For the index route (no DB needed), we still need the state for partials
     Router::new().route("/", get(index))
 }
 
 pub fn create_router_with_state(state: Arc<AppState>) -> Router {
-    Router::new()
+    // Public routes (no auth required)
+    let public_routes = Router::new()
+        .route("/login", get(login_form).post(login_submit))
+        .route("/logout", get(logout));
+
+    // Protected routes (auth required if password is set)
+    let protected_routes = Router::new()
         .route("/", get(index))
         .route("/partials/status", get(status_partial))
         .route("/partials/funnel", get(funnel_partial))
@@ -200,9 +291,10 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/partials/rankings", get(rankings_partial))
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            basic_auth_middleware,
-        ))
-        .with_state(state)
+            auth_middleware,
+        ));
+
+    public_routes.merge(protected_routes).with_state(state)
 }
 
 #[tokio::main]
@@ -274,53 +366,98 @@ mod tests {
         create_router_with_state(state)
     }
 
-    fn basic_auth_header(user: &str, pass: &str) -> String {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-        format!("Basic {encoded}")
+    fn auth_cookie(password: &str) -> String {
+        let token = generate_auth_token(password);
+        format!("{AUTH_COOKIE_NAME}={token}")
     }
 
-    // --- Auth tests ---
+    // --- Auth tests (updated for cookie-based auth) ---
 
     #[tokio::test]
-    async fn test_auth_returns_401_without_credentials() {
+    async fn test_auth_redirects_to_login_without_cookie() {
         let app = create_test_app_with_auth("secret");
         let response = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn test_auth_returns_401_with_wrong_password() {
-        let app = create_test_app_with_auth("secret");
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .header("Authorization", basic_auth_header("admin", "wrong"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+        assert_eq!(response.status(), StatusCode::SEE_OTHER); // 302 redirect
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(location, "/login");
     }
 
     #[tokio::test]
-    async fn test_auth_returns_200_with_correct_password() {
+    async fn test_login_page_shows_without_auth() {
         let app = create_test_app_with_auth("secret");
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/")
-                    .header("Authorization", basic_auth_header("admin", "secret"))
+                    .uri("/login")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_login_with_correct_password_sets_cookie() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("password=secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(location, "/");
+
+        // Check that cookie is set
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains(AUTH_COOKIE_NAME));
+    }
+
+    #[tokio::test]
+    async fn test_login_with_wrong_password_shows_error() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from("password=wrong"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Invalid password"));
     }
 
     #[tokio::test]
@@ -334,35 +471,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_auth_partials_also_protected() {
-        let app = create_test_app_with_auth("secret");
+    async fn test_no_auth_redirects_when_no_password() {
+        let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/status")
+                    .uri("/login")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // Should redirect to / since no auth needed
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
 
     #[tokio::test]
-    async fn test_auth_www_authenticate_header_present() {
+    async fn test_access_with_valid_cookie() {
         let app = create_test_app_with_auth("secret");
         let response = app
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Cookie", auth_cookie("secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let www_auth = response
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_logout_clears_cookie() {
+        let app = create_test_app_with_auth("secret");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/logout")
+                    .header("Cookie", auth_cookie("secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
             .headers()
-            .get("www-authenticate")
+            .get("location")
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(www_auth.contains("Basic"));
+        assert_eq!(location, "/login");
+
+        // Check that cookie is cleared
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("Max-Age=0"));
     }
 
     // --- Existing tests ---
