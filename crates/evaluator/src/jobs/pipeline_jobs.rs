@@ -6,7 +6,7 @@ use common::polymarket::GammaFilter;
 use common::types::{ApiHolderResponse, ApiTrade, GammaMarket};
 
 use crate::market_scoring::{rank_markets, MarketCandidate};
-use crate::paper_trading::{mirror_trade_to_paper, Side};
+use crate::paper_trading::{is_crypto_15m_market, mirror_trade_to_paper, Side};
 use crate::persona_classification::{classify_wallet, stage1_filter, PersonaConfig, Stage1Config};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_features::compute_wallet_features;
@@ -338,12 +338,14 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
             let tx = conn.transaction()?;
 
             for r in &page_db_rows {
+                let is_crypto_15m = is_crypto_15m_market(&r.title, r.slug.as_deref().unwrap_or(""));
+                let is_crypto_15m_i64 = i64::from(is_crypto_15m);
                 tx.execute(
                     "
                     INSERT INTO markets
-                        (condition_id, title, slug, description, end_date, liquidity, volume, category, event_slug, last_updated_at)
+                        (condition_id, title, slug, description, end_date, liquidity, volume, category, event_slug, is_crypto_15m, last_updated_at)
                     VALUES
-                        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
+                        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
                     ON CONFLICT(condition_id) DO UPDATE SET
                         title = excluded.title,
                         slug = excluded.slug,
@@ -353,6 +355,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                         volume = excluded.volume,
                         category = excluded.category,
                         event_slug = excluded.event_slug,
+                        is_crypto_15m = excluded.is_crypto_15m,
                         last_updated_at = datetime('now')
                     ",
                     rusqlite::params![
@@ -365,6 +368,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                         r.volume,
                         r.category,
                         r.event_slug,
+                        is_crypto_15m_i64,
                     ],
                 )?;
             }

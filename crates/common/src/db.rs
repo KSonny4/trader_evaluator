@@ -24,7 +24,7 @@ impl AsyncDb {
             conn.busy_timeout(std::time::Duration::from_secs(30))?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
             conn.execute_batch(SCHEMA)?;
-            Ok(())
+            migrate_markets_is_crypto_15m(conn)
         })
         .await
         .map_err(|e| match e {
@@ -73,8 +73,25 @@ impl Database {
 
     pub fn run_migrations(&self) -> Result<()> {
         self.conn.execute_batch(SCHEMA)?;
+        migrate_markets_is_crypto_15m(&self.conn).map_err(anyhow::Error::from)?;
         Ok(())
     }
+}
+
+/// Add is_crypto_15m column to markets if missing (for existing DBs created before Task 14).
+fn migrate_markets_is_crypto_15m(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
+    let has: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('markets') WHERE name='is_crypto_15m'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has == 0 {
+        conn.execute(
+            "ALTER TABLE markets ADD COLUMN is_crypto_15m INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 const SCHEMA: &str = r#"
@@ -108,6 +125,7 @@ CREATE TABLE IF NOT EXISTS markets (
     category TEXT,
     event_slug TEXT,
     outcomes_json TEXT,              -- raw JSON of outcome tokens
+    is_crypto_15m INTEGER NOT NULL DEFAULT 0,  -- 1 = quartic taker fee applies
     first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
