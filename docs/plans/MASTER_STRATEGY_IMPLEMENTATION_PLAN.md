@@ -14,6 +14,8 @@
 
 **Strategy Bible:** `docs/STRATEGY_BIBLE.md` is the governing document. Every threshold and formula in this plan comes from there.
 
+**Development setup:** When working on plan tasks, create a worktree from main: `make worktree NAME=<feature-name>`, then `cd .worktrees/<feature-name>`. Do not commit to main. After merge, run `make worktree-clean NAME=<feature-name>`.
+
 ---
 
 ## Progress
@@ -46,6 +48,8 @@
 - [ ] Task 19: Weekly Re-evaluation + Anomaly Detection
 - [ ] Task 20: MScore — Real Inputs (density, whale concentration)
 - [ ] Task 21: Wire New Jobs into Scheduler
+- [ ] Task 25: Stage 1 — Known Bot Exclusion
+- [ ] Task 26: Stage 2 — Sybil Cluster Detection
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
@@ -2670,6 +2674,108 @@ Expected: ALL PASS
 
 ```bash
 git commit -am "feat: wire persona classification, settlement, anomaly detection into scheduler"
+```
+
+---
+
+## Task 25: Stage 1 — Known Bot Exclusion
+
+Implement the "Not a known bot" filter from Strategy Bible §4 (Stage 1). Wallets in a configured list are excluded and recorded in `wallet_exclusions`.
+
+**Source of truth:** `docs/STRATEGY_BIBLE.md` §4, Stage 1 table — "Not a known bot | Check against `known_bots` list".
+
+**Files:**
+- Modify: `crates/common/src/config.rs`
+- Modify: `config/default.toml`
+- Modify: `crates/evaluator/src/persona_classification.rs`
+- Modify: `crates/evaluator/src/jobs/pipeline_jobs.rs` (if Stage1Config is built there and needs known_bots)
+
+**Step 1: Write the failing test**
+
+In `crates/evaluator/src/persona_classification.rs` (or in a test module):
+
+- Test that when `proxy_wallet` is in `config.known_bots`, the Stage 1 path returns `Excluded(ExclusionReason::KnownBot)` and `record_exclusion` is called (or that the classification job records an exclusion for that wallet).
+- Test that when `proxy_wallet` is not in `known_bots`, the wallet is not excluded for this reason.
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p evaluator test_known_bot` (or the chosen test name)
+Expected: FAIL — `KnownBot` variant and/or `known_bots` config do not exist yet.
+
+**Step 3: Config**
+
+- In `crates/common/src/config.rs`: Add `known_bots: Vec<String>` to the struct that holds Stage 1 config (e.g. under `Personas` or a dedicated `Stage1` section). Deserialize from TOML; default to empty list.
+- In `config/default.toml`: Add `known_bots = []` under the appropriate section (e.g. `[personas]` or `[personas.stage1]`). Document that entries are proxy_wallet addresses (e.g. `"0x..."`).
+
+**Step 4: ExclusionReason and Stage 1 check**
+
+- In `crates/evaluator/src/persona_classification.rs`:
+  - Add variant `KnownBot` to `ExclusionReason` (no payload or minimal, e.g. for logging). Implement `reason_str()` to return `"KNOWN_BOT"` and `metric_value()` / `threshold()` as needed for `wallet_exclusions` schema.
+  - Where Stage 1 filtering runs (e.g. in the job that calls `stage1_filter`, or a new helper that takes `known_bots`): before or after the existing `stage1_filter` call, if `known_bots.contains(proxy_wallet)` then return `Excluded(ExclusionReason::KnownBot)` and call `record_exclusion(conn, proxy_wallet, &reason)`.
+  - Ensure `Stage1Config` (or the config passed into the job) includes `known_bots` so the evaluator can read it from `Config`.
+
+**Step 5: DB**
+
+Reuse `wallet_exclusions`; store reason `KNOWN_BOT`. No schema change required.
+
+**Step 6: Run tests**
+
+Run: `cargo test -p evaluator` and `cargo test -p common`
+Expected: ALL PASS
+
+**Step 7: Commit**
+
+```bash
+git commit -am "feat: Stage 1 known bot exclusion (Strategy Bible §4)"
+```
+
+---
+
+## Task 26: Stage 2 — Sybil Cluster Detection
+
+Implement the "Sybil Cluster" exclusion from Strategy Bible §4 (Stage 2). Wallets that belong to a cluster of size > threshold with trade-timing overlap > threshold are excluded and recorded in `wallet_exclusions`.
+
+**Source of truth:** `docs/STRATEGY_BIBLE.md` §4, Stage 2 table — "Sybil Cluster | DBSCAN clustering on trade timing | `sybil_min_cluster_size`, `sybil_min_overlap` | cluster > 3 wallets AND > 80% trade overlap".
+
+**Files:**
+- Modify: `crates/common/src/config.rs`
+- Modify: `config/default.toml`
+- Modify: `crates/evaluator/src/persona_classification.rs` (ExclusionReason, and optionally detection entry point)
+- New or existing: `crates/evaluator/src/sybil.rs` or logic in `pipeline_jobs.rs` for batch clustering
+
+**Step 1: Write the failing test**
+
+- Test that a set of wallets with > 80% trade-timing overlap and cluster size 4 (or configured minimum) are excluded with `ExclusionReason::SybilCluster` and recorded in `wallet_exclusions`.
+- Test that wallets below the overlap or size threshold are not excluded for Sybil.
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p evaluator test_sybil`
+Expected: FAIL — Sybil detection and/or `ExclusionReason::SybilCluster` do not exist.
+
+**Step 3: Config**
+
+- In `crates/common/src/config.rs`: Add `sybil_min_cluster_size: u32` (default 4) and `sybil_min_overlap: f64` (default 0.80) to the persona (or appropriate) config. Load from TOML.
+- In `config/default.toml`: Add under `[personas]` (or new section) e.g. `sybil_min_cluster_size = 4`, `sybil_min_overlap = 0.80`.
+
+**Step 4: ExclusionReason**
+
+- In `crates/evaluator/src/persona_classification.rs`: Add `ExclusionReason::SybilCluster { cluster_size: u32, overlap_pct: f64 }`. Implement `reason_str()` → `"SYBIL_CLUSTER"`, and `metric_value()` / `threshold()` so existing `record_exclusion` can persist cluster_size and overlap (e.g. metric_value = overlap_pct, threshold = cluster_size as f64, or store both in existing columns).
+
+**Step 5: Sybil detection (batch)**
+
+- Implement a batch step that runs over watchlist (or Stage 2 candidates): load trade timestamps per wallet from `trades_raw`, compute pairwise overlap (e.g. fraction of trades from wallet A that occur within a short window of a trade from wallet B), then cluster (DBSCAN with epsilon derived from time window, or simpler: group wallets with pairwise overlap > `sybil_min_overlap`). For each cluster of size >= `sybil_min_cluster_size`, mark all wallets in that cluster as excluded with `ExclusionReason::SybilCluster`.
+- Call this batch step from the persona classification job (e.g. before running `classify_wallet` on each wallet, or as a separate pass that writes to `wallet_exclusions`; then `classify_wallet` can skip wallets already in `wallet_exclusions` for SYBIL_CLUSTER, or the job simply runs Sybil pass first and then classification skips excluded wallets).
+
+**Step 6: Run tests**
+
+Run: `cargo test -p evaluator` and `cargo test -p common`
+Expected: ALL PASS
+
+**Step 7: Commit**
+
+```bash
+git commit -am "feat: Stage 2 Sybil cluster detection (Strategy Bible §4)"
 ```
 
 ---
