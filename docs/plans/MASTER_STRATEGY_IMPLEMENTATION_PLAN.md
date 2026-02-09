@@ -52,6 +52,7 @@
 - [ ] Task 26: Stage 2 — Sybil Cluster Detection
 - [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
 - [ ] Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
+- [ ] Task 29: Wallet scorecard screen (per-wallet detail page)
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
@@ -2837,6 +2838,40 @@ Strategy Bible §2: "Each stage has measurable drop-off rates visible in the **U
 
 ```bash
 git commit -am "feat: funnel metrics in Grafana + UI views per Strategy Bible §2, §10"
+```
+
+---
+
+## Task 29: Wallet scorecard screen (per-wallet detail page)
+
+Add a dedicated dashboard screen that shows a **scorecard for a single wallet**: WScore (and sub-scores when available), persona, copy fidelity, paper PnL, exposure, and a minimal journey/timeline. Aligns with Strategy Bible §10 "Per Followed Wallet (Journey View)" and enables drill-down from the rankings table.
+
+**Files:**
+- Modify: `crates/web/src/main.rs` — add route `GET /wallet/:address` (or `GET /wallet?address=0x...`)
+- Modify: `crates/web/src/queries.rs` — add `wallet_scorecard(conn, address) -> Result<WalletScorecard>` query
+- Modify: `crates/web/src/models.rs` — add `WalletScorecard` struct (wallet, persona, wscore, edge_score, consistency_score, copy_fidelity_pct, paper_pnl, exposure, journey_events, etc.)
+- Create: `crates/web/templates/wallet_scorecard.html` (or `partials/wallet_scorecard.html`) — scorecard layout
+- Modify: `crates/web/templates/partials/rankings.html` — link wallet cell to `/wallet/{proxy_wallet}` so users can open the scorecard from the rankings table
+
+**Data to load for one wallet:**
+- From `wallets`: proxy_wallet, discovered_from, discovered_at
+- From `wallet_scores_daily` (latest by score_date): wscore, edge_score, consistency_score, paper_roi_pct, recommended_follow_mode
+- From `wallet_personas` (latest by classified_at) or `wallet_exclusions` (latest): persona or exclusion reason
+- From `paper_trades` / `copy_fidelity_events`: copy fidelity (COPIED / total), paper PnL
+- From `paper_positions` or paper_trades: current exposure (optional)
+- Journey: discovery date, Stage 1/2 pass dates, persona classification date, paper trading start (if any) — from wallets, wallet_personas, wallet_exclusions, paper_trades
+
+**Implementation outline:**
+1. **Query:** Implement `wallet_scorecard(conn, address)` that returns a `WalletScorecard` with the fields above. Handle missing wallet (404) and missing scores (show N/A or "Not yet scored").
+2. **Route:** Add protected route that accepts wallet address (path param or query), calls the query, renders the scorecard template. Return 404 if wallet not in DB.
+3. **Template:** Single wallet scorecard page: header (wallet short + link to Polymarket profile), persona/status, WScore with bar or breakdown, copy fidelity %, paper PnL, exposure if available, and a short journey list (discovered, Stage 1/2, classified, paper start).
+4. **Link from rankings:** In `rankings.html`, make the wallet cell a link to the new scorecard route (e.g. `href="/wallet/{{ r.proxy_wallet }}"` or encoded query) so clicking a wallet opens its scorecard.
+5. **Tests:** Add test that scorecard route returns 200 for a wallet present in DB with scores, and 404 for unknown address; test that rankings partial contains link to wallet scorecard.
+
+**Step 5: Commit**
+
+```bash
+git commit -am "feat(web): wallet scorecard screen — per-wallet detail page with WScore, persona, copy fidelity, journey"
 ```
 
 ---
