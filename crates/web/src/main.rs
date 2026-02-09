@@ -299,6 +299,7 @@ async fn logout() -> impl IntoResponse {
         .header(header::LOCATION, "/login")
         .body(Body::empty())
         .unwrap()
+        .into_response()
 }
 
 async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
