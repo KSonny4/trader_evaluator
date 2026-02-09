@@ -39,14 +39,26 @@ pub fn open_readonly(state: &AppState) -> Result<Connection> {
 // --- Cookie-based Auth Middleware ---
 
 const AUTH_COOKIE_NAME: &str = "evaluator_auth";
+const SESSION_DURATION_SECS: i64 = 7 * 24 * 60 * 60; // 7 days
 
-/// Simple auth token (in production, use a proper session store)
+/// Generate cryptographically secure auth token using SHA-256
 fn generate_auth_token(password: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    password.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Constant-time comparison to prevent timing attacks
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 /// Redirects to /login if auth_password is configured and user is not authenticated.
@@ -181,12 +193,13 @@ async fn login_submit(
         return Redirect::to("/").into_response();
     }
 
-    // Verify password
-    if form.password == *state.auth_password.as_ref().unwrap() {
+    // Verify password (constant-time comparison to prevent timing attacks)
+    let expected_password = state.auth_password.as_ref().unwrap();
+    if constant_time_eq(&form.password, expected_password) {
         // Set auth cookie
         let auth_token = generate_auth_token(&form.password);
         let cookie = format!(
-            "{AUTH_COOKIE_NAME}={auth_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"
+            "{AUTH_COOKIE_NAME}={auth_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}"
         );
 
         Response::builder()
