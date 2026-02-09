@@ -92,6 +92,8 @@ cargo run -p evaluator -- wallets  # CLI: watchlist
 cargo run -p evaluator -- rankings # CLI: WScore rankings
 ```
 
+**Dashboard (port 8080):** When auth is configured, the dashboard uses cookie-based session auth: SHA-256 token, constant-time password comparison, and CSRF protection (token in form + cookie).
+
 ## Development workflow
 
 - **Never commit to `main`.** Feature branches + PRs only.

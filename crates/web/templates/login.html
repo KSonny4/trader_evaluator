@@ -16,6 +16,9 @@
             {% endif %}
             
             <form method="POST" action="/login" class="space-y-4">
+                {% if let Some(csrf_token) = csrf_token %}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {% endif %}
                 <div>
                     <label for="password" class="block text-sm font-medium text-gray-400 mb-1">
                         Password

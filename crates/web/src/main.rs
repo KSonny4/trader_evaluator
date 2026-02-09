@@ -4,9 +4,8 @@ mod queries;
 use anyhow::Result;
 use askama::Template;
 use axum::body::Body;
-use axum::extract::Request;
-use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -15,6 +14,7 @@ use models::{
     FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
     WalletOverview, WalletRow,
 };
+use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -39,6 +39,7 @@ pub fn open_readonly(state: &AppState) -> Result<Connection> {
 // --- Cookie-based Auth Middleware ---
 
 const AUTH_COOKIE_NAME: &str = "evaluator_auth";
+const CSRF_COOKIE_NAME: &str = "evaluator_csrf";
 const SESSION_DURATION_SECS: i64 = 7 * 24 * 60 * 60; // 7 days
 
 /// Generate cryptographically secure auth token using SHA-256
@@ -47,6 +48,27 @@ fn generate_auth_token(password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Generate cryptographically secure CSRF token
+fn generate_csrf_token() -> String {
+    let mut rng = rand::thread_rng();
+    let token: [u8; 32] = rng.gen();
+    hex::encode(token)
+}
+
+/// Verify CSRF token from cookie against form submission
+fn verify_csrf_token(headers: &HeaderMap, form_token: &str) -> bool {
+    headers
+        .get(header::COOKIE)
+        .and_then(|cookie_header: &header::HeaderValue| cookie_header.to_str().ok())
+        .is_some_and(|cookie_str: &str| {
+            cookie_str.split(';').any(|cookie: &str| {
+                let cookie = cookie.trim();
+                cookie.starts_with(&format!("{CSRF_COOKIE_NAME}="))
+                    && cookie == format!("{CSRF_COOKIE_NAME}={form_token}")
+            })
+        })
 }
 
 /// Constant-time comparison to prevent timing attacks
@@ -78,9 +100,9 @@ async fn auth_middleware(
     let is_authenticated = request
         .headers()
         .get(header::COOKIE)
-        .and_then(|cookie_header| cookie_header.to_str().ok())
-        .is_some_and(|cookie_str| {
-            cookie_str.split(';').any(|cookie| {
+        .and_then(|cookie_header: &header::HeaderValue| cookie_header.to_str().ok())
+        .is_some_and(|cookie_str: &str| {
+            cookie_str.split(';').any(|cookie: &str| {
                 let cookie = cookie.trim();
                 cookie.starts_with(&format!("{AUTH_COOKIE_NAME}="))
                     && cookie == format!("{AUTH_COOKIE_NAME}={auth_token}")
@@ -117,6 +139,7 @@ struct DashboardTemplate;
 #[template(path = "login.html")]
 struct LoginTemplate {
     error: Option<String>,
+    csrf_token: Option<String>,
 }
 
 #[derive(Template)]
@@ -176,16 +199,37 @@ async fn login_form(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         return Redirect::to("/").into_response();
     }
 
-    Html(LoginTemplate { error: None }.to_string()).into_response()
+    // Generate CSRF token and set it in a cookie
+    let csrf_token = generate_csrf_token();
+    let csrf_cookie = format!("{CSRF_COOKIE_NAME}={csrf_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}");
+
+    let response = Html(
+        LoginTemplate {
+            error: None,
+            csrf_token: Some(csrf_token.clone()),
+        }
+        .to_string(),
+    )
+    .into_response();
+
+    // Set CSRF cookie
+    let mut response = response;
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, csrf_cookie.parse().unwrap());
+
+    response
 }
 
 #[derive(Deserialize)]
 struct LoginForm {
     password: String,
+    csrf_token: String,
 }
 
 async fn login_submit(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> impl IntoResponse {
     // If no auth configured, just redirect
@@ -193,31 +237,55 @@ async fn login_submit(
         return Redirect::to("/").into_response();
     }
 
+    // Verify CSRF token
+    if !verify_csrf_token(&headers, &form.csrf_token) {
+        return Html(
+            LoginTemplate {
+                error: Some("Invalid CSRF token".to_string()),
+                csrf_token: Some(form.csrf_token),
+            }
+            .to_string(),
+        )
+        .into_response();
+    }
+
     // Verify password (constant-time comparison to prevent timing attacks)
     let expected_password = state.auth_password.as_ref().unwrap();
     if constant_time_eq(&form.password, expected_password) {
         // Set auth cookie
         let auth_token = generate_auth_token(&form.password);
-        let cookie = format!(
+        let auth_cookie = format!(
             "{AUTH_COOKIE_NAME}={auth_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}"
         );
 
         Response::builder()
             .status(StatusCode::SEE_OTHER)
-            .header(header::SET_COOKIE, cookie)
+            .header(header::SET_COOKIE, auth_cookie)
             .header(header::LOCATION, "/")
             .body(Body::empty())
             .unwrap()
             .into_response()
     } else {
-        // Show error
-        Html(
+        // Generate new CSRF token for the retry
+        let new_csrf_token = generate_csrf_token();
+        let csrf_cookie = format!("{CSRF_COOKIE_NAME}={new_csrf_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}");
+
+        let response = Html(
             LoginTemplate {
                 error: Some("Invalid password".to_string()),
+                csrf_token: Some(new_csrf_token.clone()),
             }
             .to_string(),
         )
-        .into_response()
+        .into_response();
+
+        // Set new CSRF cookie
+        let mut response = response;
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, csrf_cookie.parse().unwrap());
+
+        response
     }
 }
 
@@ -384,6 +452,35 @@ mod tests {
         format!("{AUTH_COOKIE_NAME}={token}")
     }
 
+    /// GET /login and parse CSRF token from Set-Cookie. Required for POST /login.
+    async fn get_csrf_token_from_login(app: &Router) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .expect("login page must set CSRF cookie")
+            .to_str()
+            .unwrap();
+        // Parse "evaluator_csrf=<token>; Path=/; ..."
+        set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string()
+    }
+
     // --- Auth tests (updated for cookie-based auth) ---
 
     #[tokio::test]
@@ -421,13 +518,18 @@ mod tests {
     #[tokio::test]
     async fn test_login_with_correct_password_sets_cookie() {
         let app = create_test_app_with_auth("secret");
+        let csrf_token = get_csrf_token_from_login(&app).await;
+        let body = format!("password=secret&csrf_token={csrf_token}");
+        let cookie = format!("{CSRF_COOKIE_NAME}={csrf_token}");
+
         let response = app
             .oneshot(
                 Request::builder()
                     .uri("/login")
                     .method("POST")
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from("password=secret"))
+                    .header("Cookie", cookie)
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
@@ -454,22 +556,27 @@ mod tests {
     #[tokio::test]
     async fn test_login_with_wrong_password_shows_error() {
         let app = create_test_app_with_auth("secret");
+        let csrf_token = get_csrf_token_from_login(&app).await;
+        let body = format!("password=wrong&csrf_token={csrf_token}");
+        let cookie = format!("{CSRF_COOKIE_NAME}={csrf_token}");
+
         let response = app
             .oneshot(
                 Request::builder()
                     .uri("/login")
                     .method("POST")
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(Body::from("password=wrong"))
+                    .header("Cookie", cookie)
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
+        let html = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(html.contains("Invalid password"));
     }
 
