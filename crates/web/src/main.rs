@@ -237,7 +237,7 @@ async fn login_submit(
         return Redirect::to("/").into_response();
     }
 
-    // Verify CSRF token
+    // Verify CSRF token. On failure, issue a new token so the user can retry (e.g. after proxy cookie issues).
     if !verify_csrf_token(&headers, &form.csrf_token) {
         let has_cookie = headers.get(header::COOKIE).is_some();
         let has_csrf_cookie = headers
