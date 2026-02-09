@@ -50,6 +50,8 @@
 - [ ] Task 21: Wire New Jobs into Scheduler
 - [ ] Task 25: Stage 1 — Known Bot Exclusion
 - [ ] Task 26: Stage 2 — Sybil Cluster Detection
+- [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
+- [ ] Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
@@ -57,6 +59,8 @@
 - [ ] Task 22: CLOB API Client + `book_snapshots` Table
 - [ ] Task 23: WebSocket Book Streaming + Recording
 - [ ] Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)
+
+**Future (not in current task list):** Promote wallet criteria and Real money transition (Strategy Bible §9) are post–Phase 6 and tracked separately.
 
 ---
 
@@ -1928,7 +1932,7 @@ git commit -am "feat: conditional taker fee — quartic for crypto 15m markets, 
 
 ## Task 15: Copy Fidelity Tracking
 
-Every trade the followed wallet makes gets exactly one outcome: COPIED, SKIPPED_PORTFOLIO_RISK, SKIPPED_WALLET_RISK, etc.
+Every trade the followed wallet makes gets exactly one outcome (Strategy Bible §6): COPIED, SKIPPED_PORTFOLIO_RISK, SKIPPED_WALLET_RISK, SKIPPED_DAILY_LOSS, SKIPPED_MARKET_CLOSED, SKIPPED_DETECTION_LAG, SKIPPED_NO_FILL (when orderbook available, Task 24).
 
 **Files:**
 - Modify: `crates/evaluator/src/paper_trading.rs`
@@ -1972,7 +1976,7 @@ Expected: FAIL
 
 **Step 3: Implement**
 
-Add copy fidelity event recording to `mirror_trade_to_paper` — at every exit point (copy or skip), insert a row into `copy_fidelity_events`.
+Add copy fidelity event recording to `mirror_trade_to_paper` — at every exit point (copy or skip), insert a row into `copy_fidelity_events`. Ensure all outcome types are recorded where applicable: SKIPPED_DAILY_LOSS when daily loss limit hit; SKIPPED_MARKET_CLOSED when market already resolved/expired; SKIPPED_DETECTION_LAG when detected too late (price moved beyond threshold). Schema and `record_fidelity_event` must support these outcome strings.
 
 ```rust
 pub fn compute_copy_fidelity(copied: u32, skipped: u32) -> f64 {
@@ -2015,7 +2019,11 @@ git commit -am "feat: copy fidelity tracking — record every copy/skip decision
 
 ## Task 16: Two-Level Risk Management (Per-Wallet + Portfolio)
 
-Upgrade the existing single-level risk checks to the two-level system from the Strategy Bible.
+Upgrade the existing single-level risk checks to the two-level system from the Strategy Bible (§7).
+
+**Also implement (Strategy Bible §7.2–§7.3):**
+- **Theme/correlation cap:** Portfolio-level `max_theme_exposure_pct` (default 5%) — skip new trades that would exceed max exposure per theme. Requires a notion of theme (e.g. market category/tag); add config key and enforce in risk checks.
+- **Single-trade cap:** Individual trade size must not exceed 50% of total bankroll (Strategy Bible §7.3). Enforce in `mirror_trade_to_paper`; reject or cap any trade that would exceed this.
 
 **Files:**
 - Modify: `crates/evaluator/src/paper_trading.rs`
@@ -2258,7 +2266,7 @@ pub fn behavior_quality_score(noise_trade_ratio: f64) -> f64 {
 }
 ```
 
-Update `WalletScoreInput` and `WScoreWeights` to include all 5 fields. Update `compute_wscore` to use all 5 weighted components.
+Update `WalletScoreInput` and `WScoreWeights` to include all 5 fields. Update `compute_wscore` to use all 5 weighted components. **Apply trust and obscurity (Strategy Bible Appendix A, §4):** multiply the composite WScore by `trust_multiplier` (wallet age: 30–90 days = 0.8x, 90–365 = 1.0x, 365+ = 1.0x; config `trust_30_90_multiplier`) and by `obscurity_bonus` (1.2x if wallet not on public leaderboard top-500; config `obscurity_bonus_multiplier`). Ensure config keys are read and applied in `compute_wscore` or its caller.
 
 **Step 4: Run tests**
 
@@ -2397,6 +2405,16 @@ pub fn detect_anomalies(
     anomalies
 }
 ```
+
+**Kill wallet triggers (Strategy Bible §9):** When any of the following is true, stop paper-trading that wallet immediately and record the reason. Implement checks (in this task or in the job that runs re-evaluation) and wire to "pause/stop paper-trading" state:
+- Paper PnL < -10% over 7 days
+- Hit rate < 40% over 30+ trades
+- No activity for 14+ days
+- Flagged as sybil with high confidence
+- Follower slippage exceeds their edge
+- Persona re-classified to non-followable
+
+Thresholds (e.g. -10%, 40%, 14 days) should be configurable where appropriate.
 
 **Step 4: Run tests**
 
@@ -2776,6 +2794,49 @@ Expected: ALL PASS
 
 ```bash
 git commit -am "feat: Stage 2 Sybil cluster detection (Strategy Bible §4)"
+```
+
+---
+
+## Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
+
+Strategy Bible §3 requires Patient Accumulator to have "avg_position_size in **top 10th percentile** of all tracked wallets" (large positions). Current detector (Task 7) only checks avg_hold_time_hours and trades_per_week.
+
+**Files:**
+- Modify: `crates/evaluator/src/persona_classification.rs`
+- Modify: `crates/evaluator/src/wallet_features.rs` or pipeline job (to compute percentile)
+
+**Implementation outline:**
+- Compute the distribution of `avg_position_size` across all tracked wallets (from wallet features or trades_raw). Derive the 90th percentile threshold (top 10th percentile = above 90% of wallets).
+- Pass this threshold into Patient Accumulator detection (e.g. config `accumulator_min_position_size_p90` or compute at classification time and pass `min_position_size_p90`). In `detect_patient_accumulator`, add a check: `features.avg_position_size >= min_position_size_p90` (or equivalent).
+- Add config key if threshold is configurable (e.g. for testing); otherwise compute from DB at job run time.
+- TDD: test that a wallet with position size in top 10th percentile passes; wallet below percentile fails.
+
+**Step 5: Commit**
+
+```bash
+git commit -am "feat: Patient Accumulator requires position size in top 10th percentile (Strategy Bible §3)"
+```
+
+---
+
+## Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
+
+Strategy Bible §2: "Each stage has measurable drop-off rates visible in the **UI and Grafana**." §10: UI must show **Journey view** (per followed wallet), **Excluded wallets list** (with reason and metrics), **Portfolio overview** (paper portfolio PnL, exposure, copy fidelity, risk status).
+
+**Files:**
+- Modify or add: dashboard/frontend (see `docs/plans/archive/2026-02-08-evaluator-frontend-dashboard.md` if present)
+- Prometheus metrics / Grafana: expose funnel stage counts (markets scored, wallets discovered, Stage 1 passed, Stage 2 classified, paper-traded, follow-worthy) so drop-off rates can be computed and displayed.
+
+**Implementation outline:**
+- Emit or aggregate metrics for each funnel stage (counts at each step). In Grafana, build a funnel or bar chart showing drop-off between stages.
+- UI: ensure Journey view (per-wallet timeline: discovered, Stage 1/2, paper start, re-evaluations), Excluded wallets list (paginated, with reason and metric_value/threshold), and Portfolio overview (total PnL, exposure, copy fidelity, risk limits) match §10. Add or update endpoints/templates as needed.
+- No change to core evaluator logic; this task is metrics + UI alignment with Strategy Bible §2 and §10.
+
+**Step 5: Commit**
+
+```bash
+git commit -am "feat: funnel metrics in Grafana + UI views per Strategy Bible §2, §10"
 ```
 
 ---
