@@ -62,6 +62,15 @@ pub async fn mirror_trade_to_paper(
     max_daily_trades: u32,
     portfolio_stop_drawdown_pct: f64,
 ) -> Result<MirrorDecision> {
+    // Position size enforcement (Strategy Bible §7.3)
+    // Ensure per-trade size is within sane bounds of total bankroll.
+    if position_size_usdc > bankroll_usdc * 0.5 {
+        return Ok(MirrorDecision {
+            inserted: false,
+            reason: Some("position_size_too_large".to_string()),
+        });
+    }
+
     // Clone owned values for the 'static Send closure
     let proxy_wallet = proxy_wallet.to_string();
     let condition_id = condition_id.to_string();
@@ -222,7 +231,7 @@ mod tests {
             Some(0),
             0.60,
             Some(1),
-            100.0,
+            25.0,
             1.0,
             10_000.0,
             10.0,
@@ -284,7 +293,7 @@ mod tests {
             1.0,
             10_000.0,
             10.0, // cap = 1,000
-            100.0,
+            25.0,
             100,
             15.0,
         )
@@ -321,7 +330,7 @@ mod tests {
                     "mirror",
                     "0xcond",
                     "BUY",
-                    100.0,
+                    25.0,
                     0.50,
                     "settled_loss",
                     -1600.0
@@ -341,11 +350,11 @@ mod tests {
             Some(0),
             0.60,
             Some(2),
-            100.0,
+            25.0,
             1.0,
             10_000.0,
             10.0,
-            100.0,
+            25.0,
             100,
             15.0,
         )
@@ -354,5 +363,33 @@ mod tests {
 
         assert!(!res.inserted);
         assert_eq!(res.reason.as_deref(), Some("portfolio_stop"));
+    }
+
+    #[tokio::test]
+    async fn test_position_size_enforcement_blocks_huge_trade() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let res = mirror_trade_to_paper(
+            &db,
+            "0xwallet",
+            "0xcond",
+            Side::Buy,
+            Some("YES"),
+            Some(0),
+            0.60,
+            Some(1),
+            6000.0, // 60% of 10k bankroll, should be blocked by 50% limit
+            1.0,
+            10_000.0,
+            10.0,
+            5.0,
+            100,
+            15.0,
+        )
+        .await
+        .unwrap();
+
+        assert!(!res.inserted);
+        assert_eq!(res.reason.as_deref(), Some("position_size_too_large"));
     }
 }

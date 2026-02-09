@@ -271,7 +271,7 @@ max_daily_trades = 100
 slippage_pct = 1.0
 no_chase_adverse_move_pct = 5.0
 portfolio_stop_drawdown_pct = 15.0
-paper_bankroll_usdc = 10000.0
+paper_bankroll_usdc = 1000.0
 per_wallet_daily_loss_pct = 2.0
 per_wallet_weekly_loss_pct = 5.0
 per_wallet_max_drawdown_pct = 15.0
@@ -313,7 +313,7 @@ backoff_base_ms = 1000
 [paper_trading]
 strategies = ["mirror"]
 mirror_delay_secs = 0
-position_size_usdc = 100.0
+position_size_usdc = 25.0
 bankroll_usd = 1000.0
 max_total_exposure_pct = 15.0
 max_daily_loss_pct = 3.0

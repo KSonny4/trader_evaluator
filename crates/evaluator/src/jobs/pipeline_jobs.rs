@@ -167,6 +167,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         let input = WalletScoreInput {
             paper_roi_pct: roi_pct,
             daily_return_stdev_pct: 0.0,
+            hit_rate: 0.50, // TODO: calculate real hit rate from DB
         };
         let wscore = compute_wscore(&input, &w);
         score_rows.push(ScoreRow {
@@ -843,7 +844,7 @@ mod tests {
                 INSERT INTO paper_trades
                     (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
                 VALUES
-                    (?1, 'mirror', ?2, 'BUY', 100.0, 0.5, 'settled_win', 50.0, datetime('now'), datetime('now'))
+                    (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 50.0, datetime('now'), datetime('now'))
                 ",
                 rusqlite::params!["0xw", "0xcond"],
             )?;
