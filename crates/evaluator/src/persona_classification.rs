@@ -3,6 +3,88 @@ use rusqlite::Connection;
 
 use crate::wallet_features::WalletFeatures;
 
+/// Result of running the full classification pipeline on a wallet.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClassificationResult {
+    Followable(Persona),
+    Excluded(ExclusionReason),
+    Unclassified,
+}
+
+/// Configuration for persona detection thresholds. Built from config or test defaults.
+#[derive(Debug, Clone)]
+pub struct PersonaConfig {
+    pub specialist_max_active_positions: u32,
+    pub specialist_min_concentration: f64,
+    pub specialist_min_win_rate: f64,
+    pub generalist_min_markets: u32,
+    pub generalist_min_win_rate: f64,
+    pub generalist_max_win_rate: f64,
+    pub generalist_max_drawdown: f64,
+    pub generalist_min_sharpe: f64,
+    pub accumulator_min_hold_hours: f64,
+    pub accumulator_max_trades_per_week: f64,
+    #[allow(dead_code)] // Used when Execution Master detection is wired (PnL decomposition)
+    pub execution_master_pnl_ratio: f64,
+    pub tail_risk_min_win_rate: f64,
+    pub tail_risk_loss_multiplier: f64,
+    pub noise_max_trades_per_week: f64,
+    pub noise_max_abs_roi: f64,
+    pub sniper_max_age_days: u32,
+    pub sniper_min_win_rate: f64,
+    pub sniper_max_trades: u32,
+}
+
+impl PersonaConfig {
+    #[cfg(test)]
+    pub fn default_for_test() -> Self {
+        Self {
+            specialist_max_active_positions: 10,
+            specialist_min_concentration: 0.60,
+            specialist_min_win_rate: 0.60,
+            generalist_min_markets: 20,
+            generalist_min_win_rate: 0.52,
+            generalist_max_win_rate: 0.60,
+            generalist_max_drawdown: 15.0,
+            generalist_min_sharpe: 1.0,
+            accumulator_min_hold_hours: 48.0,
+            accumulator_max_trades_per_week: 5.0,
+            execution_master_pnl_ratio: 0.70,
+            tail_risk_min_win_rate: 0.80,
+            tail_risk_loss_multiplier: 5.0,
+            noise_max_trades_per_week: 50.0,
+            noise_max_abs_roi: 0.02,
+            sniper_max_age_days: 30,
+            sniper_min_win_rate: 0.85,
+            sniper_max_trades: 20,
+        }
+    }
+
+    /// Build from common config Personas (for production).
+    pub fn from_personas(p: &common::config::Personas) -> Self {
+        Self {
+            specialist_max_active_positions: p.specialist_max_active_positions,
+            specialist_min_concentration: p.specialist_min_concentration,
+            specialist_min_win_rate: p.specialist_min_win_rate,
+            generalist_min_markets: p.generalist_min_markets,
+            generalist_min_win_rate: p.generalist_min_win_rate,
+            generalist_max_win_rate: p.generalist_max_win_rate,
+            generalist_max_drawdown: p.generalist_max_drawdown,
+            generalist_min_sharpe: p.generalist_min_sharpe,
+            accumulator_min_hold_hours: p.accumulator_min_hold_hours,
+            accumulator_max_trades_per_week: p.accumulator_max_trades_per_week,
+            execution_master_pnl_ratio: p.execution_master_pnl_ratio,
+            tail_risk_min_win_rate: p.tail_risk_min_win_rate,
+            tail_risk_loss_multiplier: p.tail_risk_loss_multiplier,
+            noise_max_trades_per_week: p.noise_max_trades_per_week,
+            noise_max_abs_roi: p.noise_max_abs_roi,
+            sniper_max_age_days: p.sniper_max_age_days,
+            sniper_min_win_rate: p.sniper_min_win_rate,
+            sniper_max_trades: p.sniper_max_trades,
+        }
+    }
+}
+
 #[allow(dead_code)] // Wired into scheduler in Task 21
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExclusionReason {
@@ -345,6 +427,125 @@ pub fn detect_consistent_generalist(
         return None;
     }
     Some(Persona::ConsistentGeneralist)
+}
+
+/// Full classification pipeline for a wallet.
+/// Checks exclusions first (order matters — cheapest checks first), then followable personas.
+pub fn classify_wallet(
+    conn: &Connection,
+    features: &WalletFeatures,
+    wallet_age_days: u32,
+    config: &PersonaConfig,
+) -> Result<ClassificationResult> {
+    let total_resolved = features.win_count + features.loss_count;
+    let win_rate = if total_resolved > 0 {
+        f64::from(features.win_count) / f64::from(total_resolved)
+    } else {
+        0.0
+    };
+
+    let roi = if features.trade_count > 0 && features.avg_position_size > 0.0 {
+        features.total_pnl / (f64::from(features.trade_count) * features.avg_position_size)
+    } else {
+        0.0
+    };
+
+    // --- Exclusion checks (Stage 2) ---
+
+    if let Some(reason) = detect_sniper_insider(
+        wallet_age_days,
+        win_rate,
+        features.trade_count,
+        config.sniper_max_age_days,
+        config.sniper_min_win_rate,
+        config.sniper_max_trades,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
+    if let Some(reason) = detect_noise_trader(
+        features.trades_per_week,
+        roi.abs(),
+        config.noise_max_trades_per_week,
+        config.noise_max_abs_roi,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
+    let avg_win_pnl = if features.win_count > 0 {
+        features.total_pnl.max(1.0) / f64::from(features.win_count)
+    } else {
+        1.0
+    };
+    let max_loss_proxy = features.max_drawdown_pct * features.avg_position_size / 100.0;
+    let loss_ratio = if avg_win_pnl > 0.0 {
+        max_loss_proxy / avg_win_pnl
+    } else {
+        0.0
+    };
+
+    if let Some(reason) = detect_tail_risk_seller(
+        win_rate,
+        loss_ratio,
+        config.tail_risk_min_win_rate,
+        config.tail_risk_loss_multiplier,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
+    // --- Followable persona detection (priority order) ---
+
+    if let Some(persona) = detect_informed_specialist(
+        features,
+        config.specialist_max_active_positions,
+        config.specialist_min_concentration,
+        config.specialist_min_win_rate,
+    ) {
+        record_persona(conn, &features.proxy_wallet, &persona, win_rate)?;
+        return Ok(ClassificationResult::Followable(persona));
+    }
+
+    if let Some(persona) = detect_consistent_generalist(
+        features,
+        config.generalist_min_markets,
+        config.generalist_min_win_rate,
+        config.generalist_max_win_rate,
+        config.generalist_max_drawdown,
+        config.generalist_min_sharpe,
+    ) {
+        record_persona(conn, &features.proxy_wallet, &persona, win_rate)?;
+        return Ok(ClassificationResult::Followable(persona));
+    }
+
+    if let Some(persona) = detect_patient_accumulator(
+        features,
+        config.accumulator_min_hold_hours,
+        config.accumulator_max_trades_per_week,
+    ) {
+        record_persona(conn, &features.proxy_wallet, &persona, win_rate)?;
+        return Ok(ClassificationResult::Followable(persona));
+    }
+
+    Ok(ClassificationResult::Unclassified)
+}
+
+/// Record a followable persona classification.
+/// Schema has UNIQUE(proxy_wallet, classified_at), so each run adds a row; use latest by classified_at for "current" persona.
+pub fn record_persona(
+    conn: &Connection,
+    proxy_wallet: &str,
+    persona: &Persona,
+    confidence: f64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+         VALUES (?1, ?2, ?3, datetime('now'))",
+        rusqlite::params![proxy_wallet, persona.as_str(), confidence],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -995,5 +1196,119 @@ mod tests {
         // Exactly at all thresholds — should NOT trigger (all use strict < and >)
         let result = detect_sniper_insider(30, 0.85, 20, 30, 0.85, 20);
         assert_eq!(result, None);
+    }
+
+    // --- Task 12: Classification orchestrator ---
+
+    #[test]
+    fn test_classify_wallet_informed_specialist() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let features = WalletFeatures {
+            proxy_wallet: "0xabc".to_string(),
+            window_days: 30,
+            trade_count: 40,
+            win_count: 28,
+            loss_count: 12,
+            total_pnl: 500.0,
+            avg_position_size: 200.0,
+            unique_markets: 5,
+            avg_hold_time_hours: 24.0,
+            max_drawdown_pct: 8.0,
+            trades_per_week: 10.0,
+            sharpe_ratio: 1.5,
+            active_positions: 3,
+            concentration_ratio: 0.75,
+        };
+
+        let config = PersonaConfig::default_for_test();
+        let result = classify_wallet(&db.conn, &features, 90, &config).unwrap();
+
+        assert_eq!(
+            result,
+            ClassificationResult::Followable(Persona::InformedSpecialist)
+        );
+
+        let persona: String = db
+            .conn
+            .query_row(
+                "SELECT persona FROM wallet_personas WHERE proxy_wallet = '0xabc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persona, "INFORMED_SPECIALIST");
+    }
+
+    #[test]
+    fn test_classify_wallet_excluded_noise_trader() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let features = WalletFeatures {
+            proxy_wallet: "0xnoise".to_string(),
+            window_days: 30,
+            trade_count: 300,
+            win_count: 150,
+            loss_count: 150,
+            total_pnl: 5.0,
+            avg_position_size: 10.0,
+            unique_markets: 30,
+            avg_hold_time_hours: 0.5,
+            max_drawdown_pct: 3.0,
+            trades_per_week: 75.0,
+            sharpe_ratio: 0.1,
+            active_positions: 15,
+            concentration_ratio: 0.3,
+        };
+
+        let config = PersonaConfig::default_for_test();
+        let result = classify_wallet(&db.conn, &features, 180, &config).unwrap();
+
+        match &result {
+            ClassificationResult::Excluded(reason) => {
+                assert_eq!(reason.reason_str(), "NOISE_TRADER");
+            }
+            _ => panic!("Expected exclusion, got {result:?}"),
+        }
+
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM wallet_exclusions WHERE proxy_wallet = '0xnoise'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_classify_wallet_unclassified() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let features = WalletFeatures {
+            proxy_wallet: "0xmid".to_string(),
+            window_days: 30,
+            trade_count: 50,
+            win_count: 25,
+            loss_count: 25,
+            total_pnl: 20.0,
+            avg_position_size: 100.0,
+            unique_markets: 15,
+            avg_hold_time_hours: 12.0,
+            max_drawdown_pct: 8.0,
+            trades_per_week: 12.0,
+            sharpe_ratio: 0.7,
+            active_positions: 8,
+            concentration_ratio: 0.50,
+        };
+
+        let config = PersonaConfig::default_for_test();
+        let result = classify_wallet(&db.conn, &features, 180, &config).unwrap();
+
+        assert_eq!(result, ClassificationResult::Unclassified);
     }
 }

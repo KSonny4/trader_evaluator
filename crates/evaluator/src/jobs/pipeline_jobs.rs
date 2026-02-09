@@ -7,7 +7,9 @@ use common::types::{ApiHolderResponse, ApiTrade, GammaMarket};
 
 use crate::market_scoring::{rank_markets, MarketCandidate};
 use crate::paper_trading::{mirror_trade_to_paper, Side};
+use crate::persona_classification::{classify_wallet, stage1_filter, PersonaConfig, Stage1Config};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
+use crate::wallet_features::compute_wallet_features;
 use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
 
 use super::fetcher_traits::*;
@@ -522,6 +524,94 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         .await?;
     metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
     Ok(inserted)
+}
+
+/// Run Stage 2 persona classification for all watchlist wallets that pass Stage 1.
+/// Returns the number of wallets that received a classification (followable or excluded).
+pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    let now_epoch = chrono::Utc::now().timestamp();
+    let window_days = 30_u32;
+    let persona_config = PersonaConfig::from_personas(&cfg.personas);
+    let stage1_config = Stage1Config {
+        min_wallet_age_days: cfg.personas.stage1_min_wallet_age_days,
+        min_total_trades: cfg.personas.stage1_min_total_trades,
+        max_inactive_days: cfg.personas.stage1_max_inactive_days,
+    };
+
+    let classified: u64 = db
+        .call(move |conn| {
+            let wallets: Vec<(String, u32, u32, u32)> = conn
+                .prepare(
+                    "
+                    SELECT w.proxy_wallet,
+                        CAST((julianday('now') - julianday(w.discovered_at)) AS INTEGER) AS age_days,
+                        (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS total_trades,
+                        (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
+                         FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS days_since_last
+                    FROM wallets w
+                    WHERE w.is_active = 1
+                    ",
+                )?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1).unwrap_or(0).max(0) as u32,
+                        row.get::<_, i64>(2).unwrap_or(0).max(0) as u32,
+                        row.get::<_, Option<i64>>(3)?
+                            .unwrap_or(i64::MAX)
+                            .min(i64::from(i32::MAX))
+                            .max(0) as u32,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            let mut count = 0_u64;
+            for (proxy_wallet, wallet_age_days, total_trades, days_since_last) in wallets {
+                if let Some(reason) = stage1_filter(
+                    wallet_age_days,
+                    total_trades,
+                    days_since_last,
+                    &stage1_config,
+                ) {
+                    crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
+                    count += 1;
+                    continue;
+                }
+
+                let Ok(features) = compute_wallet_features(
+                    conn,
+                    &proxy_wallet,
+                    window_days,
+                    now_epoch,
+                ) else {
+                    tracing::warn!(
+                        proxy_wallet = %proxy_wallet,
+                        "persona classification skipped: compute_wallet_features failed"
+                    );
+                    continue;
+                };
+
+                match classify_wallet(conn, &features, wallet_age_days, &persona_config) {
+                    Ok(result) => {
+                        if !matches!(result, crate::persona_classification::ClassificationResult::Unclassified) {
+                            count += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            proxy_wallet = %proxy_wallet,
+                            error = %e,
+                            "persona classification skipped: classify_wallet failed"
+                        );
+                    }
+                }
+            }
+            Ok(count)
+        })
+        .await?;
+
+    metrics::gauge!("evaluator_persona_classifications_run").set(classified as f64);
+    Ok(classified)
 }
 
 fn compute_days_to_expiry(end_date: Option<&str>) -> Option<u32> {
