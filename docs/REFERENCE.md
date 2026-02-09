@@ -103,6 +103,14 @@ This project applies proven Polymarket patterns from production systems. Key arc
 - Cross-compiled musl binaries for zero-dependency deployment
 - Systemd service management on AWS t3.micro
 
+## Durability and recovery
+
+The implementation is **durable** (each unit of work is committed in a transaction) and **recoverable** (after a sudden kill, the next run catches up).
+
+- **Paper trading:** Each mirror decision runs in a single SQLite transaction (insert `paper_trades` + upsert `paper_positions`). If the process is killed mid-transaction, that transaction is rolled back; at most one trade is lost until the next run. Processing is idempotent per source trade (keyed by `triggered_by_trade_id`).
+- **Ingestion:** `trades_raw` and `activity_raw` use `INSERT OR IGNORE` with UNIQUE constraints, so re-running after a kill does not duplicate rows. Positions and holders snapshots are append-only; re-run may add duplicate snapshot rows for the same time (acceptable).
+- **Startup recovery:** Before the scheduler starts, the evaluator runs **recovery** once: it processes any unprocessed `trades_raw` into paper trades (same logic as the periodic paper_tick job). So work that was in progress when the process was killed is completed on the next boot. Metric: `evaluator_recovery_paper_trades_total`.
+
 ## Data saving and replay
 
 **Save parsed data per-row. No separate raw response table.** We need the ability to replay following any account on any market after the fact — to tune risk management, test alternative strategies, and prove whether we could have profited.

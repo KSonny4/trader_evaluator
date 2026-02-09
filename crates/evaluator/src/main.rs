@@ -13,6 +13,7 @@ mod wallet_discovery;
 mod wallet_features;
 mod wallet_scoring;
 
+#[allow(clippy::too_many_lines)] // job wiring and worker loops
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = common::config::Config::load()?;
@@ -64,6 +65,15 @@ async fn main() -> Result<()> {
     match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref()).await {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
+    }
+
+    // Recovery: process any work that was in progress when the process was last killed.
+    // Paper tick is idempotent (keyed by triggered_by_trade_id); ingestion jobs use
+    // INSERT OR IGNORE so the next scheduled run will catch up.
+    tracing::info!("recovery: processing any in-flight paper trades");
+    match jobs::run_recovery_once(&db, cfg.as_ref()).await {
+        Ok(n) => tracing::info!(paper_trades = n, "recovery done"),
+        Err(e) => tracing::error!(error = %e, "recovery failed"),
     }
 
     tracing::info!("bootstrap done — starting scheduler (ingestion runs immediately)");
