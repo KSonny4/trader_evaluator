@@ -237,16 +237,42 @@ async fn login_submit(
         return Redirect::to("/").into_response();
     }
 
-    // Verify CSRF token
+    // Verify CSRF token. On failure, issue a new token so the user can retry (e.g. after proxy cookie issues).
     if !verify_csrf_token(&headers, &form.csrf_token) {
-        return Html(
+        let has_cookie = headers.get(header::COOKIE).is_some();
+        let has_csrf_cookie = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|s| {
+                s.split(';')
+                    .any(|c| c.trim().starts_with(&format!("{CSRF_COOKIE_NAME}=")))
+            });
+        tracing::debug!(
+            has_cookie,
+            has_csrf_cookie,
+            "login CSRF verification failed"
+        );
+
+        let new_csrf_token = generate_csrf_token();
+        let csrf_cookie = format!(
+            "{CSRF_COOKIE_NAME}={new_csrf_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}"
+        );
+
+        let response = Html(
             LoginTemplate {
                 error: Some("Invalid CSRF token".to_string()),
-                csrf_token: Some(form.csrf_token),
+                csrf_token: Some(new_csrf_token.clone()),
             }
             .to_string(),
         )
         .into_response();
+
+        let mut response = response;
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, csrf_cookie.parse().unwrap());
+
+        return response.into_response();
     }
 
     // Verify password (constant-time comparison to prevent timing attacks)
@@ -579,6 +605,75 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(html.contains("Invalid password"));
+    }
+
+    #[tokio::test]
+    async fn test_login_with_valid_password_missing_cookie_returns_csrf_error() {
+        let app = create_test_app_with_auth("secret");
+        let csrf_token = get_csrf_token_from_login(&app).await;
+        let body = format!("password=secret&csrf_token={csrf_token}");
+        // No Cookie header - simulates proxy stripping cookie or first POST without cookie
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .expect("CSRF error response must set new CSRF cookie")
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with(&format!("{CSRF_COOKIE_NAME}=")));
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(html.contains("Invalid CSRF token"));
+    }
+
+    #[tokio::test]
+    async fn test_login_with_wrong_csrf_cookie_returns_csrf_error() {
+        let app = create_test_app_with_auth("secret");
+        let csrf_token = get_csrf_token_from_login(&app).await;
+        let body = format!("password=secret&csrf_token={csrf_token}");
+        let wrong_cookie = format!("{CSRF_COOKIE_NAME}=wrong_token_value");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Cookie", wrong_cookie)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .expect("CSRF error response must set new CSRF cookie")
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with(&format!("{CSRF_COOKIE_NAME}=")));
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(html.contains("Invalid CSRF token"));
     }
 
     #[tokio::test]

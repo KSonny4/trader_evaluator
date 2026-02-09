@@ -50,7 +50,7 @@ trader_evaluator/
           ingestion_jobs.rs         # Trade/activity/position/holder ingestion
           pipeline_jobs.rs          # Market scoring, wallet discovery/scoring, paper tick
           maintenance.rs            # WAL checkpoint
-    web/                            # Dashboard web server (htmx + cookie-based auth)
+    web/                            # Dashboard web server (htmx + cookie-based auth). With cloudflared/other proxy: forward Cookie and Host.
       src/
         main.rs                     # Axum HTTP server on port 8080
         queries.rs                  # Dashboard SQL queries
