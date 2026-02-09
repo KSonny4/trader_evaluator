@@ -109,6 +109,14 @@ pub async fn mirror_trade_to_paper(
     db.call(move |conn| {
         let strategy = "mirror";
 
+        // Skip excluded wallets (persona or risk breach). Same rule for paper and live.
+        if crate::persona_classification::is_wallet_excluded(conn, &proxy_wallet)? {
+            return Ok(MirrorDecision {
+                inserted: false,
+                reason: Some("wallet_excluded".to_string()),
+            });
+        }
+
         // Portfolio stop: halt if realized drawdown exceeds threshold.
         let realized: f64 = conn
             .query_row(

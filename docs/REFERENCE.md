@@ -170,6 +170,15 @@ Detection: rule-based SQL on `wallet_features_daily` first, ML classifier later 
 
 Full taxonomy with thresholds in `docs/EVALUATION_STRATEGY.md` Phase 2.
 
+## Paper vs live execution
+
+**Excluded wallets:** Bad wallets (persona or risk breach) must be stopped **immediately** for both paper and live. Before any copy or real order, the pipeline must skip wallets that are in `wallet_exclusions`. Use `persona_classification::is_wallet_excluded(conn, proxy_wallet)`:
+
+- **Paper:** `mirror_trade_to_paper` checks this at the start of its DB closure; the paper_tick query also filters by `NOT IN (SELECT proxy_wallet FROM wallet_exclusions)`.
+- **Live (future):** When adding real-money execution, the decision step or live executor **must** call `is_wallet_excluded` before placing any order so excluded wallets never receive real trades.
+
+Same risk and exclusion rules apply to both modes; only the execution backend (DB write vs CLOB API) differs.
+
 ## Environment variables
 
 ```bash

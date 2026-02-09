@@ -124,6 +124,19 @@ pub enum ExclusionReason {
         min_win_rate_threshold: f64,
         max_trades_threshold: u32,
     },
+    // Risk-breach exclusions (live evaluation; audit in wallet_exclusions)
+    PerWalletMaxDrawdown {
+        drawdown_pct: f64,
+        threshold_pct: f64,
+    },
+    PerWalletDailyLoss {
+        loss_pct: f64,
+        threshold_pct: f64,
+    },
+    PerWalletWeeklyLoss {
+        loss_pct: f64,
+        threshold_pct: f64,
+    },
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -137,6 +150,9 @@ impl ExclusionReason {
             Self::TailRiskSeller { .. } => "TAIL_RISK_SELLER",
             Self::NoiseTrader { .. } => "NOISE_TRADER",
             Self::SniperInsider { .. } => "SNIPER_INSIDER",
+            Self::PerWalletMaxDrawdown { .. } => "PER_WALLET_MAX_DRAWDOWN",
+            Self::PerWalletDailyLoss { .. } => "PER_WALLET_DAILY_LOSS",
+            Self::PerWalletWeeklyLoss { .. } => "PER_WALLET_WEEKLY_LOSS",
         }
     }
 
@@ -156,6 +172,9 @@ impl ExclusionReason {
                 trades_per_week, ..
             } => *trades_per_week,
             Self::SniperInsider { win_rate, .. } => *win_rate,
+            Self::PerWalletMaxDrawdown { drawdown_pct, .. } => *drawdown_pct,
+            Self::PerWalletDailyLoss { loss_pct, .. } => *loss_pct,
+            Self::PerWalletWeeklyLoss { loss_pct, .. } => *loss_pct,
         }
     }
 
@@ -177,6 +196,9 @@ impl ExclusionReason {
                 min_win_rate_threshold,
                 ..
             } => *min_win_rate_threshold,
+            Self::PerWalletMaxDrawdown { threshold_pct, .. } => *threshold_pct,
+            Self::PerWalletDailyLoss { threshold_pct, .. } => *threshold_pct,
+            Self::PerWalletWeeklyLoss { threshold_pct, .. } => *threshold_pct,
         }
     }
 }
@@ -216,6 +238,20 @@ pub fn stage1_filter(
         });
     }
     None
+}
+
+/// Returns true if the wallet is in wallet_exclusions (persona or risk breach).
+/// Used by both paper and live execution: do not copy or place orders for excluded wallets.
+pub fn is_wallet_excluded(conn: &Connection, proxy_wallet: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM wallet_exclusions WHERE proxy_wallet = ?1 LIMIT 1",
+            rusqlite::params![proxy_wallet],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(exists.is_some())
 }
 
 /// Record an exclusion in the wallet_exclusions table.
@@ -740,6 +776,28 @@ mod tests {
             )
             .unwrap();
         assert!((metric - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_is_wallet_excluded() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        assert!(!super::is_wallet_excluded(&db.conn, "0xabc").unwrap());
+        assert!(!super::is_wallet_excluded(&db.conn, "0xother").unwrap());
+
+        super::record_exclusion(
+            &db.conn,
+            "0xabc",
+            &super::ExclusionReason::PerWalletMaxDrawdown {
+                drawdown_pct: 18.0,
+                threshold_pct: 15.0,
+            },
+        )
+        .unwrap();
+
+        assert!(super::is_wallet_excluded(&db.conn, "0xabc").unwrap());
+        assert!(!super::is_wallet_excluded(&db.conn, "0xother").unwrap());
     }
 
     #[test]
