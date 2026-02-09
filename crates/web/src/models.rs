@@ -166,6 +166,11 @@ impl FunnelCounts {
             ("Paper", self.paper_trades_total, self.wallets_ranked),
             ("Ranked", self.wallets_ranked, 0),
         ];
+        debug_assert_eq!(
+            pairs.len(),
+            FUNNEL_STAGE_INFO.len(),
+            "funnel stages and FUNNEL_STAGE_INFO must stay in sync; add an info string for each stage"
+        );
 
         pairs
             .iter()
