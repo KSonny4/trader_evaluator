@@ -41,6 +41,36 @@ fn apply_slippage(entry_price: f64, side: Side, slippage_pct: f64) -> (f64, f64)
     (clamp01(adjusted), slippage_pct)
 }
 
+/// Quartic taker fee on Polymarket.
+/// fee = price * 0.25 * (price * (1 - price))^2
+/// Max ~1.56% at p=0.50, approaches zero near p=0 or p=1.
+/// ONLY applies to 15-minute crypto markets. All other markets have zero fees.
+pub fn quartic_taker_fee(price: f64) -> f64 {
+    let p = price.clamp(0.0, 1.0);
+    p * 0.25 * (p * (1.0 - p)).powi(2)
+}
+
+/// Compute the taker fee for a trade. Returns 0.0 for non-crypto markets.
+pub fn compute_taker_fee(price: f64, is_crypto_15m: bool) -> f64 {
+    if is_crypto_15m {
+        quartic_taker_fee(price)
+    } else {
+        0.0
+    }
+}
+
+/// Detect if a market is a 15-minute crypto price prediction market.
+/// These are the ONLY markets that charge taker fees on Polymarket.
+pub fn is_crypto_15m_market(title: &str, slug: &str) -> bool {
+    let text = format!("{} {}", title.to_lowercase(), slug.to_lowercase());
+    let is_crypto = text.contains("btc")
+        || text.contains("eth")
+        || text.contains("bitcoin")
+        || text.contains("ethereum");
+    let is_15m = text.contains("15m") || text.contains("15 min") || text.contains("15-min");
+    is_crypto && is_15m
+}
+
 /// All DB reads + writes for a single mirror decision run inside one `db.call()`
 /// closure, keeping them atomic on the SQLite background thread.
 #[allow(clippy::too_many_arguments)]
@@ -137,7 +167,23 @@ pub async fn mirror_trade_to_paper(
             });
         }
 
-        let (entry_price, slippage_applied) = apply_slippage(observed_price, side, slippage_pct);
+        let (adjusted_price, slippage_applied) = apply_slippage(observed_price, side, slippage_pct);
+
+        let is_crypto_15m: bool = conn
+            .query_row(
+                "SELECT COALESCE(is_crypto_15m, 0) FROM markets WHERE condition_id = ?1",
+                rusqlite::params![condition_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some_and(|v| v != 0);
+
+        let fee = compute_taker_fee(adjusted_price, is_crypto_15m);
+        let entry_price = if side == Side::Buy {
+            clamp01(adjusted_price + fee)
+        } else {
+            clamp01(adjusted_price - fee)
+        };
 
         conn.execute(
             "
@@ -328,6 +374,50 @@ mod tests {
             .unwrap();
         assert_eq!(status, "settled_loss");
         assert!((pnl - (-15.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_quartic_taker_fee() {
+        let fee = quartic_taker_fee(0.60);
+        assert!((fee - 0.00864).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_quartic_taker_fee_at_extremes() {
+        let fee_low = quartic_taker_fee(0.05);
+        assert!(fee_low < 0.001);
+        let fee_high = quartic_taker_fee(0.95);
+        assert!(fee_high < 0.001);
+        let fee_mid = quartic_taker_fee(0.50);
+        assert!((fee_mid - 0.0078125).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_compute_fee_conditional() {
+        let fee_political = compute_taker_fee(0.60, false);
+        assert!((fee_political - 0.0).abs() < 0.0001);
+        let fee_crypto = compute_taker_fee(0.60, true);
+        assert!((fee_crypto - 0.00864).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_detect_crypto_15m_market() {
+        assert!(is_crypto_15m_market(
+            "Will BTC go above $100,000 by 15 min?",
+            "btc-15m-above-100k"
+        ));
+        assert!(is_crypto_15m_market(
+            "Will ETH be above $4,000 at 3:15 PM?",
+            "eth-15m-above-4000"
+        ));
+        assert!(!is_crypto_15m_market(
+            "Will Trump win the 2024 election?",
+            "trump-2024-election"
+        ));
+        assert!(!is_crypto_15m_market(
+            "Will Bitcoin reach $200k by 2026?",
+            "bitcoin-200k-2026"
+        ));
     }
 
     #[tokio::test]
