@@ -32,10 +32,13 @@
         </div>
     </details>
 
-    <!-- Stage 3: Tracking -->
+    <!-- Stage 3: Wallet Health Monitor -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 3: Long-Term Tracking
+            <div class="flex flex-col">
+                <span>Stage 3: Wallet Health Monitor</span>
+                <span class="text-xs font-normal text-gray-500">Monitoring ingestion freshness, tracking coverage, and stale wallets for paper/live reliability.</span>
+            </div>
         </summary>
         <div hx-get="/partials/tracking" hx-trigger="load, every 30s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading tracking...</p>
