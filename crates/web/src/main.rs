@@ -454,6 +454,32 @@ mod tests {
     use common::db::Database;
     use tower::ServiceExt;
 
+    #[test]
+    fn test_funnel_info_icon_uses_css_tooltip_data_tip() {
+        let info = "a>=b and \"quoted\"".to_string();
+        let stages = vec![FunnelStage {
+            label: "Markets".to_string(),
+            count: 1,
+            drop_pct: None,
+            bg_color: "bg-gray-800".to_string(),
+            drop_color: String::new(),
+            info,
+        }];
+
+        let html = FunnelBarTemplate { stages }.to_string();
+
+        // We intentionally avoid native `title` tooltips because some environments suppress them.
+        assert!(html.contains("class=\"help-tip"));
+        assert!(html.contains("data-tip=\""));
+        // Ensure the tooltip content is present and HTML-escaped for attributes.
+        assert!(html.contains("a&gt;=b") || html.contains("a&#62;=b"));
+        assert!(
+            html.contains("&quot;quoted&quot;") || html.contains("&#34;quoted&#34;"),
+            "expected quotes to be HTML-escaped in attribute"
+        );
+        assert!(!html.contains("title=\""));
+    }
+
     fn create_test_app() -> Router {
         // For tests using partials, we need an in-memory DB with schema.
         // But axum state needs a path — we'll use a temp file.
