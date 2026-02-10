@@ -90,9 +90,17 @@ $SSH_CMD "sudo mv /tmp/web.service /etc/systemd/system/"
 $SSH_CMD "sudo systemctl daemon-reload"
 
 # 7. Install Alloy config if Grafana Cloud is configured
-if $SSH_CMD "grep -q 'GRAFANA_CLOUD' $REMOTE_DIR/.env 2>/dev/null"; then
+if $SSH_CMD "grep -q '^GRAFANA_CLOUD_' $REMOTE_DIR/.env 2>/dev/null"; then
     echo "Configuring Grafana Alloy..."
-    $SCP_CMD "$SCRIPT_DIR/alloy-config.alloy" "$SSH_USER@$SERVER_IP:/tmp/config.alloy"
+    # Tempo is optional. If the remote env has Tempo settings, install the Tempo-enabled config;
+    # otherwise install the metrics+logs-only config so Alloy doesn't fail on missing env vars.
+    if $SSH_CMD "grep -q '^GRAFANA_CLOUD_TEMPO_URL=' $REMOTE_DIR/.env 2>/dev/null && grep -q '^GRAFANA_CLOUD_TEMPO_USER=' $REMOTE_DIR/.env 2>/dev/null"; then
+        echo "  Tempo configured: installing deploy/alloy-config-tempo.alloy"
+        $SCP_CMD "$SCRIPT_DIR/alloy-config-tempo.alloy" "$SSH_USER@$SERVER_IP:/tmp/config.alloy"
+    else
+        echo "  Tempo not configured: installing deploy/alloy-config.alloy"
+        $SCP_CMD "$SCRIPT_DIR/alloy-config.alloy" "$SSH_USER@$SERVER_IP:/tmp/config.alloy"
+    fi
     $SSH_CMD "sudo mv /tmp/config.alloy /etc/alloy/config.alloy"
     # Inject Grafana Cloud env vars into Alloy's environment file (remove old ones first to avoid duplicates)
     $SSH_CMD "sudo sed -i '/^GRAFANA_CLOUD/d' /etc/default/alloy"

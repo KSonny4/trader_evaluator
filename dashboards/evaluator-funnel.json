@@ -1,0 +1,61 @@
+{
+  "dashboard": {
+    "uid": "evaluator-funnel",
+    "title": "Evaluator Funnel",
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "version": 1,
+    "refresh": "30s",
+    "tags": ["evaluator", "funnel"],
+    "templating": {
+      "list": [
+        {
+          "type": "datasource",
+          "name": "DS_PROMETHEUS",
+          "label": "Prometheus",
+          "query": "prometheus",
+          "current": {
+            "text": "Prometheus",
+            "value": "Prometheus"
+          }
+        }
+      ]
+    },
+    "panels": [
+      {
+        "type": "timeseries",
+        "title": "Persona Funnel Stage Counts",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "evaluator_persona_funnel_stage_count",
+            "legendFormat": "{{stage}}"
+          }
+        ],
+        "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 }
+      },
+      {
+        "type": "timeseries",
+        "title": "Pipeline Funnel Stage Counts",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "evaluator_pipeline_funnel_stage_count",
+            "legendFormat": "{{stage}}"
+          }
+        ],
+        "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 }
+      }
+    ]
+  },
+  "overwrite": true
+}
+

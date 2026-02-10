@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-end justify-between gap-4">
+        <div>
+            <h2 class="text-xl font-semibold text-gray-100">Journey</h2>
+            <div class="text-sm text-gray-500 font-mono">{{ journey.proxy_wallet }}</div>
+        </div>
+        <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">Persona</div>
+            <div class="text-sm text-gray-200">
+                {% match journey.persona %}
+                {% when Some with (p) %}{{ p }}
+                {% when None %}N/A
+                {% endmatch %}
+            </div>
+            <div class="text-xs text-gray-500">
+                {% match journey.confidence_display %}
+                {% when Some with (c) %}confidence: {{ c }}
+                {% when None %}{% endmatch %}
+            </div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">Paper PnL</div>
+            <div class="text-sm text-gray-200">{{ journey.paper_pnl_display }}</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">Exposure</div>
+            <div class="text-sm text-gray-200">{{ journey.exposure_display }}</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">Copy Fidelity</div>
+            <div class="text-sm text-gray-200">{{ journey.copy_fidelity_display }}</div>
+        </div>
+    </div>
+
+    <div class="bg-gray-900 rounded-lg p-4">
+        <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-200">Timeline</h3>
+            <div class="text-xs text-gray-500">Discovered: {{ journey.discovered_at }}</div>
+        </div>
+
+        {% if journey.events.is_empty() %}
+        <p class="text-gray-500 text-sm italic mt-3">No journey events yet.</p>
+        {% else %}
+        <ul class="mt-3 space-y-2">
+            {% for e in journey.events %}
+            <li class="flex items-start gap-3">
+                <div class="font-mono text-xs text-gray-500 w-40 shrink-0">{{ e.at }}</div>
+                <div>
+                    <div class="text-sm text-gray-200">{{ e.label }}</div>
+                    <div class="text-xs text-gray-500">{{ e.detail }}</div>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::polymarket::{GammaFilter, PolymarketClient};
+use common::polymarket::{classify_anyhow_api_error, GammaFilter, PolymarketClient};
 use common::types::{ApiActivity, ApiHolderResponse, ApiPosition, ApiTrade, GammaMarket};
 use std::time::Instant;
 
@@ -30,6 +30,12 @@ impl GammaMarketsPager for PolymarketClient {
             }
             Err(e) => {
                 metrics::counter!("evaluator_api_requests_total", "endpoint" => "gamma_markets", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "gamma_markets",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
                 Err(e)
             }
         }
@@ -60,6 +66,12 @@ impl HoldersFetcher for PolymarketClient {
             }
             Err(e) => {
                 metrics::counter!("evaluator_api_requests_total", "endpoint" => "holders", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "holders",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
                 Err(e)
             }
         }
@@ -90,6 +102,12 @@ impl MarketTradesFetcher for PolymarketClient {
             }
             Err(e) => {
                 metrics::counter!("evaluator_api_requests_total", "endpoint" => "market_trades", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "market_trades",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
                 Err(e)
             }
         }
@@ -120,6 +138,12 @@ impl crate::ingestion::TradesPager for PolymarketClient {
             }
             Err(e) => {
                 metrics::counter!("evaluator_api_requests_total", "endpoint" => "user_trades", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "user_trades",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
                 Err(e)
             }
         }
@@ -151,6 +175,12 @@ impl ActivityPager for PolymarketClient {
             }
             Err(e) => {
                 metrics::counter!("evaluator_api_requests_total", "endpoint" => "activity", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "activity",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
                 Err(e)
             }
         }
@@ -182,6 +212,12 @@ impl PositionsPager for PolymarketClient {
             }
             Err(e) => {
                 metrics::counter!("evaluator_api_requests_total", "endpoint" => "positions", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "positions",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
                 Err(e)
             }
         }

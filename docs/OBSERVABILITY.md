@@ -4,7 +4,7 @@ This project uses the same Grafana Cloud stack pattern as `/Users/petr.kubelka/g
 
 - **Metrics:** Prometheus exposition on localhost -> Grafana Alloy scrape -> Grafana Cloud Prometheus (remote_write)
 - **Logs:** systemd journal -> Grafana Alloy -> Grafana Cloud Loki
-- **Traces:** app OTLP (HTTP/protobuf) -> Grafana Alloy OTLP receiver -> Grafana Cloud Tempo
+- **Traces (optional):** app OTLP (HTTP/protobuf) -> Grafana Alloy OTLP receiver -> Grafana Cloud Tempo
 
 ## Data Flow
 
@@ -12,7 +12,7 @@ This project uses the same Grafana Cloud stack pattern as `/Users/petr.kubelka/g
 2. `web` exposes Prometheus metrics on `127.0.0.1:3000` (health/telemetry counters).
 3. Grafana Alloy scrapes both and remote-writes to Grafana Cloud Prometheus.
 4. Both services log JSON to stdout; systemd captures it in journald; Alloy ships journald entries to Loki.
-5. Both services export OTLP traces to `http://127.0.0.1:4318`; Alloy exports them to Tempo.
+5. If enabled, both services export OTLP traces to `http://127.0.0.1:4318`; Alloy exports them to Tempo.
 
 ## Environment Variables
 
@@ -23,35 +23,45 @@ This project uses the same Grafana Cloud stack pattern as `/Users/petr.kubelka/g
 - `GRAFANA_CLOUD_API_KEY`
 - `GRAFANA_CLOUD_LOKI_URL`
 - `GRAFANA_CLOUD_LOKI_USER`
-- `GRAFANA_CLOUD_TEMPO_URL`
-- `GRAFANA_CLOUD_TEMPO_USER`
+- `GRAFANA_CLOUD_TEMPO_URL` (optional)
+- `GRAFANA_CLOUD_TEMPO_USER` (optional)
 
-### Services: systemd unit environment
-
-Set in:
-- `/Users/petr.kubelka/git_projects/trader_evaluator/deploy/systemd/evaluator.service`
-- `/Users/petr.kubelka/git_projects/trader_evaluator/deploy/systemd/web.service`
+### Services: `/opt/evaluator/.env` (loaded by systemd via `EnvironmentFile=`)
 
 Key vars:
 - `RUST_LOG` (takes precedence over config file log_level)
-- `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`
-- `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
-- `OTEL_SERVICE_NAME=...`
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` (optional)
+- `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (optional)
+- `OTEL_SERVICE_NAME=evaluator` / `evaluator-web` (optional)
 
 ## Verification Checklist (Server)
 
-1. Alloy is listening for OTLP:
-   - `sudo ss -ltnp | rg 4318`
-2. Metrics endpoints respond locally:
+1. Metrics endpoints respond locally:
    - `curl -s http://127.0.0.1:9094/metrics | head`
    - `curl -s http://127.0.0.1:3000/metrics | head`
-3. Logs exist:
+2. Logs exist:
    - `sudo journalctl -u evaluator -n 50 --no-pager`
-   - `sudo journalctl -u evaluator-web -n 50 --no-pager`
-4. Alloy isn’t erroring:
+   - `sudo journalctl -u web -n 50 --no-pager`
+3. Alloy isn’t erroring:
    - `sudo journalctl -u alloy -n 200 --no-pager`
-5. Grafana Cloud:
+4. Grafana Cloud:
    - Prometheus queries return data: `evaluator_trades_ingested_total`, `tracing_error_events`
-   - Loki shows `unit=evaluator.service` and `unit=evaluator-web.service`
-   - Tempo shows services `evaluator` and `evaluator-web`
+   - Loki shows `unit=evaluator.service` and `unit=web.service`
 
+### Traces (Tempo) verification (only if enabled)
+
+1. Alloy is listening for OTLP:
+   - `sudo ss -ltnp | rg 4318`
+2. Grafana Cloud Tempo shows services `evaluator` and `evaluator-web`
+
+Notes:
+- `deploy/deploy.sh` installs `deploy/alloy-config-tempo.alloy` only when `GRAFANA_CLOUD_TEMPO_URL` and `GRAFANA_CLOUD_TEMPO_USER` are present in `/opt/evaluator/.env`.
+
+## Suggested Alerts
+
+Create a Grafana alert rule based on API error *kinds*:
+
+- Query (errors/min, 5m window): `sum(rate(evaluator_api_errors_total{kind!="pagination_offset_cap"}[5m])) * 60`
+- Suggested trigger: `> 1` for `10m`
+
+Rationale: we exclude `pagination_offset_cap` because it indicates a known upstream pagination limit, not an availability incident.
