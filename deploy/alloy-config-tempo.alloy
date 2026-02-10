@@ -1,13 +1,16 @@
-// Grafana Alloy configuration for trader_evaluator metrics and logs (NO Tempo).
+// Grafana Alloy configuration for trader_evaluator metrics, logs, and tracing (Tempo).
 // Scrapes Prometheus metrics from evaluator, web, and node_exporter and
-// remote-writes to Grafana Cloud.
-
+// remote-writes to Grafana Cloud. Ships journald logs to Loki and receives OTLP
+// spans locally, exporting them to Grafana Cloud Tempo.
+//
 // Environment variables (injected by deploy/deploy.sh from /opt/evaluator/.env into /etc/default/alloy):
 //   GRAFANA_CLOUD_PROM_URL    - Prometheus remote write URL
 //   GRAFANA_CLOUD_PROM_USER   - Prometheus username (instance ID)
 //   GRAFANA_CLOUD_API_KEY      - Grafana Cloud API key
 //   GRAFANA_CLOUD_LOKI_URL     - Loki push URL
 //   GRAFANA_CLOUD_LOKI_USER    - Loki username (instance ID)
+//   GRAFANA_CLOUD_TEMPO_URL    - Tempo OTLP endpoint
+//   GRAFANA_CLOUD_TEMPO_USER   - Tempo username (instance ID)
 
 prometheus.scrape "evaluator" {
   targets = [{
@@ -37,8 +40,6 @@ prometheus.scrape "node" {
 }
 
 // ── Loki log shipping ──────────────────────────────────
-// Ship systemd journal logs for evaluator services to Grafana Cloud Loki.
-
 loki.source.journal "evaluator_logs" {
   forward_to    = [loki.write.grafana_cloud.receiver]
   relabel_rules = loki.relabel.journal_labels.rules
@@ -48,7 +49,6 @@ loki.source.journal "evaluator_logs" {
 loki.source.journal "evaluator_web_logs" {
   forward_to    = [loki.write.grafana_cloud.receiver]
   relabel_rules = loki.relabel.journal_labels.rules
-  // The systemd unit on the server is `web.service` (see deploy/systemd/web.service).
   matches       = "_SYSTEMD_UNIT=web.service"
 }
 
@@ -83,3 +83,39 @@ prometheus.remote_write "grafana_cloud" {
     }
   }
 }
+
+// ── OpenTelemetry Traces (Tempo) ─────────────────────────
+//
+// App side (EnvironmentFile=/opt/evaluator/.env):
+//   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+//   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+//   OTEL_SERVICE_NAME=evaluator / evaluator-web
+
+otelcol.auth.basic "grafana_cloud_tempo" {
+  username = env("GRAFANA_CLOUD_TEMPO_USER")
+  password = env("GRAFANA_CLOUD_API_KEY")
+}
+
+otelcol.receiver.otlp "local" {
+  http {
+    endpoint = "127.0.0.1:4318"
+  }
+
+  output {
+    traces = [otelcol.processor.batch.traces.input]
+  }
+}
+
+otelcol.processor.batch "traces" {
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = env("GRAFANA_CLOUD_TEMPO_URL")
+    auth     = otelcol.auth.basic.grafana_cloud_tempo.handler
+  }
+}
+

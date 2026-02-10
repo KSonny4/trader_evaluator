@@ -1,6 +1,7 @@
 /// SQL queries for the dashboard. All read-only.
 use anyhow::Result;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 
 use crate::models::*;
 
@@ -66,6 +67,95 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
     })
 }
 
+pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
+    let wallets_discovered: i64 =
+        conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
+
+    // Stage 1 is evaluated for watchlist wallets (is_active=1). A wallet "passes" if it has no
+    // recorded Stage 1 exclusion reason (STAGE1_*).
+    let stage1_passed: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM wallets w
+        WHERE w.is_active = 1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wallet_exclusions e
+            WHERE e.proxy_wallet = w.proxy_wallet
+              AND e.reason LIKE 'STAGE1_%'
+          )
+        ",
+        [],
+        |r| r.get(0),
+    )?;
+
+    // Stage 2 produces either a followable persona (wallet_personas) or an exclusion reason
+    // (wallet_exclusions with non-stage1 reason).
+    let stage2_classified: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM wallets w
+        WHERE w.is_active = 1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wallet_exclusions e
+            WHERE e.proxy_wallet = w.proxy_wallet
+              AND e.reason LIKE 'STAGE1_%'
+          )
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM wallet_personas p
+              WHERE p.proxy_wallet = w.proxy_wallet
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM wallet_exclusions e2
+              WHERE e2.proxy_wallet = w.proxy_wallet
+                AND e2.reason NOT LIKE 'STAGE1_%'
+            )
+          )
+        ",
+        [],
+        |r| r.get(0),
+    )?;
+
+    let paper_traded_wallets: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
+        [],
+        |r| r.get(0),
+    )?;
+
+    // Follow-worthy is a best-effort approximation based on available data:
+    // Promotion rules in docs/EVALUATION_STRATEGY.md §3.3 use ROI + hit rate + drawdown, but
+    // hit rate/drawdown aren't fully computed yet. For visibility in UI/Grafana, we use ROI-only
+    // thresholds: >+5% (7d) and >+10% (30d), both for score_date=today.
+    let follow_worthy_wallets: i64 = conn.query_row(
+        "
+        SELECT COUNT(DISTINCT ws7.proxy_wallet)
+        FROM wallet_scores_daily ws7
+        JOIN wallet_scores_daily ws30
+          ON ws30.proxy_wallet = ws7.proxy_wallet
+         AND ws30.score_date = ws7.score_date
+         AND ws30.window_days = 30
+        WHERE ws7.score_date = date('now')
+          AND ws7.window_days = 7
+          AND COALESCE(ws7.paper_roi_pct, 0) > 5.0
+          AND COALESCE(ws30.paper_roi_pct, 0) > 10.0
+        ",
+        [],
+        |r| r.get(0),
+    )?;
+
+    Ok(PersonaFunnelCounts {
+        wallets_discovered,
+        stage1_passed,
+        stage2_classified,
+        paper_traded_wallets,
+        follow_worthy_wallets,
+    })
+}
+
 pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
     timed_db_op("web.system_status", || {
         let db_size_mb = std::fs::metadata(db_path).map_or_else(
@@ -99,7 +189,7 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
         } else if has_paper {
             "4: Paper Copy"
         } else if has_trades {
-            "3: Long-Term Tracking"
+            "3: Wallet Health Monitor"
         } else if has_wallets {
             "2: Wallet Discovery"
         } else if has_scores {
@@ -393,7 +483,225 @@ pub fn stale_wallets(conn: &Connection) -> Result<Vec<String>> {
     })
 }
 
-pub fn paper_summary(conn: &Connection, bankroll: f64) -> Result<PaperSummary> {
+pub fn excluded_wallets_count(conn: &Connection) -> Result<i64> {
+    timed_db_op("web.excluded_wallets_count", || {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT proxy_wallet) FROM wallet_exclusions",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    })
+}
+
+pub fn excluded_wallets_latest(
+    conn: &Connection,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ExcludedWalletRow>> {
+    timed_db_op("web.excluded_wallets_latest", || {
+        // NOTE: If multiple exclusion rows share the same `excluded_at` for a wallet, this query can
+        // return multiple rows for that wallet (tie on MAX(excluded_at)). Current semantics: show all
+        // "latest-timestamp" reasons. If we want strictly one row per wallet, add a deterministic
+        // tiebreak (e.g. MAX(id) among rows at MAX(excluded_at)) and join on that.
+        let mut stmt = conn.prepare(
+            "
+            SELECT e.proxy_wallet, e.reason, e.metric_value, e.threshold, e.excluded_at
+            FROM wallet_exclusions e
+            JOIN (
+              SELECT proxy_wallet, MAX(excluded_at) AS max_excluded_at
+              FROM wallet_exclusions
+              GROUP BY proxy_wallet
+            ) latest
+              ON latest.proxy_wallet = e.proxy_wallet
+             AND latest.max_excluded_at = e.excluded_at
+            ORDER BY e.excluded_at DESC
+            LIMIT ?1 OFFSET ?2
+            ",
+        )?;
+
+        let rows = stmt
+            .query_map([limit as i64, offset as i64], |row| {
+                let wallet: String = row.get(0)?;
+                let reason: String = row.get(1)?;
+                let metric_value: Option<f64> = row.get(2)?;
+                let threshold: Option<f64> = row.get(3)?;
+                let excluded_at: String = row.get(4)?;
+
+                let metric_value_display =
+                    metric_value.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
+                let threshold_display =
+                    threshold.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
+
+                Ok(ExcludedWalletRow {
+                    proxy_wallet: wallet.clone(),
+                    wallet_short: shorten_wallet(&wallet),
+                    reason,
+                    metric_value_display,
+                    threshold_display,
+                    excluded_at,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    })
+}
+
+pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<WalletJourney>> {
+    timed_db_op("web.wallet_journey", || {
+        let discovered_at: Option<String> = conn
+            .query_row(
+                "SELECT discovered_at FROM wallets WHERE proxy_wallet = ?1",
+                [proxy_wallet],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let Some(discovered_at) = discovered_at else {
+            return Ok(None);
+        };
+
+        let persona_row: Option<(String, f64, String)> = conn
+            .query_row(
+                "
+                SELECT persona, confidence, classified_at
+                FROM wallet_personas
+                WHERE proxy_wallet = ?1
+                ORDER BY classified_at DESC
+                LIMIT 1
+                ",
+                [proxy_wallet],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        let exclusion_row: Option<(String, Option<f64>, Option<f64>, String)> = conn
+            .query_row(
+                "
+                SELECT reason, metric_value, threshold, excluded_at
+                FROM wallet_exclusions
+                WHERE proxy_wallet = ?1
+                ORDER BY excluded_at DESC
+                LIMIT 1
+                ",
+                [proxy_wallet],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+
+        let paper_pnl: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open'",
+            [proxy_wallet],
+            |r| r.get(0),
+        )?;
+        let paper_pnl_display = {
+            let sign = if paper_pnl >= 0.0 { "+" } else { "" };
+            format!("{sign}${paper_pnl:.2}")
+        };
+
+        let exposure_usdc: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_size_usdc), 0) FROM paper_positions WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get(0),
+        )?;
+        let exposure_display = format!("${exposure_usdc:.2}");
+
+        let (copied, total): (i64, i64) = conn.query_row(
+            "
+            SELECT
+              COALESCE(SUM(CASE WHEN outcome = 'COPIED' THEN 1 ELSE 0 END), 0),
+              COUNT(*)
+            FROM copy_fidelity_events
+            WHERE proxy_wallet = ?1
+            ",
+            [proxy_wallet],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let copy_fidelity_display = if total > 0 {
+            let pct = 100.0 * copied as f64 / total as f64;
+            format!("{pct:.0}% ({copied}/{total})")
+        } else {
+            "N/A".to_string()
+        };
+
+        let avg_slip: Option<f64> = conn.query_row(
+            "SELECT AVG(slippage_cents) FROM follower_slippage WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get::<_, Option<f64>>(0),
+        )?;
+        let follower_slippage_display =
+            avg_slip.map_or_else(|| "N/A".to_string(), |v| format!("{v:.2} cents"));
+
+        let first_paper_trade_at: Option<String> = conn.query_row(
+            "SELECT MIN(created_at) FROM paper_trades WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get::<_, Option<String>>(0),
+        )?;
+
+        let mut events: Vec<JourneyEvent> = vec![JourneyEvent {
+            at: discovered_at.clone(),
+            label: "Discovered".to_string(),
+            detail: "Wallet discovered".to_string(),
+        }];
+
+        if let Some((persona, confidence, classified_at)) = &persona_row {
+            events.push(JourneyEvent {
+                at: classified_at.clone(),
+                label: "Stage 2 PASSED".to_string(),
+                detail: format!("{persona} (confidence: {confidence:.2})"),
+            });
+        }
+
+        if let Some((reason, metric_value, threshold, excluded_at)) = &exclusion_row {
+            let detail = match (metric_value, threshold) {
+                (Some(v), Some(t)) => format!("{reason} ({v:.2} vs {t:.2})"),
+                _ => reason.clone(),
+            };
+            events.push(JourneyEvent {
+                at: excluded_at.clone(),
+                label: "Excluded".to_string(),
+                detail,
+            });
+        }
+
+        if let Some(at) = first_paper_trade_at {
+            events.push(JourneyEvent {
+                at,
+                label: "Paper trading started".to_string(),
+                detail: "First paper trade created".to_string(),
+            });
+        }
+
+        events.sort_by(|a, b| a.at.cmp(&b.at));
+
+        let (persona, confidence_display) =
+            persona_row.map_or((None, None), |(p, c, _)| (Some(p), Some(format!("{c:.2}"))));
+        let exclusion_reason = exclusion_row.map(|(r, _, _, _)| r);
+
+        Ok(Some(WalletJourney {
+            proxy_wallet: proxy_wallet.to_string(),
+            wallet_short: shorten_wallet(proxy_wallet),
+            discovered_at,
+            persona,
+            confidence_display,
+            exclusion_reason,
+            paper_pnl_display,
+            exposure_display,
+            copy_fidelity_display,
+            follower_slippage_display,
+            events,
+        }))
+    })
+}
+
+pub fn paper_summary(
+    conn: &Connection,
+    bankroll: f64,
+    max_total_exposure_pct: f64,
+    max_daily_loss_pct: f64,
+    max_concurrent_positions: i64,
+) -> Result<PaperSummary> {
     timed_db_op("web.paper_summary", || {
         let total_pnl: f64 = conn.query_row(
             "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE status != 'open'",
@@ -423,6 +731,76 @@ pub fn paper_summary(conn: &Connection, bankroll: f64) -> Result<PaperSummary> {
         let sign = if total_pnl >= 0.0 { "+" } else { "" };
         let pnl_display = format!("{sign}${total_pnl:.2}");
         let bankroll_display = format!("${bankroll:.0}");
+
+        let wallets_followed: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let exposure_usdc: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_size_usdc), 0) FROM paper_positions",
+            [],
+            |r| r.get(0),
+        )?;
+        let exposure_display = format!("${exposure_usdc:.2}");
+        let exposure_pct = if bankroll > 0.0 {
+            100.0 * exposure_usdc / bankroll
+        } else {
+            0.0
+        };
+        let exposure_pct_display = format!("{exposure_pct:.1}%");
+
+        let (copied, total): (i64, i64) = conn.query_row(
+            "
+            SELECT
+              COALESCE(SUM(CASE WHEN outcome = 'COPIED' THEN 1 ELSE 0 END), 0),
+              COUNT(*)
+            FROM copy_fidelity_events
+            ",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let copy_fidelity_display = if total > 0 {
+            let pct = 100.0 * copied as f64 / total as f64;
+            format!("{pct:.0}% ({copied}/{total})")
+        } else {
+            "N/A".to_string()
+        };
+
+        let avg_slip: Option<f64> = conn.query_row(
+            "SELECT AVG(slippage_cents) FROM follower_slippage",
+            [],
+            |r| r.get::<_, Option<f64>>(0),
+        )?;
+        let follower_slippage_display =
+            avg_slip.map_or_else(|| "N/A".to_string(), |v| format!("{v:.2} cents"));
+
+        let positions_live: i64 =
+            conn.query_row("SELECT COUNT(*) FROM paper_positions", [], |r| r.get(0))?;
+        let pnl_today: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE status != 'open' AND date(created_at) = date('now')",
+            [],
+            |r| r.get(0),
+        )?;
+        let daily_loss_pct = if bankroll > 0.0 && pnl_today < 0.0 {
+            100.0 * (-pnl_today) / bankroll
+        } else {
+            0.0
+        };
+
+        let (risk_status, risk_status_color) = if exposure_pct > max_total_exposure_pct {
+            ("EXCEEDED".to_string(), "text-red-400".to_string())
+        } else if exposure_pct > 0.9 * max_total_exposure_pct {
+            ("APPROACHING".to_string(), "text-yellow-400".to_string())
+        } else if positions_live > max_concurrent_positions {
+            ("TOO MANY POSITIONS".to_string(), "text-red-400".to_string())
+        } else if daily_loss_pct > max_daily_loss_pct {
+            ("DAILY LOSS LIMIT".to_string(), "text-red-400".to_string())
+        } else {
+            ("ALL CLEAR".to_string(), "text-green-400".to_string())
+        };
+
         Ok(PaperSummary {
             total_pnl,
             pnl_display,
@@ -432,6 +810,14 @@ pub fn paper_summary(conn: &Connection, bankroll: f64) -> Result<PaperSummary> {
             bankroll,
             bankroll_display,
             pnl_color: pnl_color.to_string(),
+            wallets_followed,
+            exposure_usdc,
+            exposure_display,
+            exposure_pct_display,
+            copy_fidelity_display,
+            follower_slippage_display,
+            risk_status,
+            risk_status_color,
         })
     })
 }
@@ -635,6 +1021,99 @@ mod tests {
     }
 
     #[test]
+    fn test_persona_funnel_counts_with_data() {
+        let conn = test_db();
+
+        // 3 discovered wallets, all on watchlist (is_active=1).
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw1', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw2', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw3', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+
+        // w1 fails Stage 1.
+        conn.execute(
+            "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold)
+             VALUES ('0xw1', 'STAGE1_TOO_YOUNG', 5.0, 30.0)",
+            [],
+        )
+        .unwrap();
+
+        // w2 passes Stage 1 and is followable (persona).
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence)
+             VALUES ('0xw2', 'Informed Specialist', 0.87)",
+            [],
+        )
+        .unwrap();
+
+        // w3 passes Stage 1 but is excluded in Stage 2.
+        conn.execute(
+            "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold)
+             VALUES ('0xw3', 'NOISE_TRADER', 60.0, 50.0)",
+            [],
+        )
+        .unwrap();
+
+        // Both w2 and w3 have paper trades.
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl)
+             VALUES ('0xw2', 'mirror', '0xm1', 'BUY', 25.0, 0.60, 'settled_win', 5.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl)
+             VALUES ('0xw3', 'mirror', '0xm2', 'BUY', 25.0, 0.55, 'settled_loss', -2.0)",
+            [],
+        )
+        .unwrap();
+
+        // Follow-worthy: best-effort ROI thresholds.
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xw2', date('now'), 7, 0.80, 6.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xw2', date('now'), 30, 0.85, 11.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xw3', date('now'), 7, 0.10, 1.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xw3', date('now'), 30, 0.10, 1.0)",
+            [],
+        )
+        .unwrap();
+
+        let counts = persona_funnel_counts(&conn).unwrap();
+        assert_eq!(counts.wallets_discovered, 3);
+        assert_eq!(counts.stage1_passed, 2);
+        assert_eq!(counts.stage2_classified, 2);
+        assert_eq!(counts.paper_traded_wallets, 2);
+        assert_eq!(counts.follow_worthy_wallets, 1);
+    }
+
+    #[test]
     fn test_system_status_empty_db() {
         let conn = test_db();
         let status = system_status(&conn, ":memory:").unwrap();
@@ -740,11 +1219,19 @@ mod tests {
             [],
         )
         .unwrap();
-        let summary = paper_summary(&conn, 1000.0).unwrap();
+        conn.execute(
+            "INSERT INTO paper_positions (proxy_wallet, strategy, condition_id, side, total_size_usdc, avg_entry_price)
+             VALUES ('0x1', 'mirror', '0xm1', 'BUY', 42.0, 0.60)",
+            [],
+        )
+        .unwrap();
+        let summary = paper_summary(&conn, 1000.0, 15.0, 3.0, 20).unwrap();
         assert_eq!(summary.total_pnl, 25.0);
         assert_eq!(summary.settled_wins, 1);
         assert_eq!(summary.settled_losses, 0);
         assert_eq!(summary.pnl_color, "text-green-400");
+        assert_eq!(summary.wallets_followed, 1);
+        assert_eq!(summary.exposure_usdc, 42.0);
     }
 
     #[test]

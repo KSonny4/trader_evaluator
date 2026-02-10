@@ -1,11 +1,33 @@
 <div class="space-y-4">
     <!-- Summary cards -->
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-9 gap-3">
         <div class="bg-gray-800/50 rounded-lg p-3 text-center">
             <div class="text-lg font-bold {{ summary.pnl_color }}">
                 {{ summary.pnl_display }}
             </div>
             <div class="text-xs text-gray-500">Total PnL</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-200">
+                {{ summary.exposure_display }}
+            </div>
+            <div class="text-xs text-gray-500">Exposure ({{ summary.exposure_pct_display }})</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-blue-400">{{ summary.wallets_followed }}</div>
+            <div class="text-xs text-gray-500">Wallets</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-200">{{ summary.copy_fidelity_display }}</div>
+            <div class="text-xs text-gray-500">Copy Fidelity</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-200">{{ summary.follower_slippage_display }}</div>
+            <div class="text-xs text-gray-500">Slippage</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold {{ summary.risk_status_color }}">{{ summary.risk_status }}</div>
+            <div class="text-xs text-gray-500">Risk</div>
         </div>
         <div class="bg-gray-800/50 rounded-lg p-3 text-center">
             <div class="text-lg font-bold text-blue-400">{{ summary.open_positions }}</div>

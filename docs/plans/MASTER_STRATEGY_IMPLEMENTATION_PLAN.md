@@ -52,7 +52,7 @@
 - [x] Task 12: Persona Classification Orchestrator + Stage 2 Job
 - [x] Task 21: Wire New Jobs into Scheduler
 - [x] **Durability & recovery:** Startup recovery (run paper_tick once before scheduler); REFERENCE.md § Durability and recovery; metric `evaluator_recovery_paper_trades_total`.
-- [ ] **Paper tick gating:** Only mirror wallets that are currently followable (and stop mirroring immediately if they become excluded).
+- [x] **Paper tick gating:** Only mirror wallets that are currently followable (and stop mirroring immediately if they become excluded).
 - [ ] Task 25: Stage 1 — Known Bot Exclusion — **NEXT**
 - [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md` — **NEXT**
   - Implement Stage 2 exclusion detectors: `NEWS_SNIPER`, `LIQUIDITY_PROVIDER`, `JACKPOT_GAMBLER`, `BOT_SWARM_MICRO`.
@@ -93,6 +93,11 @@
 - [ ] Task 22: CLOB API Client + `book_snapshots` Table
 - [ ] Task 23: WebSocket Book Streaming + Recording
 - [ ] Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)
+
+### 🛠️ DevEx: Guardrails (Task 38) — PLANNED
+*Goal: prevent “silent TODO debt” by making TODOs visible and requiring issue IDs for long-lived TODOs.*
+
+- [ ] Task 38: TODO Guardrails (don’t forget TODOs) — add a lightweight repo-wide TODO “inbox” and optional CI guardrail
 
 **See also:** [Paper orderbook verification](paper-orderbook-verification.md) — design for verifying paper fills using a **mini orderbook snapshot** (10–120 s window) after detection, without real-time streaming. Complements Task 22–24 and Strategy Bible §6 fill probability.
 
@@ -2337,6 +2342,40 @@ git commit -am "feat: WScore complete — market_skill, timing_skill, behavior_q
 
 **Files:**
 - Create: `crates/evaluator/src/anomaly_detection.rs`
+
+---
+
+## Task 38: TODO Guardrails (don’t forget TODOs)
+
+We rely on TODOs during iteration, but TODO debt becomes invisible unless we promote it into a tracked queue. Add lightweight, low-friction guardrails:
+
+**Goal:**
+- Make outstanding TODO/FIXME items easy to list (a “TODO inbox”).
+- Prevent new long-lived TODOs from being added without a tracking ID (GitHub issue / Linear ticket).
+
+**Scope (suggested):**
+- Scan code + scripts (`crates/**/*.rs`, `scripts/**`, `deploy/**`) for `TODO`/`FIXME`.
+- Exclude vendor/build directories (`target/`, `.git/`, `.worktrees/`, `archive/`, etc.).
+
+**Step 1: Add a TODO inbox command**
+- Add `make todo` that prints file:line + matching line for TODO/FIXME (use `rg`).
+- Add `make todo-check` that returns non-zero if it finds “untracked TODOs”.
+
+**Step 2: Define a TODO format policy**
+- Allow short-lived TODOs during active work, but require IDs for anything meant to survive review.
+- Recommended format:
+  - `TODO(#<gh-issue>): <what> <acceptance>`
+  - `TODO(LIN-<id>): <what> <acceptance>`
+
+**Step 3: Wire guardrail into CI (moderate mode)**
+- CI fails only when TODO/FIXME exist **without** an issue ID.
+- CI does not fail on `TODO(#123)` / `TODO(LIN-123)` items.
+
+**Step 4 (optional): Local hook**
+- Add a pre-push hook (or document one under `hooks/`) to run `make todo-check`.
+
+**Verification:**
+- Add a couple of unit tests for the TODO-scan script (or fixture-based tests) so it doesn’t false-positive on docs/plans/history.
 
 **Step 1: Write the failing test**
 

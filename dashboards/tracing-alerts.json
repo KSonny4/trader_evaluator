@@ -81,6 +81,6 @@
   "time": { "from": "now-6h", "to": "now" },
   "timezone": "browser",
   "title": "Trader Evaluator Tracing Alerts",
-  "uid": null,
+  "uid": "trader-evaluator-tracing-alerts",
   "version": 1
 }

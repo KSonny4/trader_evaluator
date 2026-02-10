@@ -109,6 +109,22 @@ pub async fn mirror_trade_to_paper(
     db.call_named("paper_trading.mirror_trade_to_paper", move |conn| {
         let strategy = "mirror";
 
+        // Global gate: once a wallet is excluded, stop mirroring its trades immediately.
+        // This is checked inside the DB call to avoid races with other jobs updating exclusions.
+        let excluded: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM wallet_exclusions WHERE proxy_wallet = ?1 LIMIT 1",
+                rusqlite::params![proxy_wallet],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if excluded.is_some() {
+            return Ok(MirrorDecision {
+                inserted: false,
+                reason: Some("wallet_excluded".to_string()),
+            });
+        }
+
         // Portfolio stop: halt if realized drawdown exceeds threshold.
         let realized: f64 = conn
             .query_row(
