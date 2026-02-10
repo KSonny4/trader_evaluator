@@ -1,12 +1,25 @@
 use anyhow::Result;
 use metrics::{describe_counter, describe_gauge, describe_histogram};
+use metrics_exporter_prometheus::Matcher;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
+
+const HISTOGRAM_BUCKETS_MS: &[f64] = &[
+    1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0,
+];
 
 pub fn describe() {
     describe_counter!(
         "tracing_error_events",
         "Cumulative count of all ERROR-level tracing events."
+    );
+    describe_histogram!(
+        "evaluator_db_query_latency_ms",
+        "SQLite DB operation latency in milliseconds."
+    );
+    describe_counter!(
+        "evaluator_db_query_errors_total",
+        "SQLite DB operation errors."
     );
     describe_counter!(
         "evaluator_markets_scored_total",
@@ -59,6 +72,11 @@ pub fn install_prometheus(port: u16) -> Result<()> {
     // IMPORTANT: `install_recorder` only installs the recorder (no HTTP listener).
     // Use `install` to spawn the exporter task so /metrics is actually served.
     PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Prefix("evaluator_".to_string()),
+            HISTOGRAM_BUCKETS_MS,
+        )
+        .map_err(anyhow::Error::from)?
         .with_http_listener(addr)
         .install()
         .map_err(anyhow::Error::msg)?;

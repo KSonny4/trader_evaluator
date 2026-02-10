@@ -26,7 +26,7 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         Option<i32>,
     );
     let rows: Vec<TradeRow> = db
-        .call(|conn| {
+        .call_named("paper_tick.select_unprocessed_trades", |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT tr.id, tr.proxy_wallet, tr.condition_id, tr.side, tr.price, tr.outcome, tr.outcome_index
@@ -89,7 +89,7 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     }
 
     let pnl: Option<f64> = db
-        .call(|conn| {
+        .call_named("paper_tick.sum_settled_pnl", |conn| {
             Ok(conn.query_row(
                 "SELECT SUM(pnl) FROM paper_trades WHERE status != 'open'",
                 [],
@@ -137,7 +137,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     // Batch read: fetch all (wallet, window) PnL values in one db.call().
     let windows_c = windows_days.clone();
     let pnl_data: Vec<(String, i64, f64)> = db
-        .call(move |conn| {
+        .call_named("wallet_scoring.read_pnl_batch", move |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT proxy_wallet
@@ -196,7 +196,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
 
     // Batch write: upsert all scores in one db.call() with a transaction.
     let inserted: u64 = db
-        .call(move |conn| {
+        .call_named("wallet_scoring.upsert_scores_batch", move |conn| {
             let tx = conn.transaction()?;
             let mut ins = 0_u64;
             for r in &score_rows {
@@ -346,7 +346,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
 
         // Upsert markets in one db.call().
 
-        db.call(move |conn| {
+        db.call_named("market_scoring.upsert_markets_page", move |conn| {
             let tx = conn.transaction()?;
 
             for r in &page_db_rows {
@@ -407,7 +407,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
         .collect();
 
     let inserted: u64 = db
-        .call(move |conn| {
+        .call_named("market_scoring.upsert_ranked_scores", move |conn| {
             let tx = conn.transaction()?;
             let mut ins = 0_u64;
             for (condition_id, mscore, rank) in ranked_data {
@@ -442,7 +442,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 ) -> Result<u64> {
     let top_n_markets = cfg.market_scoring.top_n_markets as i64;
     let markets: Vec<String> = db
-        .call(move |conn| {
+        .call_named("wallet_discovery.select_top_markets", move |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT condition_id
@@ -508,7 +508,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 
         let cid = condition_id.clone();
         let page_inserted: u64 = db
-            .call(move |conn| {
+            .call_named("wallet_discovery.insert_wallets_page", move |conn| {
                 let tx = conn.transaction()?;
 
                 let mut ins = 0_u64;
@@ -534,7 +534,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 
     metrics::counter!("evaluator_wallets_discovered_total").increment(inserted);
     let watchlist: i64 = db
-        .call(|conn| {
+        .call_named("wallet_discovery.count_active_wallets", |conn| {
             Ok(conn.query_row(
                 "SELECT COUNT(*) FROM wallets WHERE is_active = 1",
                 [],
@@ -559,7 +559,7 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
     };
 
     let classified: u64 = db
-        .call(move |conn| {
+        .call_named("persona_classification.classify_batch", move |conn| {
             let wallets: Vec<(String, u32, u32, u32)> = conn
                 .prepare(
                     "

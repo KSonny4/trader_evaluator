@@ -9,7 +9,7 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
     limit: u32,
 ) -> Result<(u64, u64)> {
     let wallets: Vec<String> = db
-        .call(|conn| {
+        .call_named("run_trades_ingestion.wallets_select", |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT proxy_wallet
@@ -53,7 +53,7 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
     limit: u32,
 ) -> Result<u64> {
     let wallets: Vec<String> = db
-        .call(|conn| {
+        .call_named("run_activity_ingestion.wallets_select", |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT proxy_wallet
@@ -86,7 +86,7 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
         };
 
         let page_inserted = db
-            .call(move |conn| {
+            .call_named("run_activity_ingestion.insert_page", move |conn| {
                 let tx = conn.transaction()?;
 
                 let mut ins = 0_u64;
@@ -142,7 +142,7 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
     limit: u32,
 ) -> Result<u64> {
     let wallets: Vec<String> = db
-        .call(|conn| {
+        .call_named("run_positions_snapshot.wallets_select", |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT proxy_wallet
@@ -175,7 +175,7 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
         };
 
         let page_inserted = db
-            .call(move |conn| {
+            .call_named("run_positions_snapshot.insert_page", move |conn| {
                 let tx = conn.transaction()?;
 
                 let mut ins = 0_u64;
@@ -232,7 +232,7 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
     per_market: u32,
 ) -> Result<u64> {
     let markets: Vec<String> = db
-        .call(|conn| {
+        .call_named("run_holders_snapshot.markets_select", |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT condition_id
@@ -266,7 +266,7 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
         let cid = condition_id.clone();
 
         let page_inserted = db
-            .call(move |conn| {
+            .call_named("run_holders_snapshot.insert_page", move |conn| {
                 let tx = conn.transaction()?;
 
                 let mut ins = 0_u64;

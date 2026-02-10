@@ -28,3 +28,4 @@ tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
+tempfile = "3.24.0"

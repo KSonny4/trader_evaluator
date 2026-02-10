@@ -10,7 +10,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use models::{
     FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
     WalletOverview, WalletRow,
@@ -434,6 +434,14 @@ async fn main() -> Result<()> {
     // Prometheus endpoint for web service health. Alloy scrapes this on localhost:3000.
     let metrics_addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
     PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Prefix("evaluator_".to_string()),
+            &[
+                1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0,
+                10000.0,
+            ],
+        )
+        .map_err(anyhow::Error::from)?
         .with_http_listener(metrics_addr)
         .install()
         .map_err(anyhow::Error::msg)?;
