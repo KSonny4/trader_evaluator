@@ -471,13 +471,28 @@ mod tests {
         // We intentionally avoid native `title` tooltips because some environments suppress them.
         assert!(html.contains("class=\"help-tip"));
         assert!(html.contains("data-tip=\""));
+        // The funnel bar must not clip tooltips vertically; Tailwind's `overflow-x-auto` sets
+        // `overflow-y: hidden`, so we use a custom scroll class instead.
+        assert!(html.contains("funnel-scroll"));
         // Ensure the tooltip content is present and HTML-escaped for attributes.
         assert!(html.contains("a&gt;=b") || html.contains("a&#62;=b"));
         assert!(
             html.contains("&quot;quoted&quot;") || html.contains("&#34;quoted&#34;"),
             "expected quotes to be HTML-escaped in attribute"
         );
-        assert!(!html.contains("title=\""));
+        // Ensure the help-tip span itself has no `title=...` attribute (avoid native tooltips).
+        let help_tip_start = html
+            .find("class=\"help-tip")
+            .expect("render must include help-tip span");
+        let help_tip_tag_end = html[help_tip_start..]
+            .find('>')
+            .map(|i| help_tip_start + i)
+            .expect("help-tip tag must have a closing '>'");
+        let help_tip_tag = &html[help_tip_start..help_tip_tag_end];
+        assert!(
+            !help_tip_tag.contains("title=\""),
+            "help-tip span should not use native title tooltips"
+        );
     }
 
     fn create_test_app() -> Router {

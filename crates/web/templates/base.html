@@ -21,13 +21,19 @@
             align-items: center;
         }
 
+        /* Horizontal scroll without clipping tooltip bubbles vertically. */
+        .funnel-scroll {
+            overflow-x: auto;
+            overflow-y: visible;
+        }
+
         .help-tip::after {
             content: attr(data-tip);
             position: absolute;
             left: 50%;
             bottom: 140%;
             transform: translateX(-50%);
-            max-width: 28rem;
+            max-width: min(28rem, 90vw);
             width: max-content;
             padding: 0.5rem 0.75rem;
             border: 1px solid #374151; /* gray-700 */
