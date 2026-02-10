@@ -16,11 +16,15 @@
 
 **Development setup:** When working on plan tasks, create a worktree from main: `make worktree NAME=<feature-name>`, then `cd .worktrees/<feature-name>`. Do not commit to main. After merge, run `make worktree-clean NAME=<feature-name>`.
 
+**Architecture guidance (paper fast path + saga):** See `docs/ARCHITECTURE.md` for current vs target runtime, and `docs/plans/2026-02-10-paper-fast-path-and-saga.md` for a concrete implementation plan that keeps paper trading low-latency and saga-driven (even before live trading).
+
 ## Related Plans
 
 - Persona taxonomy enrichment (A–G copyability styles): `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
   - Extends our current persona/exclusion model with additional styles (news sniper, liquidity provider, jackpot gambler, bot swarm) and adds trait-labeling (topic lane, bonder, whale).
   - Touches/extends work from Phase 1 tasks (wallet features + exclusions) and is easiest to execute once Task 12 (classification orchestrator) is wired so the new labels show up automatically.
+- Paper fast path + saga (paper trading runtime robustness): `docs/plans/2026-02-10-paper-fast-path-and-saga.md`
+  - Turns `docs/ARCHITECTURE.md` guidance into implementable steps: fast-path triggering, coalescing, durable paper event log, and saga-like idempotency.
 
 ---
 
@@ -65,6 +69,14 @@
   - Implement `TOPIC_LANE` trait computation + storage.
   - Add per-topic ranking surfaces (at least “overall vs in-lane”), and support an optional “mirror in-lane only” follow mode for lane-specialists.
   - Timing: do Task 32 **after Task 12** (classification job wired), and ideally after Task 18 (WScore components) so lane scoring has real inputs.
+
+### 📌 Phase 2.5: Paper Runtime Robustness (Tasks 33-36) — PLANNED
+*Goal: make paper trading fast (near-real-time) and resilient (saga-like), without splitting into multiple processes yet.*
+
+- [ ] Task 33: Paper Fast Path Triggering + Tick Coalescing (react immediately to new trades)
+- [ ] Task 34: Paper Trading Saga (persisted state machine + idempotency)
+- [ ] Task 35: Paper Events Table (durable audit log of risk gates, skips, and decisions)
+- [ ] Task 36: Backpressure + Latency Metrics for Paper/Live-Critical Paths
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
