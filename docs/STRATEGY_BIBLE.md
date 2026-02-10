@@ -216,12 +216,16 @@ Every trade the followed wallet makes gets exactly one outcome:
 | `SKIPPED_WALLET_RISK` | Per-wallet exposure cap hit |
 | `SKIPPED_DAILY_LOSS` | Daily loss limit hit |
 | `SKIPPED_MARKET_CLOSED` | Market already resolved/expired |
-| `SKIPPED_DETECTION_LAG` | Detected too late, price moved beyond threshold |
-| `SKIPPED_NO_FILL` | Orderbook couldn't absorb our size (when orderbook available) |
+| `SKIPPED_DETECTION_LAG` | Detected too late: fill price moved beyond our max slippage budget (when orderbook available) |
+| `SKIPPED_NO_FILL` | Orderbook depth couldn't fully fill our size (when orderbook available) |
 
 **copy_fidelity = COPIED / (COPIED + all SKIPPED_*)**
 
 If fidelity < `min_copy_fidelity_pct` (default: 80%) for a wallet → paper PnL is unreliable → FLAG wallet.
+
+**Detection lag threshold (definition):** When orderbook data is available, we define "opportunity gone" by our **slippage budget**, not by an arbitrary mid-price move. For a BUY, if the book-walked VWAP needed to fill `per_trade_size_usd` implies slippage (VWAP - their_price) greater than our slippage budget (use `slippage_default_cents` as the current budget), we record `SKIPPED_DETECTION_LAG`. For a SELL, the analogous case is (their_price - VWAP) exceeding the budget. If the book cannot fill the full size at all (insufficient depth), record `SKIPPED_NO_FILL`.
+
+**Optional: opportunity window / exploitability.** If we sample orderbook fill-feasibility for a short bounded window after detection (e.g. up to 120s), we can record `opportunity_window_secs` = how long the trade remained fillable within our slippage budget. This can be summarized as an exploitability curve: `P(opportunity_window_secs >= L)` for latency `L` (per wallet and overall).
 
 ### Parameters (all in `[paper_trading]` section of `default.toml`)
 
