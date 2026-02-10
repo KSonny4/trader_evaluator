@@ -60,15 +60,17 @@ fn generate_csrf_token() -> String {
 
 /// Verify CSRF token from cookie against form submission
 fn verify_csrf_token(headers: &HeaderMap, form_token: &str) -> bool {
+    // Some proxies/clients can send multiple Cookie headers (especially with many cookies).
+    // Hyper/Axum preserves them as multiple header values, so we must scan them all.
+    let expected = format!("{CSRF_COOKIE_NAME}={form_token}");
     headers
-        .get(header::COOKIE)
-        .and_then(|cookie_header: &header::HeaderValue| cookie_header.to_str().ok())
-        .is_some_and(|cookie_str: &str| {
-            cookie_str.split(';').any(|cookie: &str| {
-                let cookie = cookie.trim();
-                cookie.starts_with(&format!("{CSRF_COOKIE_NAME}="))
-                    && cookie == format!("{CSRF_COOKIE_NAME}={form_token}")
-            })
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|cookie_header: &header::HeaderValue| cookie_header.to_str().ok())
+        .any(|cookie_str: &str| {
+            cookie_str
+                .split(';')
+                .any(|cookie: &str| cookie.trim() == expected)
         })
 }
 
@@ -240,11 +242,12 @@ async fn login_submit(
 
     // Verify CSRF token. On failure, issue a new token so the user can retry (e.g. after proxy cookie issues).
     if !verify_csrf_token(&headers, &form.csrf_token) {
-        let has_cookie = headers.get(header::COOKIE).is_some();
-        let has_csrf_cookie = headers
-            .get(header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|s| {
+        let cookie_headers = headers.get_all(header::COOKIE);
+        let has_cookie = cookie_headers.iter().next().is_some();
+        let has_csrf_cookie = cookie_headers
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|s| {
                 s.split(';')
                     .any(|c| c.trim().starts_with(&format!("{CSRF_COOKIE_NAME}=")))
             });
@@ -589,6 +592,41 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(set_cookie.contains(AUTH_COOKIE_NAME));
+    }
+
+    #[tokio::test]
+    async fn test_login_with_csrf_cookie_in_second_cookie_header_succeeds() {
+        let app = create_test_app_with_auth("secret");
+        let csrf_token = get_csrf_token_from_login(&app).await;
+        let body = format!("password=secret&csrf_token={csrf_token}");
+
+        // Some clients/proxies can send multiple Cookie headers. Ensure we accept our CSRF cookie
+        // even if it's not in the first Cookie header value.
+        let cookie1 = "some_other_cookie=some_value";
+        let cookie2 = format!("{CSRF_COOKIE_NAME}={csrf_token}");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Cookie", cookie1)
+                    .header("Cookie", cookie2)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(location, "/");
     }
 
     #[tokio::test]
