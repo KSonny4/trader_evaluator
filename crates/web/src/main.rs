@@ -20,21 +20,55 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
 pub struct AppState {
     pub db_path: PathBuf,
     pub auth_password: Option<String>,
     pub funnel_stage_infos: [String; 6],
+    // Used to avoid async runtime starvation when DB reads are slow.
+    pub db_semaphore: Arc<Semaphore>,
+    pub db_timeout: Duration,
+    // Test-only knob to simulate a slow disk / slow sqlite open.
+    pub db_open_delay: Duration,
 }
 
 /// Open a read-only connection to the evaluator DB.
 /// Each request gets a fresh connection — SQLite WAL handles concurrent reads fine.
 pub fn open_readonly(state: &AppState) -> Result<Connection> {
+    if !state.db_open_delay.is_zero() {
+        std::thread::sleep(state.db_open_delay);
+    }
     let conn = Connection::open_with_flags(
         &state.db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     Ok(conn)
+}
+
+/// Run a DB query without blocking tokio worker threads.
+///
+/// We limit concurrent DB work and apply a timeout to keep the dashboard responsive even under
+/// severe IO pressure.
+async fn with_db<R, F>(state: Arc<AppState>, f: F) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+{
+    let permit = state.db_semaphore.clone().acquire_owned().await?;
+    let timeout = state.db_timeout;
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let conn = open_readonly(&state)?;
+        f(&conn)
+    });
+
+    match tokio::time::timeout(timeout, handle).await {
+        Ok(joined) => joined?,
+        Err(_) => Err(anyhow::anyhow!("db query timed out after {timeout:?}")),
+    }
 }
 
 // --- Cookie-based Auth Middleware ---
@@ -341,50 +375,117 @@ async fn logout() -> impl IntoResponse {
 }
 
 async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let db_path_str = state.db_path.to_str().unwrap_or(":memory:");
-    let status = queries::system_status(&conn, db_path_str).unwrap();
-    Html(StatusStripTemplate { status }.to_string())
+    let db_path_str = state.db_path.to_string_lossy().to_string();
+    match with_db(state.clone(), move |conn| {
+        queries::system_status(conn, &db_path_str)
+    })
+    .await
+    {
+        Ok(status) => Html(StatusStripTemplate { status }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let counts = queries::funnel_counts(&conn).unwrap();
-    let stages = counts.to_stages(&state.funnel_stage_infos);
-    Html(FunnelBarTemplate { stages }.to_string())
+    let funnel_stage_infos = state.funnel_stage_infos.clone();
+    match with_db(state.clone(), move |conn| {
+        let counts = queries::funnel_counts(conn)?;
+        Ok(counts.to_stages(&funnel_stage_infos))
+    })
+    .await
+    {
+        Ok(stages) => Html(FunnelBarTemplate { stages }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let markets = queries::top_markets_today(&conn).unwrap();
-    Html(MarketsTemplate { markets }.to_string())
+    match with_db(state.clone(), queries::top_markets_today).await {
+        Ok(markets) => Html(MarketsTemplate { markets }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let overview = queries::wallet_overview(&conn).unwrap();
-    let wallets = queries::recent_wallets(&conn, 20).unwrap();
-    Html(WalletsTemplate { overview, wallets }.to_string())
+    match with_db(state.clone(), move |conn| {
+        let overview = queries::wallet_overview(conn)?;
+        let wallets = queries::recent_wallets(conn, 20)?;
+        Ok((overview, wallets))
+    })
+    .await
+    {
+        Ok((overview, wallets)) => {
+            Html(WalletsTemplate { overview, wallets }.to_string()).into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let health = queries::tracking_health(&conn).unwrap();
-    let stale = queries::stale_wallets(&conn).unwrap();
-    Html(TrackingTemplate { health, stale }.to_string())
+    match with_db(state.clone(), move |conn| {
+        let health = queries::tracking_health(conn)?;
+        let stale = queries::stale_wallets(conn)?;
+        Ok((health, stale))
+    })
+    .await
+    {
+        Ok((health, stale)) => Html(TrackingTemplate { health, stale }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let summary = queries::paper_summary(&conn, 1000.0).unwrap();
-    let trades = queries::recent_paper_trades(&conn, 20).unwrap();
-    Html(PaperTemplate { summary, trades }.to_string())
+    match with_db(state.clone(), move |conn| {
+        let summary = queries::paper_summary(conn, 1000.0)?;
+        let trades = queries::recent_paper_trades(conn, 20)?;
+        Ok((summary, trades))
+    })
+    .await
+    {
+        Ok((summary, trades)) => {
+            Html(PaperTemplate { summary, trades }.to_string()).into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let rankings = queries::top_rankings(&conn, 30, 20).unwrap();
-    Html(RankingsTemplate { rankings }.to_string())
+    match with_db(state.clone(), move |conn| {
+        queries::top_rankings(conn, 30, 20)
+    })
+    .await
+    {
+        Ok(rankings) => Html(RankingsTemplate { rankings }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 // --- Router ---
@@ -436,6 +537,9 @@ async fn main() -> Result<()> {
         db_path,
         auth_password,
         funnel_stage_infos,
+        db_semaphore: Arc::new(Semaphore::new(8)),
+        db_timeout: Duration::from_secs(5),
+        db_open_delay: Duration::ZERO,
     });
 
     let app = create_router_with_state(state);
@@ -452,6 +556,11 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use common::db::Database;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
     use tower::ServiceExt;
 
     fn create_test_app() -> Router {
@@ -473,6 +582,9 @@ mod tests {
             db_path: path,
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
         });
         create_router_with_state(state)
     }
@@ -492,6 +604,31 @@ mod tests {
             db_path: path,
             auth_password: Some(password.to_string()),
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
+        });
+        create_router_with_state(state)
+    }
+
+    fn create_test_app_with_auth_and_db_delay(password: &str, db_open_delay: Duration) -> Router {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let db = Database::open(path.to_str().unwrap()).unwrap();
+        db.run_migrations().unwrap();
+        drop(db);
+        std::mem::forget(tmp);
+
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: Some(password.to_string()),
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay,
         });
         create_router_with_state(state)
     }
@@ -528,6 +665,105 @@ mod tests {
     }
 
     // --- Auth tests (updated for cookie-based auth) ---
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_login_not_blocked_by_slow_db_queries() {
+        fn http_get(
+            addr: SocketAddr,
+            path: &str,
+            extra_headers: &[(&str, &str)],
+            timeout: Duration,
+        ) -> std::io::Result<String> {
+            let mut stream = TcpStream::connect(addr)?;
+            stream.set_read_timeout(Some(timeout))?;
+            stream.set_write_timeout(Some(timeout))?;
+
+            let mut req =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
+            for (k, v) in extra_headers {
+                req.push_str(&format!("{k}: {v}\r\n"));
+            }
+            req.push_str("\r\n");
+
+            stream.write_all(req.as_bytes())?;
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf)?;
+            Ok(String::from_utf8_lossy(&buf).to_string())
+        }
+
+        // Run a real server on a dedicated runtime thread, so the requests behave like production:
+        // handlers are polled by the server runtime, not inline in the test future.
+        let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<tokio::sync::oneshot::Sender<()>>();
+
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async move {
+                let app =
+                    create_test_app_with_auth_and_db_delay("secret", Duration::from_millis(400));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
+                addr_tx.send(addr).unwrap();
+                shutdown_tx.send(sd_tx).unwrap();
+
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = sd_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+        });
+
+        let addr = addr_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sd = shutdown_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // Start two DB-backed requests that will occupy tokio worker threads if DB opens happen on them.
+        let cookie = auth_cookie("secret");
+        let addr1 = addr;
+        let addr2 = addr;
+        let cookie1 = cookie.clone();
+        let cookie2 = cookie.clone();
+
+        let h1 = thread::spawn(move || {
+            let _ = http_get(
+                addr1,
+                "/partials/status",
+                &[("Cookie", cookie1.as_str())],
+                Duration::from_secs(2),
+            );
+        });
+        let h2 = thread::spawn(move || {
+            let _ = http_get(
+                addr2,
+                "/partials/status",
+                &[("Cookie", cookie2.as_str())],
+                Duration::from_secs(2),
+            );
+        });
+
+        // Give the server a moment to accept and start processing the partial requests.
+        thread::sleep(Duration::from_millis(25));
+
+        // /login should stay responsive. In the broken implementation this times out (no worker threads left).
+        let login_resp = http_get(addr, "/login", &[], Duration::from_millis(120));
+        assert!(
+            login_resp.is_ok(),
+            "/login timed out while DB partials were in flight"
+        );
+
+        // Cleanup
+        let _ = sd.send(());
+        let _ = h1.join();
+        let _ = h2.join();
+    }
 
     #[tokio::test]
     async fn test_auth_redirects_to_login_without_cookie() {
@@ -1273,6 +1509,9 @@ mod tests {
             db_path: db_path.into(),
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
         });
         let app = create_router_with_state(state);
 
