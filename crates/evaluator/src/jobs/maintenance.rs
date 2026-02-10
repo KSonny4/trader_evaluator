@@ -1,6 +1,19 @@
 use anyhow::Result;
 use common::db::AsyncDb;
 
+use crate::flow_metrics;
+
+/// Compute flow counts from DB and record to Prometheus gauges (for Grafana flow panels).
+pub async fn run_flow_metrics_once(db: &AsyncDb) -> Result<()> {
+    let counts = db
+        .call_named("flow_metrics.compute", |conn| {
+            flow_metrics::compute_flow_counts(conn)
+        })
+        .await?;
+    flow_metrics::record_flow_counts(&counts);
+    Ok(())
+}
+
 /// Run a WAL checkpoint to fold the WAL file back into the main database.
 ///
 /// Without periodic checkpointing, the WAL file grows unbounded (we observed

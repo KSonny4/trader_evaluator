@@ -1,0 +1,201 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Funnel: Markets",
+      "description": "Total markets in DB (from Gamma).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_funnel_markets_fetched",
+          "legendFormat": "markets",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "→ Scored today",
+      "description": "Markets scored today (MScore).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_funnel_markets_scored_today",
+          "legendFormat": "scored",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "→ Wallets discovered",
+      "description": "Total wallets discovered (holders + traders).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_funnel_wallets_discovered",
+          "legendFormat": "wallets",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "→ Tracked (active)",
+      "description": "Active wallets on watchlist.",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_funnel_wallets_tracked",
+          "legendFormat": "tracked",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "→ Paper trades",
+      "description": "Total paper trade rows.",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_funnel_paper_trades_total",
+          "legendFormat": "trades",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "→ Ranked today",
+      "description": "Wallets with WScore today.",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_funnel_wallets_ranked_today",
+          "legendFormat": "ranked",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Classification: Tracked",
+      "description": "Active wallets (input to Stage 1).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_classification_wallets_tracked",
+          "legendFormat": "tracked",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Stage 1 excluded",
+      "description": "Excluded by fast filters (e.g. STAGE1_*).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 6 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_classification_stage1_excluded",
+          "legendFormat": "excluded",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Stage 1 passed",
+      "description": "Passed Stage 1 (eligible for Stage 2).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 6 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_classification_stage1_passed",
+          "legendFormat": "passed",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Stage 2 followable",
+      "description": "Classified as followable persona.",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_classification_stage2_followable",
+          "legendFormat": "followable",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Stage 2 excluded",
+      "description": "Excluded at Stage 2 (e.g. STAGE2_*).",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 16, "y": 6 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_classification_stage2_excluded",
+          "legendFormat": "excluded",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Stage 2 unclassified",
+      "description": "Passed Stage 1, not yet classified.",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 6 },
+      "targets": [
+        {
+          "expr": "evaluator_flow_classification_stage2_unclassified",
+          "legendFormat": "unclassified",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["trader-evaluator", "flow"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Trader Evaluator Flow",
+  "uid": "evaluator-flow",
+  "version": 1
+}
