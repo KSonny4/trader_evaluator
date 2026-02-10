@@ -71,7 +71,7 @@
   - Add per-topic ranking surfaces (at least “overall vs in-lane”), and support an optional “mirror in-lane only” follow mode for lane-specialists.
   - Timing: do Task 32 **after Task 12** (classification job wired), and ideally after Task 18 (WScore components) so lane scoring has real inputs.
 
-### 📌 Phase 2.5: Paper Runtime Robustness (Tasks 33-36) — PLANNED
+### 📌 Phase 2.5: Paper Runtime Robustness (Tasks 33-37) — PLANNED
 *Goal: make paper trading fast (near-real-time) and resilient (saga-like), without splitting into multiple processes yet.*
 
 - [ ] Task 33: Paper Fast Path Triggering + Tick Coalescing (react immediately to new trades)
@@ -2918,7 +2918,7 @@ git commit -am "feat(web): wallet scorecard screen — per-wallet detail page wi
 
 ---
 
-## Task 30: Proportional sizing in mirror copy (Strategy Bible §6)
+## Task 37: Proportional sizing in mirror copy (Strategy Bible §6)
 
 Strategy Bible §6 requires mirror to copy **direction, timing, and sizing**: our_size = their_size × (our_bankroll / estimated_their_bankroll), then clamp to our risk limits. Flat sizing cannot replicate their edge when they vary stake (e.g. small when uncertain, large when confident). Paper and live must use the same formula so paper is representative.
 
