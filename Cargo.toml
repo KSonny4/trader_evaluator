@@ -22,9 +22,13 @@ anyhow = "1"
 thiserror = "2"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client", "reqwest-rustls"] }
+tracing-opentelemetry = "0.28"
 axum = "0.8"
 askama = "0.15"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
 tower = { version = "0.5", features = ["util"] }
 base64 = "0.22"
 

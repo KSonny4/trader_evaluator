@@ -18,10 +18,9 @@ mod wallet_scoring;
 async fn main() -> Result<()> {
     let config = common::config::Config::load()?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(&config.general.log_level)
-        .json()
-        .init();
+    let (dispatch, _otel_guard) =
+        common::observability::build_dispatch("evaluator", &config.general.log_level);
+    tracing::dispatcher::set_global_default(dispatch).map_err(anyhow::Error::msg)?;
 
     tracing::info!("trader_evaluator starting");
 
@@ -160,6 +159,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while market_scoring_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "market_scoring");
+                let _g = span.enter();
                 match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
                     Ok(n) => tracing::info!(inserted = n, "market_scoring done"),
                     Err(e) => tracing::error!(error = %e, "market_scoring failed"),
@@ -174,6 +175,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while wallet_discovery_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "wallet_discovery");
+                let _g = span.enter();
                 match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
                     .await
                 {
@@ -189,6 +192,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while trades_ingestion_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "trades_ingestion");
+                let _g = span.enter();
                 match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
                     Ok((_pages, inserted)) => {
                         tracing::info!(inserted, "trades_ingestion done");
@@ -204,6 +209,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while activity_ingestion_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "activity_ingestion");
+                let _g = span.enter();
                 match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
                     Ok(inserted) => tracing::info!(inserted, "activity_ingestion done"),
                     Err(e) => tracing::error!(error = %e, "activity_ingestion failed"),
@@ -217,6 +224,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while positions_snapshot_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "positions_snapshot");
+                let _g = span.enter();
                 match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
                     Ok(inserted) => tracing::info!(inserted, "positions_snapshot done"),
                     Err(e) => tracing::error!(error = %e, "positions_snapshot failed"),
@@ -231,6 +240,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while holders_snapshot_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "holders_snapshot");
+                let _g = span.enter();
                 match jobs::run_holders_snapshot_once(
                     &db,
                     api.as_ref(),
@@ -250,6 +261,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while paper_tick_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "paper_tick");
+                let _g = span.enter();
                 match jobs::run_paper_tick_once(&db, cfg.as_ref()).await {
                     Ok(inserted) => tracing::info!(inserted, "paper_tick done"),
                     Err(e) => tracing::error!(error = %e, "paper_tick failed"),
@@ -263,6 +276,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while wallet_scoring_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "wallet_scoring");
+                let _g = span.enter();
                 match jobs::run_wallet_scoring_once(&db, cfg.as_ref()).await {
                     Ok(inserted) => tracing::info!(inserted, "wallet_scoring done"),
                     Err(e) => tracing::error!(error = %e, "wallet_scoring failed"),
@@ -276,6 +291,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while persona_classification_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "persona_classification");
+                let _g = span.enter();
                 match jobs::run_persona_classification_once(&db, cfg.as_ref()).await {
                     Ok(classified) => {
                         tracing::info!(classified, "persona_classification done");
@@ -290,6 +307,8 @@ async fn main() -> Result<()> {
         let db = db.clone();
         async move {
             while wal_checkpoint_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "wal_checkpoint");
+                let _g = span.enter();
                 match jobs::run_wal_checkpoint_once(&db).await {
                     Ok((log, checkpointed)) => {
                         tracing::info!(log, checkpointed, "wal_checkpoint done");

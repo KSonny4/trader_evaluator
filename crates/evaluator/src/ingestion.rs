@@ -25,7 +25,7 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
     // pagination early once we reach trades we already have.
     let user_owned = user.to_string();
     let max_known_ts: Option<i64> = db
-        .call(move |conn| {
+        .call_named("ingest_trades.max_known_ts", move |conn| {
             let ts = conn
                 .query_row(
                     "SELECT MAX(timestamp) FROM trades_raw WHERE proxy_wallet = ?1",
@@ -92,7 +92,7 @@ pub async fn ingest_trades_for_wallet<P: TradesPager + Sync>(
         // Batch all DB work for this page into a single db.call() closure
         // wrapped in a transaction for atomicity.
         let page_inserted = db
-            .call(move |conn| {
+            .call_named("ingest_trades.insert_page", move |conn| {
                 let tx = conn.transaction()?;
 
                 let mut page_ins = 0_u64;

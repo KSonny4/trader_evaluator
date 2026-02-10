@@ -71,7 +71,7 @@ pub fn is_crypto_15m_market(title: &str, slug: &str) -> bool {
     is_crypto && is_15m
 }
 
-/// All DB reads + writes for a single mirror decision run inside one `db.call()`
+/// All DB reads + writes for a single mirror decision run inside one DB call
 /// closure, keeping them atomic on the SQLite background thread.
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
@@ -106,7 +106,7 @@ pub async fn mirror_trade_to_paper(
     let condition_id = condition_id.to_string();
     let outcome = outcome.map(std::string::ToString::to_string);
 
-    db.call(move |conn| {
+    db.call_named("paper_trading.mirror_trade_to_paper", move |conn| {
         let strategy = "mirror";
 
         // Portfolio stop: halt if realized drawdown exceeds threshold.

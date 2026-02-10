@@ -1,0 +1,60 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Errors / min (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(tracing_error_events[5m]) * 60",
+          "legendFormat": "errors/min",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Errors (last 1h)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "increase(tracing_error_events[1h])",
+          "legendFormat": "errors",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Top Error Targets (1h)",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "topk(10, sum(increase(tracing_error_events[1h])) by (__name__))",
+          "legendFormat": "{{__name__}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["trader-evaluator"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "Trader Evaluator Tracing Alerts",
+  "uid": null,
+  "version": 1
+}
+
