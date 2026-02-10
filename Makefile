@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean check-file-length
+.PHONY: todo todo-check todo-test
 
 # === Local enforcement ===
 setup-hooks:
@@ -12,6 +13,16 @@ setup-hooks:
 
 skills-sync:
 	./scripts/check_skills_sync.sh
+
+# === TODO guardrails ===
+todo:
+	python3 ./scripts/todo_guard.py list
+
+todo-check:
+	python3 ./scripts/todo_guard.py check
+
+todo-test:
+	python3 -m unittest -q scripts.tests.test_todo_guard
 
 # === Coverage ===
 coverage:
