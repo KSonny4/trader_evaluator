@@ -227,7 +227,7 @@ pub fn record_exclusion(
 ) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%d %H:%M:%f', 'now'))",
         rusqlite::params![
             proxy_wallet,
             reason.reason_str(),
@@ -542,7 +542,7 @@ pub fn record_persona(
 ) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
-         VALUES (?1, ?2, ?3, datetime('now'))",
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%f', 'now'))",
         rusqlite::params![proxy_wallet, persona.as_str(), confidence],
     )?;
     Ok(())

@@ -52,7 +52,7 @@
 - [x] Task 12: Persona Classification Orchestrator + Stage 2 Job
 - [x] Task 21: Wire New Jobs into Scheduler
 - [x] **Durability & recovery:** Startup recovery (run paper_tick once before scheduler); REFERENCE.md § Durability and recovery; metric `evaluator_recovery_paper_trades_total`.
-- [ ] **Paper tick gating:** Only mirror wallets that are currently followable (and stop mirroring immediately if they become excluded).
+- [x] **Paper tick gating:** Only mirror wallets that are currently followable (and stop mirroring immediately if they become excluded).
 - [ ] Task 25: Stage 1 — Known Bot Exclusion — **NEXT**
 - [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md` — **NEXT**
   - Implement Stage 2 exclusion detectors: `NEWS_SNIPER`, `LIQUIDITY_PROVIDER`, `JACKPOT_GAMBLER`, `BOT_SWARM_MICRO`.
