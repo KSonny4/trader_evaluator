@@ -12,6 +12,11 @@ ExecStart=/opt/evaluator/web
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+Environment=OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+Environment=OTEL_SERVICE_NAME=evaluator-web
+Environment=OTEL_TRACES_SAMPLER=parentbased_traceidratio
+Environment=OTEL_TRACES_SAMPLER_ARG=0.1
 
 # Hardening
 ProtectSystem=strict

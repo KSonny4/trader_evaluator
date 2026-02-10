@@ -10,6 +10,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use models::{
     FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
     WalletOverview, WalletRow,
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower_http::trace::TraceLayer;
 
 pub struct AppState {
     pub db_path: PathBuf,
@@ -414,15 +416,27 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
-    public_routes.merge(protected_routes).with_state(state)
+    public_routes
+        .merge(protected_routes)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     // Load config — use [web] section if present, otherwise defaults
     let config = common::config::Config::load()?;
+
+    let (dispatch, _otel_guard) =
+        common::observability::build_dispatch("evaluator-web", &config.general.log_level);
+    tracing::dispatcher::set_global_default(dispatch).map_err(anyhow::Error::msg)?;
+
+    // Prometheus endpoint for web service health. Alloy scrapes this on localhost:3000.
+    let metrics_addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
+    PrometheusBuilder::new()
+        .with_http_listener(metrics_addr)
+        .install()
+        .map_err(anyhow::Error::msg)?;
     let db_path = PathBuf::from(&config.database.path);
     let web_port = config.web.as_ref().map_or(8080, |w| w.port);
     let web_host = config

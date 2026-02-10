@@ -5,6 +5,10 @@ use std::net::SocketAddr;
 
 pub fn describe() {
     describe_counter!(
+        "tracing_error_events",
+        "Cumulative count of all ERROR-level tracing events."
+    );
+    describe_counter!(
         "evaluator_markets_scored_total",
         "Number of markets scored by MScore."
     );
@@ -78,10 +82,12 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             let c = metrics::counter!("evaluator_markets_scored_total");
             c.increment(1);
+            metrics::counter!("tracing_error_events").increment(1);
         });
 
         let rendered = handle.render();
         assert!(rendered.contains("evaluator_markets_scored_total"));
+        assert!(rendered.contains("tracing_error_events"));
     }
 
     fn free_local_port() -> u16 {
