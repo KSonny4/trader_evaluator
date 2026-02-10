@@ -1481,13 +1481,13 @@ mod tests {
                 Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
             })
             .await
-        .unwrap();
+            .unwrap();
         assert_eq!(cnt, 1);
     }
 
     #[tokio::test]
-    async fn test_run_paper_tick_only_mirrors_followable_wallets_and_backfills_when_becoming_followable()
-    {
+    async fn test_run_paper_tick_only_mirrors_followable_wallets_and_backfills_when_becoming_followable(
+    ) {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
