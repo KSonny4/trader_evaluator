@@ -534,8 +534,9 @@ mod tests {
 
     #[test]
     fn test_classify_http_429_as_rate_limited() {
-        let url = Url::parse("https://data-api.polymarket.com/trades?user=0xabc&limit=200&offset=0")
-            .unwrap();
+        let url =
+            Url::parse("https://data-api.polymarket.com/trades?user=0xabc&limit=200&offset=0")
+                .unwrap();
         let err = anyhow::Error::new(HttpStatusError {
             status: StatusCode::TOO_MANY_REQUESTS,
             url,
@@ -545,10 +546,9 @@ mod tests {
 
     #[test]
     fn test_classify_http_400_deep_offset_as_pagination_offset_cap() {
-        let url = Url::parse(
-            "https://data-api.polymarket.com/trades?user=0xabc&limit=200&offset=3200",
-        )
-        .unwrap();
+        let url =
+            Url::parse("https://data-api.polymarket.com/trades?user=0xabc&limit=200&offset=3200")
+                .unwrap();
         let err = anyhow::Error::new(HttpStatusError {
             status: StatusCode::BAD_REQUEST,
             url,
