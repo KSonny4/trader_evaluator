@@ -174,6 +174,20 @@ If a paper-traded wallet suddenly exhibits any of these, trigger **immediate re-
 
 Paper trading is a **proof system**, not a game. Every paper trade must answer: "Would this have made money in reality?" If we can't prove it, the paper trade is worthless.
 
+### Mirror strategy: copy direction, timing, and sizing (proportional)
+
+We copy **direction** (buy/sell), **timing** (when they trade), and **sizing** (relative to bankroll). Their edge often includes *when to go big vs small* — e.g. small when uncertain, large when confident. If we use a **flat** size for every trade, paper PnL and live results will not match their profile: we underweight their big winners and overweight their small losers. So:
+
+- **Proportional sizing (required for success):** For each trade, we use their trade size (from API) and scale to our bankroll:  
+  **our_size = their_size × (our_bankroll / estimated_their_bankroll)**  
+  then clamp to our risk limits (max % per trade, per wallet, per market). Same formula in **paper** (with paper bankroll) and **live** (with real bankroll) so that paper results are representative of live.
+
+- **Estimating their bankroll:** We do not see their account. Options: (a) rolling sum of their open exposure or recent position sizes as proxy; (b) assume a nominal "effective bankroll" per wallet from their typical position size (e.g. if they often risk ~2%, use their_size / 0.02); (c) configurable per-wallet or global default. Estimate must be conservative so we don't over-size when they're actually small.
+
+- **Caps:** Our size is always capped by: single-trade max (% of our bankroll, e.g. 50%), per-wallet exposure %, portfolio exposure %, and daily loss limits. So we never exceed our risk framework.
+
+- **When can flat sizing ever work?** Only in narrow cases: (1) pure direction/timing test with no intention to replicate their returns (e.g. "did we get the sign right?"); (2) all copied traders happen to use nearly the same fixed size and we match that size; (3) we have no size data (e.g. backtest). For **paper that predicts live** and **live copy that replicates their edge**, we must use proportional sizing. Flat is acceptable only as a **fallback** when we cannot estimate their bankroll (then use `per_trade_size_usd` and document that paper/live will not match their sizing profile).
+
 ### Realism Requirements
 
 | Aspect | What We Do | Why |
@@ -188,21 +202,22 @@ Paper trading is a **proof system**, not a game. Every paper trade must answer: 
 ### Paper Trade Lifecycle
 
 ```
-1. Detect wallet's new trade in trades_raw
-2. Record: their_price, our_detection_time, market_state_at_detection
-3. Calculate: our_entry_price = their_price + estimated_slippage
-4. Apply fee to our_entry_price
-5. Check portfolio-level risk only (high fidelity — minimize per-trade gates):
-   a. Per-wallet exposure < per_wallet_max_exposure_pct of bankroll
-   b. Portfolio total exposure < max_total_exposure_pct of bankroll
+1. Detect wallet's new trade in trades_raw (we have their price and size_usd).
+2. Record: their_price, their_size_usd, our_detection_time, market_state_at_detection
+3. Compute our_size_usd = proportional size: their_size_usd * (our_bankroll / estimated_their_bankroll), then clamp to our max % per trade and risk caps; if we cannot estimate their bankroll, fall back to per_trade_size_usd.
+4. Calculate: our_entry_price = their_price + estimated_slippage
+5. Apply fee to our_entry_price
+6. Check portfolio-level risk only (high fidelity — minimize per-trade gates):
+   a. Per-wallet exposure + our_size_usd < per_wallet_max_exposure_pct of bankroll
+   b. Portfolio total exposure + our_size_usd < max_total_exposure_pct of bankroll
    c. Daily loss limit not exceeded
    → If any limit hit: SKIP, log which limit and values
-6. Create paper_trade (status: "open")
-7. When market resolves:
-   - Win: PnL = (1.0 - our_entry_price) * size
-   - Loss: PnL = (0.0 - our_entry_price) * size
+7. Create paper_trade (status: "open") with size_usdc = our_size_usd
+8. When market resolves:
+   - Win: PnL = (1.0 - our_entry_price) * our_size_usd
+   - Loss: PnL = (0.0 - our_entry_price) * our_size_usd
    - Fees already baked into entry price
-8. Update portfolio PnL + per-wallet PnL
+9. Update portfolio PnL + per-wallet PnL
 ```
 
 ### Copy Fidelity Tracking
@@ -232,7 +247,13 @@ If fidelity < `min_copy_fidelity_pct` (default: 80%) for a wallet → paper PnL 
 ```toml
 [paper_trading]
 bankroll_usd = 1000
-per_trade_size_usd = 25
+# Proportional sizing: our_size = their_size * (our_bankroll / estimated_their_bankroll), then clamp.
+# When we cannot estimate their bankroll, use per_trade_size_usd (flat fallback).
+per_trade_size_usd = 25              # fallback when proportional not available
+mirror_use_proportional_sizing = true # if false, use flat per_trade_size_usd (not recommended)
+# Optional: default assumed "effective bankroll" per wallet when we have no estimate (e.g. 5000).
+# Their size is then interpreted as a fraction of that; we scale to our bankroll.
+mirror_default_their_bankroll_usd = 5000
 max_total_exposure_pct = 15.0
 max_daily_loss_pct = 3.0
 max_concurrent_positions = 20
