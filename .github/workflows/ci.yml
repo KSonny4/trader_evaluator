@@ -25,6 +25,11 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: TODO guardrails
+        run: |
+          python3 -m unittest -q scripts.tests.test_todo_guard
+          python3 scripts/todo_guard.py check
+
       - name: Build
         run: cargo build --all
 
