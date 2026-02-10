@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Install cloudflared and create a tunnel for the evaluator dashboard.
-# Run this on the target server (ubuntu@3.8.206.244).
+# Run this on the target server.
 #
 # Prerequisites:
 #   - Must be run interactively (cloudflared login opens a browser URL)
