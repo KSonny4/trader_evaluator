@@ -16,6 +16,8 @@
 
 **Development setup:** When working on plan tasks, create a worktree from main: `make worktree NAME=<feature-name>`, then `cd .worktrees/<feature-name>`. Do not commit to main. After merge, run `make worktree-clean NAME=<feature-name>`.
 
+**Architecture guidance (paper fast path + saga):** See `docs/ARCHITECTURE.md` for current vs target runtime, and `docs/plans/2026-02-10-paper-fast-path-and-saga.md` for a concrete implementation plan that keeps paper trading low-latency and saga-driven (even before live trading).
+
 ---
 
 ## Progress
@@ -53,6 +55,14 @@
 - [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
 - [ ] Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
 - [ ] Task 29: Wallet scorecard screen (per-wallet detail page)
+
+### 📌 Phase 2.5: Paper Runtime Robustness (Tasks 30-33) — PLANNED
+*Goal: make paper trading fast (near-real-time) and resilient (saga-like), without splitting into multiple processes yet.*
+
+- [ ] Task 30: Paper Fast Path Triggering + Tick Coalescing (react immediately to new trades)
+- [ ] Task 31: Paper Trading Saga (persisted state machine + idempotency)
+- [ ] Task 32: Paper Events Table (durable audit log of risk gates, skips, and decisions)
+- [ ] Task 33: Backpressure + Latency Metrics for Paper/Live-Critical Paths
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
