@@ -10,6 +10,18 @@
 
 ---
 
+## How This Connects To The Master Plan
+
+This plan is an add-on to `docs/plans/MASTER_STRATEGY_IMPLEMENTATION_PLAN.md`:
+
+- Extends Phase 1 (already “complete” in master plan) with additional persona/exclusion styles derived from your A–G list.
+- Benefits from Phase 2 Task 12 (Persona Classification Orchestrator) being wired, so the new labels/traits get computed continuously without manual runs.
+
+Concrete touchpoints:
+- Master Task 2 (Schema): we add `wallet_persona_traits` (new table).
+- Master Task 3 (Wallet Feature Computation): we add burstiness/two-sidedness/extreme price ratio/category concentration features.
+- Master Stage 2 exclusions: we add new exclusion reasons that are “execution-speed/infrastructure dependent” (A/B/G) and “PnL spike” risky (F).
+
 ## Persona Model (Target)
 
 We will treat your A–G as either:
@@ -369,4 +381,3 @@ git status
 1. **News Sniper**: do we want to exclude all ultra-bursty wallets, or only those whose paper-trading PnL collapses when `mirror_delay_secs` is increased?
 2. **Liquidity Provider**: until we have maker/taker + orderbook snapshots, our detection is a heuristic. OK to keep it “soft exclusion” (flag) for now?
 3. **Topic lane taxonomy**: do we use `markets.category` as-is, or normalize into a smaller set (sports/politics/crypto/weather/other)?
-

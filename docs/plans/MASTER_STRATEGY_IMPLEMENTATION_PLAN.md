@@ -16,6 +16,12 @@
 
 **Development setup:** When working on plan tasks, create a worktree from main: `make worktree NAME=<feature-name>`, then `cd .worktrees/<feature-name>`. Do not commit to main. After merge, run `make worktree-clean NAME=<feature-name>`.
 
+## Related Plans
+
+- Persona taxonomy enrichment (A–G copyability styles): `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
+  - Extends our current persona/exclusion model with additional styles (news sniper, liquidity provider, jackpot gambler, bot swarm) and adds trait-labeling (topic lane, bonder, whale).
+  - Touches/extends work from Phase 1 tasks (wallet features + exclusions) and is easiest to execute once Task 12 (classification orchestrator) is wired so the new labels show up automatically.
+
 ---
 
 ## Progress
