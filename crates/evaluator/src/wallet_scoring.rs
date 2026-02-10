@@ -68,7 +68,7 @@ pub fn market_skill_score(profitable_markets: u32, total_markets: u32) -> f64 {
     if total_markets == 0 {
         return 0.0;
     }
-    clamp01(profitable_markets as f64 / total_markets as f64)
+    clamp01(f64::from(profitable_markets) / f64::from(total_markets))
 }
 
 /// Timing skill: did price move in our favor after entry?
