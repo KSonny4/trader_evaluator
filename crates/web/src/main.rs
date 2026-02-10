@@ -24,6 +24,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub db_path: PathBuf,
     pub auth_password: Option<String>,
+    pub funnel_stage_infos: [String; 6],
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -418,10 +419,12 @@ async fn main() -> Result<()> {
         .as_ref()
         .map_or("0.0.0.0".to_string(), |w| w.host.clone());
     let auth_password = config.web.as_ref().and_then(|w| w.auth_password.clone());
+    let funnel_stage_infos = common::funnel::funnel_stage_infos(&config);
 
     let state = Arc::new(AppState {
         db_path,
         auth_password,
+        funnel_stage_infos,
     });
 
     let app = create_router_with_state(state);
@@ -455,6 +458,12 @@ mod tests {
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: None,
+            funnel_stage_infos: common::funnel::funnel_stage_infos(
+                &common::config::Config::from_toml_str(include_str!(
+                    "../../../config/default.toml"
+                ))
+                .unwrap(),
+            ),
         });
         create_router_with_state(state)
     }
@@ -470,6 +479,12 @@ mod tests {
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: Some(password.to_string()),
+            funnel_stage_infos: common::funnel::funnel_stage_infos(
+                &common::config::Config::from_toml_str(include_str!(
+                    "../../../config/default.toml"
+                ))
+                .unwrap(),
+            ),
         });
         create_router_with_state(state)
     }
@@ -1084,6 +1099,12 @@ mod tests {
         let state = Arc::new(AppState {
             db_path: db_path.into(),
             auth_password: None,
+            funnel_stage_infos: common::funnel::funnel_stage_infos(
+                &common::config::Config::from_toml_str(include_str!(
+                    "../../../config/default.toml"
+                ))
+                .unwrap(),
+            ),
         });
         let app = create_router_with_state(state);
 
