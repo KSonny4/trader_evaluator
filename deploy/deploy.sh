@@ -101,8 +101,15 @@ if $SSH_CMD "grep -q 'GRAFANA_CLOUD' $REMOTE_DIR/.env 2>/dev/null"; then
 fi
 
 # 8. Push dashboards to Grafana Cloud (if credentials available)
+# Prefer .env.agent, fallback to .env (so deploy "just works" for people who keep all env in one file).
 if [ -f "$PROJECT_DIR/.env.agent" ]; then
+    # shellcheck disable=SC1091
     source "$PROJECT_DIR/.env.agent"
+elif [ -f "$PROJECT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$PROJECT_DIR/.env"
+    set +a
 fi
 if [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_SA_TOKEN:-}" ]; then
     if [ -x "$SCRIPT_DIR/push-dashboards.sh" ]; then
@@ -112,7 +119,7 @@ if [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_SA_TOKEN:-}" ]; then
         echo "Skipping dashboard push (deploy/push-dashboards.sh not found)"
     fi
 else
-    echo "Skipping dashboard push (GRAFANA_URL / GRAFANA_SA_TOKEN not set)"
+    echo "Skipping dashboard push (GRAFANA_URL / GRAFANA_SA_TOKEN not set; set them in .env.agent or .env)"
 fi
 
 # 9. Restart services
