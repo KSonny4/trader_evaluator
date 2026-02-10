@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TARGET="x86_64-unknown-linux-musl"
 BINARIES=(evaluator web)
+REMOTE_DIR="${REMOTE_DIR:-/opt/evaluator}"
 
 # Load server info
 if [ -f "$SCRIPT_DIR/.server-info" ]; then
@@ -54,24 +55,30 @@ for bin in "${BINARIES[@]}"; do
 done
 
 # 3. Create remote directories and stop running services before uploading
-$SSH_CMD "mkdir -p ~/evaluator/data ~/evaluator/config"
+$SSH_CMD "sudo mkdir -p $REMOTE_DIR/data $REMOTE_DIR/config"
 echo "Stopping services before upload..."
 $SSH_CMD "sudo systemctl stop evaluator 2>/dev/null || true"
-$SSH_CMD "sudo systemctl stop evaluator-web 2>/dev/null || true"
+$SSH_CMD "sudo systemctl stop web 2>/dev/null || true"
 
 # 4. Upload binaries
 echo "Uploading binaries..."
 for bin in "${BINARIES[@]}"; do
-    $SCP_CMD "$PROJECT_DIR/target/$TARGET/release/$bin" "$SSH_USER@$SERVER_IP:~/evaluator/$bin"
-    $SSH_CMD "chmod +x ~/evaluator/$bin"
+    $SCP_CMD "$PROJECT_DIR/target/$TARGET/release/$bin" "$SSH_USER@$SERVER_IP:/tmp/$bin"
+    $SSH_CMD "sudo mv /tmp/$bin $REMOTE_DIR/$bin"
+    $SSH_CMD "sudo chmod +x $REMOTE_DIR/$bin"
+    $SSH_CMD "sudo chown evaluator:evaluator $REMOTE_DIR/$bin || true"
 done
 
 # 5. Copy config and .env
 echo "Copying config..."
-$SCP_CMD "$PROJECT_DIR/config/default.toml" "$SSH_USER@$SERVER_IP:~/evaluator/config/default.toml"
+$SCP_CMD "$PROJECT_DIR/config/default.toml" "$SSH_USER@$SERVER_IP:/tmp/default.toml"
+$SSH_CMD "sudo mv /tmp/default.toml $REMOTE_DIR/config/default.toml"
+$SSH_CMD "sudo chown evaluator:evaluator $REMOTE_DIR/config/default.toml || true"
 if [ -f "$PROJECT_DIR/.env" ]; then
     echo "Copying .env..."
-    $SCP_CMD "$PROJECT_DIR/.env" "$SSH_USER@$SERVER_IP:~/evaluator/.env"
+    $SCP_CMD "$PROJECT_DIR/.env" "$SSH_USER@$SERVER_IP:/tmp/evaluator.env"
+    $SSH_CMD "sudo mv /tmp/evaluator.env $REMOTE_DIR/.env"
+    $SSH_CMD "sudo chown evaluator:evaluator $REMOTE_DIR/.env || true"
 fi
 
 # 6. Install systemd services
@@ -83,13 +90,13 @@ $SSH_CMD "sudo mv /tmp/web.service /etc/systemd/system/"
 $SSH_CMD "sudo systemctl daemon-reload"
 
 # 7. Install Alloy config if Grafana Cloud is configured
-if $SSH_CMD "grep -q 'GRAFANA_CLOUD' ~/evaluator/.env 2>/dev/null"; then
+if $SSH_CMD "grep -q 'GRAFANA_CLOUD' $REMOTE_DIR/.env 2>/dev/null"; then
     echo "Configuring Grafana Alloy..."
     $SCP_CMD "$SCRIPT_DIR/alloy-config.alloy" "$SSH_USER@$SERVER_IP:/tmp/config.alloy"
     $SSH_CMD "sudo mv /tmp/config.alloy /etc/alloy/config.alloy"
     # Inject Grafana Cloud env vars into Alloy's environment file (remove old ones first to avoid duplicates)
     $SSH_CMD "sudo sed -i '/^GRAFANA_CLOUD/d' /etc/default/alloy"
-    $SSH_CMD "grep '^GRAFANA_CLOUD' ~/evaluator/.env | sudo tee -a /etc/default/alloy > /dev/null"
+    $SSH_CMD "grep '^GRAFANA_CLOUD' $REMOTE_DIR/.env | sudo tee -a /etc/default/alloy > /dev/null"
     $SSH_CMD "sudo systemctl enable alloy && sudo systemctl restart alloy"
 fi
 
@@ -98,8 +105,12 @@ if [ -f "$PROJECT_DIR/.env.agent" ]; then
     source "$PROJECT_DIR/.env.agent"
 fi
 if [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_SA_TOKEN:-}" ]; then
-    echo "Pushing dashboards to Grafana Cloud..."
-    "$SCRIPT_DIR/push-dashboards.sh"
+    if [ -x "$SCRIPT_DIR/push-dashboards.sh" ]; then
+        echo "Pushing dashboards to Grafana Cloud..."
+        "$SCRIPT_DIR/push-dashboards.sh"
+    else
+        echo "Skipping dashboard push (deploy/push-dashboards.sh not found)"
+    fi
 else
     echo "Skipping dashboard push (GRAFANA_URL / GRAFANA_SA_TOKEN not set)"
 fi
@@ -107,18 +118,18 @@ fi
 # 9. Restart services
 echo "Restarting services..."
 $SSH_CMD "sudo systemctl restart evaluator"
-$SSH_CMD "sudo systemctl restart evaluator-web"
+$SSH_CMD "sudo systemctl restart web"
 
 echo ""
 echo "=== Deploy complete ==="
 echo ""
 echo "Check status:"
 echo "  $SSH_CMD 'sudo systemctl status evaluator'"
-echo "  $SSH_CMD 'sudo systemctl status evaluator-web'"
+echo "  $SSH_CMD 'sudo systemctl status web'"
 echo ""
 echo "View logs:"
 echo "  $SSH_CMD 'sudo journalctl -u evaluator -f'"
-echo "  $SSH_CMD 'sudo journalctl -u evaluator-web -f'"
+echo "  $SSH_CMD 'sudo journalctl -u web -f'"
 echo ""
 echo "Stop everything:"
-echo "  $SSH_CMD 'sudo systemctl stop evaluator evaluator-web'"
+echo "  $SSH_CMD 'sudo systemctl stop evaluator web'"

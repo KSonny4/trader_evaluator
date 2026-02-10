@@ -92,10 +92,10 @@ SCP = scp -i $(SSH_KEY)
 DB_CMD = $(SSH) $(SERVER) 'sqlite3 $(DB)'
 
 deploy: test build-linux
-	$(SCP) target/x86_64-unknown-linux-musl/release/evaluator $(SERVER):$(REMOTE_DIR)/evaluator.new
-	$(SCP) target/x86_64-unknown-linux-musl/release/web $(SERVER):$(REMOTE_DIR)/web.new
-	$(SCP) config/default.toml $(SERVER):$(REMOTE_DIR)/config/default.toml
-	$(SSH) $(SERVER) 'mv $(REMOTE_DIR)/evaluator.new $(REMOTE_DIR)/evaluator && mv $(REMOTE_DIR)/web.new $(REMOTE_DIR)/web && sudo systemctl restart evaluator && sudo systemctl restart web'
+	$(SCP) target/x86_64-unknown-linux-musl/release/evaluator $(SERVER):/tmp/evaluator.new
+	$(SCP) target/x86_64-unknown-linux-musl/release/web $(SERVER):/tmp/web.new
+	$(SCP) config/default.toml $(SERVER):/tmp/default.toml
+	$(SSH) $(SERVER) 'sudo mv /tmp/evaluator.new $(REMOTE_DIR)/evaluator && sudo mv /tmp/web.new $(REMOTE_DIR)/web && sudo mv /tmp/default.toml $(REMOTE_DIR)/config/default.toml && sudo chown evaluator:evaluator $(REMOTE_DIR)/evaluator $(REMOTE_DIR)/web $(REMOTE_DIR)/config/default.toml || true && sudo systemctl restart evaluator && sudo systemctl restart web'
 	@echo "Deployed. Waiting 10s for startup..."
 	@sleep 10
 	$(MAKE) check
@@ -195,4 +195,3 @@ status:
 	@$(DB_CMD) "SELECT 'wallet scores today:' || COUNT(*) FROM wallet_scores_daily WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'last trade ingested: ' || COALESCE(MAX(ingested_at), 'never') FROM trades_raw"
 	@$(DB_CMD) "SELECT 'DB size:            ' || (page_count * page_size / 1024 / 1024) || ' MB' FROM pragma_page_count(), pragma_page_size()"
-
