@@ -216,6 +216,6 @@
   "timepicker": {},
   "timezone": "browser",
   "title": "Trader Evaluator Overview",
-  "uid": null,
+  "uid": "trader-evaluator-overview",
   "version": 2
 }
