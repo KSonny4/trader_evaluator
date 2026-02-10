@@ -7,7 +7,9 @@ use common::types::{ApiHolderResponse, ApiTrade, GammaMarket};
 
 use crate::market_scoring::{rank_markets, MarketCandidate};
 use crate::paper_trading::{is_crypto_15m_market, mirror_trade_to_paper, Side};
-use crate::persona_classification::{classify_wallet, stage1_filter, PersonaConfig, Stage1Config};
+use crate::persona_classification::{
+    classify_wallet, stage1_filter, stage1_known_bot_check, PersonaConfig, Stage1Config,
+};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_features::compute_wallet_features;
 use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
@@ -556,6 +558,7 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         min_wallet_age_days: cfg.personas.stage1_min_wallet_age_days,
         min_total_trades: cfg.personas.stage1_min_total_trades,
         max_inactive_days: cfg.personas.stage1_max_inactive_days,
+        known_bots: cfg.personas.known_bots.clone(),
     };
 
     let classified: u64 = db
@@ -587,6 +590,13 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
 
             let mut count = 0_u64;
             for (proxy_wallet, wallet_age_days, total_trades, days_since_last) in wallets {
+                if let Some(reason) =
+                    stage1_known_bot_check(&proxy_wallet, &stage1_config.known_bots)
+                {
+                    crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
+                    count += 1;
+                    continue;
+                }
                 if let Some(reason) = stage1_filter(
                     wallet_age_days,
                     total_trades,

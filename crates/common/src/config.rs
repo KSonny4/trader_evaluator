@@ -135,6 +135,9 @@ pub struct Personas {
     pub stage1_min_wallet_age_days: u32,
     pub stage1_min_total_trades: u32,
     pub stage1_max_inactive_days: u32,
+    /// Proxy wallet addresses to exclude as known bots (Strategy Bible §4 Stage 1). E.g. ["0x..."].
+    #[serde(default)]
+    pub known_bots: Vec<String>,
     // Informed Specialist
     pub specialist_max_active_positions: u32,
     pub specialist_min_concentration: f64,
