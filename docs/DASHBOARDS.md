@@ -11,6 +11,12 @@ Dashboards assume Grafana Cloud datasources with UIDs:
 
 If your stack uses different datasource UIDs, update the JSON once and re-push.
 
+## Reuse Dashboards From `trading` Repo (Optional)
+
+If you keep dashboards in `/Users/petr.kubelka/git_projects/trading/dashboards`, you can reuse them without copying by setting:
+
+- `DASHBOARDS_DIR=/Users/petr.kubelka/git_projects/trading/dashboards`
+
 ## Pushing Dashboards To Grafana Cloud
 
 1. Provide credentials (either option works):
