@@ -46,6 +46,10 @@ pub fn describe() {
         "evaluator_api_requests_total",
         "Number of API requests made."
     );
+    describe_counter!(
+        "evaluator_api_errors_total",
+        "Number of API request failures classified by kind."
+    );
     describe_histogram!(
         "evaluator_api_latency_ms",
         "API request latency in milliseconds."

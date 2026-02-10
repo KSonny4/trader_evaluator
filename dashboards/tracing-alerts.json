@@ -44,6 +44,33 @@
         }
       ],
       "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "API Errors / min (by endpoint+kind)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "expr": "sum by (endpoint, kind) (rate(evaluator_api_errors_total[5m])) * 60",
+          "legendFormat": "{{endpoint}}/{{kind}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "API Errors (last 1h, by endpoint+kind)",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "expr": "topk(15, sum by (endpoint, kind) (increase(evaluator_api_errors_total[1h])))",
+          "legendFormat": "{{endpoint}}/{{kind}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
     }
   ],
   "refresh": "30s",
