@@ -24,6 +24,8 @@ base64 = { workspace = true }
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 
 [dev-dependencies]

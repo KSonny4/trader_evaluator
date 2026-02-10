@@ -14,6 +14,27 @@ pub struct FunnelCounts {
     pub wallets_ranked: i64,
 }
 
+/// Persona funnel counts for Strategy Bible §2 (drop-offs through Stage 1/2 to paper/follow-worthy).
+pub struct PersonaFunnelCounts {
+    pub wallets_discovered: i64,
+    pub stage1_passed: i64,
+    pub stage2_classified: i64,
+    pub paper_traded_wallets: i64,
+    pub follow_worthy_wallets: i64,
+}
+
+/// One stage in the persona funnel bar.
+pub struct PersonaFunnelStage {
+    pub label: String,
+    pub count: i64,
+    /// Drop-off percentage to next stage (None for last stage)
+    pub drop_pct: Option<String>,
+    /// Tailwind bg color class
+    pub bg_color: String,
+    /// Tailwind text color class for drop-off
+    pub drop_color: String,
+}
+
 /// One stage in the funnel bar
 pub struct FunnelStage {
     pub label: String,
@@ -114,6 +135,14 @@ pub struct PaperSummary {
     pub bankroll: f64,
     pub bankroll_display: String,
     pub pnl_color: String,
+    pub wallets_followed: i64,
+    pub exposure_usdc: f64,
+    pub exposure_display: String,
+    pub exposure_pct_display: String,
+    pub copy_fidelity_display: String,
+    pub follower_slippage_display: String,
+    pub risk_status: String,
+    pub risk_status_color: String,
 }
 
 /// Wallet ranking row
@@ -135,6 +164,36 @@ pub struct RankingRow {
     pub pnl_display: String,
     pub pnl_color: String,
     pub follow_mode: String,
+}
+
+/// Row in the excluded wallets list (latest exclusion per wallet).
+pub struct ExcludedWalletRow {
+    pub proxy_wallet: String,
+    pub wallet_short: String,
+    pub reason: String,
+    pub metric_value_display: String,
+    pub threshold_display: String,
+    pub excluded_at: String,
+}
+
+pub struct JourneyEvent {
+    pub at: String,
+    pub label: String,
+    pub detail: String,
+}
+
+pub struct WalletJourney {
+    pub proxy_wallet: String,
+    pub wallet_short: String,
+    pub discovered_at: String,
+    pub persona: Option<String>,
+    pub confidence_display: Option<String>,
+    pub exclusion_reason: Option<String>,
+    pub paper_pnl_display: String,
+    pub exposure_display: String,
+    pub copy_fidelity_display: String,
+    pub follower_slippage_display: String,
+    pub events: Vec<JourneyEvent>,
 }
 
 // Helper to truncate wallet addresses
@@ -194,6 +253,57 @@ impl FunnelCounts {
                     bg_color: bg.to_string(),
                     drop_color,
                     info: infos[i].clone(),
+                }
+            })
+            .collect()
+    }
+}
+
+impl PersonaFunnelCounts {
+    pub fn to_stages(&self) -> Vec<PersonaFunnelStage> {
+        let pairs = [
+            ("Discovered", self.wallets_discovered, self.stage1_passed),
+            ("Stage 1", self.stage1_passed, self.stage2_classified),
+            ("Stage 2", self.stage2_classified, self.paper_traded_wallets),
+            (
+                "Paper",
+                self.paper_traded_wallets,
+                self.follow_worthy_wallets,
+            ),
+            ("Follow", self.follow_worthy_wallets, 0),
+        ];
+
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (label, count, next))| {
+                let is_last = i == pairs.len() - 1;
+                let (drop_pct, drop_color) = if is_last || *count == 0 {
+                    (None, String::new())
+                } else {
+                    let pct = (*next as f64 / *count as f64) * 100.0;
+                    let color = if pct > 50.0 {
+                        "text-green-400"
+                    } else if pct > 10.0 {
+                        "text-yellow-400"
+                    } else {
+                        "text-red-400"
+                    };
+                    (Some(format!("{pct:.1}%")), color.to_string())
+                };
+
+                let bg = if *count > 0 {
+                    "bg-gray-800"
+                } else {
+                    "bg-gray-900"
+                };
+
+                PersonaFunnelStage {
+                    label: (*label).to_string(),
+                    count: *count,
+                    drop_pct,
+                    bg_color: bg.to_string(),
+                    drop_color,
                 }
             })
             .collect()

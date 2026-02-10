@@ -1,18 +1,20 @@
+mod metrics;
 mod models;
 mod queries;
 
 use anyhow::Result;
 use askama::Template;
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::Query;
+use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
 use models::{
-    FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
-    WalletOverview, WalletRow,
+    ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow, PersonaFunnelStage,
+    RankingRow, SystemStatus, TrackingHealth, WalletJourney, WalletOverview, WalletRow,
 };
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
@@ -25,6 +27,11 @@ pub struct AppState {
     pub db_path: PathBuf,
     pub auth_password: Option<String>,
     pub funnel_stage_infos: [String; 6],
+    pub prom_handle: metrics_exporter_prometheus::PrometheusHandle,
+    pub paper_bankroll_usdc: f64,
+    pub max_total_exposure_pct: f64,
+    pub max_daily_loss_pct: f64,
+    pub max_concurrent_positions: u32,
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -156,6 +163,22 @@ struct LoginTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "excluded.html")]
+struct ExcludedTemplate {
+    rows: Vec<ExcludedWalletRow>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+    total_pages: i64,
+}
+
+#[derive(Template)]
+#[template(path = "journey.html")]
+struct JourneyTemplate {
+    journey: WalletJourney,
+}
+
+#[derive(Template)]
 #[template(path = "partials/status_strip.html")]
 struct StatusStripTemplate {
     status: SystemStatus,
@@ -165,6 +188,12 @@ struct StatusStripTemplate {
 #[template(path = "partials/funnel_bar.html")]
 struct FunnelBarTemplate {
     stages: Vec<FunnelStage>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/persona_funnel_bar.html")]
+struct PersonaFunnelBarTemplate {
+    stages: Vec<PersonaFunnelStage>,
 }
 
 #[derive(Template)]
@@ -354,6 +383,13 @@ async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Html(FunnelBarTemplate { stages }.to_string())
 }
 
+async fn persona_funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let counts = queries::persona_funnel_counts(&conn).unwrap();
+    let stages = counts.to_stages();
+    Html(PersonaFunnelBarTemplate { stages }.to_string())
+}
+
 async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = open_readonly(&state).unwrap();
     let markets = queries::top_markets_today(&conn).unwrap();
@@ -376,7 +412,14 @@ async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
 
 async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = open_readonly(&state).unwrap();
-    let summary = queries::paper_summary(&conn, 1000.0).unwrap();
+    let summary = queries::paper_summary(
+        &conn,
+        state.paper_bankroll_usdc,
+        state.max_total_exposure_pct,
+        state.max_daily_loss_pct,
+        i64::from(state.max_concurrent_positions),
+    )
+    .unwrap();
     let trades = queries::recent_paper_trades(&conn, 20).unwrap();
     Html(PaperTemplate { summary, trades }.to_string())
 }
@@ -385,6 +428,126 @@ async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let conn = open_readonly(&state).unwrap();
     let rankings = queries::top_rankings(&conn, 30, 20).unwrap();
     Html(RankingsTemplate { rankings }.to_string())
+}
+
+#[derive(Deserialize)]
+struct ExcludedParams {
+    page: Option<i64>,
+    page_size: Option<i64>,
+}
+
+async fn excluded_page(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ExcludedParams>,
+) -> impl IntoResponse {
+    let page = params.page.unwrap_or(1).max(1);
+    let page_size = params.page_size.unwrap_or(50).clamp(1, 200);
+    let offset = ((page - 1) * page_size) as usize;
+
+    let conn = open_readonly(&state).unwrap();
+    let total = queries::excluded_wallets_count(&conn).unwrap();
+    let rows = queries::excluded_wallets_latest(&conn, page_size as usize, offset).unwrap();
+
+    let total_pages = ((total + page_size - 1) / page_size).max(1);
+    Html(
+        ExcludedTemplate {
+            rows,
+            total,
+            page,
+            page_size,
+            total_pages,
+        }
+        .to_string(),
+    )
+}
+
+async fn journey_page(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+) -> impl IntoResponse {
+    let conn = open_readonly(&state).unwrap();
+    let Some(journey) = queries::wallet_journey(&conn, &wallet).unwrap() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Html(JourneyTemplate { journey }.to_string()).into_response()
+}
+
+async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Opportunistically update derived gauges from SQLite so Grafana can chart drop-offs.
+    // This keeps metrics fresh even if the dashboard UI isn't being opened.
+    if let Ok(conn) = open_readonly(&state) {
+        if let Ok(c) = queries::funnel_counts(&conn) {
+            ::metrics::gauge!(
+                "evaluator_pipeline_funnel_stage_count",
+                "stage" => "markets_fetched"
+            )
+            .set(c.markets_fetched as f64);
+            ::metrics::gauge!(
+                "evaluator_pipeline_funnel_stage_count",
+                "stage" => "markets_scored"
+            )
+            .set(c.markets_scored as f64);
+            ::metrics::gauge!(
+                "evaluator_pipeline_funnel_stage_count",
+                "stage" => "wallets_discovered"
+            )
+            .set(c.wallets_discovered as f64);
+            ::metrics::gauge!(
+                "evaluator_pipeline_funnel_stage_count",
+                "stage" => "wallets_tracked"
+            )
+            .set(c.wallets_active as f64);
+            ::metrics::gauge!(
+                "evaluator_pipeline_funnel_stage_count",
+                "stage" => "paper_trades_total"
+            )
+            .set(c.paper_trades_total as f64);
+            ::metrics::gauge!(
+                "evaluator_pipeline_funnel_stage_count",
+                "stage" => "wallets_ranked"
+            )
+            .set(c.wallets_ranked as f64);
+        }
+
+        if let Ok(c) = queries::persona_funnel_counts(&conn) {
+            ::metrics::gauge!(
+                "evaluator_persona_funnel_stage_count",
+                "stage" => "wallets_discovered"
+            )
+            .set(c.wallets_discovered as f64);
+            ::metrics::gauge!(
+                "evaluator_persona_funnel_stage_count",
+                "stage" => "stage1_passed"
+            )
+            .set(c.stage1_passed as f64);
+            ::metrics::gauge!(
+                "evaluator_persona_funnel_stage_count",
+                "stage" => "stage2_classified"
+            )
+            .set(c.stage2_classified as f64);
+            ::metrics::gauge!(
+                "evaluator_persona_funnel_stage_count",
+                "stage" => "paper_traded_wallets"
+            )
+            .set(c.paper_traded_wallets as f64);
+            ::metrics::gauge!(
+                "evaluator_persona_funnel_stage_count",
+                "stage" => "follow_worthy_wallets"
+            )
+            .set(c.follow_worthy_wallets as f64);
+        }
+    }
+
+    // Ensure exporter housekeeping runs so histograms don't grow without bound.
+    state.prom_handle.run_upkeep();
+
+    let rendered = state.prom_handle.render();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    (headers, rendered)
 }
 
 // --- Router ---
@@ -397,13 +560,17 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", get(logout));
+        .route("/logout", get(logout))
+        .route("/metrics", get(metrics_endpoint));
 
     // Protected routes (auth required if password is set)
     let protected_routes = Router::new()
         .route("/", get(index))
+        .route("/excluded", get(excluded_page))
+        .route("/journey/{wallet}", get(journey_page))
         .route("/partials/status", get(status_partial))
         .route("/partials/funnel", get(funnel_partial))
+        .route("/partials/persona_funnel", get(persona_funnel_partial))
         .route("/partials/markets", get(markets_partial))
         .route("/partials/wallets", get(wallets_partial))
         .route("/partials/tracking", get(tracking_partial))
@@ -431,11 +598,17 @@ async fn main() -> Result<()> {
         .map_or("0.0.0.0".to_string(), |w| w.host.clone());
     let auth_password = config.web.as_ref().and_then(|w| w.auth_password.clone());
     let funnel_stage_infos = common::funnel::funnel_stage_infos(&config);
+    let prom_handle = metrics::init_global()?;
 
     let state = Arc::new(AppState {
         db_path,
         auth_password,
         funnel_stage_infos,
+        prom_handle,
+        paper_bankroll_usdc: config.risk.paper_bankroll_usdc,
+        max_total_exposure_pct: config.paper_trading.max_total_exposure_pct,
+        max_daily_loss_pct: config.paper_trading.max_daily_loss_pct,
+        max_concurrent_positions: config.risk.max_concurrent_positions,
     });
 
     let app = create_router_with_state(state);
@@ -469,10 +642,16 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
+        let prom_handle = metrics::init_global().unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            prom_handle,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: cfg.risk.max_concurrent_positions,
         });
         create_router_with_state(state)
     }
@@ -488,10 +667,16 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
+        let prom_handle = metrics::init_global().unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: Some(password.to_string()),
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            prom_handle,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: cfg.risk.max_concurrent_positions,
         });
         create_router_with_state(state)
     }
@@ -964,6 +1149,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_metrics_endpoint_returns_200_and_contains_build_info() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("evaluator_web_build_info"));
+    }
+
+    #[tokio::test]
+    async fn test_metrics_exports_persona_funnel_stage_gauges() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let db = Database::open(path.to_str().unwrap()).unwrap();
+        db.run_migrations().unwrap();
+
+        // Minimal data to produce a non-zero Stage 1 passed count.
+        db.conn
+            .execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw1', 'HOLDER', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw2', 'HOLDER', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold)
+                 VALUES ('0xw1', 'STAGE1_TOO_YOUNG', 5.0, 30.0)",
+                [],
+            )
+            .unwrap();
+
+        drop(db); // close write connection so read-only can open
+        std::mem::forget(tmp); // keep tempfile alive for this test
+
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let prom_handle = metrics::init_global().unwrap();
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: None,
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            prom_handle,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+        });
+        let app = create_router_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("evaluator_persona_funnel_stage_count"));
+        assert!(text.contains("stage=\"stage1_passed\""));
+    }
+
+    #[tokio::test]
     async fn test_status_partial_returns_200() {
         let app = create_test_app();
         let response = app
@@ -1033,6 +1304,199 @@ mod tests {
         assert!(html.contains("Scored"));
         assert!(html.contains("Wallets"));
         assert!(html.contains("Ranked"));
+    }
+
+    #[tokio::test]
+    async fn test_persona_funnel_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/persona_funnel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_excluded_page_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/excluded")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Excluded Wallets"));
+    }
+
+    #[tokio::test]
+    async fn test_excluded_page_paginates_latest_per_wallet() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let db = Database::open(path.to_str().unwrap()).unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                 VALUES ('0xaaaaaaaaaaaaaaaa', 'NOISE_TRADER', 60.0, 50.0, '2026-02-10 10:00:00')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                 VALUES ('0xbbbbbbbbbbbbbbbb', 'TAIL_RISK_SELLER', 0.83, 0.80, '2026-02-10 11:00:00')",
+                [],
+            )
+            .unwrap();
+
+        drop(db);
+        std::mem::forget(tmp);
+
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let prom_handle = metrics::init_global().unwrap();
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: None,
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            prom_handle,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+        });
+        let app = create_router_with_state(state);
+
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/excluded?page=1&page_size=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html1 = String::from_utf8(body1.to_vec()).unwrap();
+
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .uri("/excluded?page=2&page_size=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html2 = String::from_utf8(body2.to_vec()).unwrap();
+
+        assert_ne!(html1, html2);
+        assert!(html1.contains("0xbbbb") || html1.contains("0xaaaa"));
+        assert!(html2.contains("0xbbbb") || html2.contains("0xaaaa"));
+    }
+
+    #[tokio::test]
+    async fn test_journey_unknown_wallet_returns_404() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/journey/0xdoesnotexist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_journey_known_wallet_returns_200() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let db = Database::open(path.to_str().unwrap()).unwrap();
+        db.run_migrations().unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, discovered_at, is_active)
+                 VALUES ('0xw2', 'HOLDER', '2026-02-10 09:00:00', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES ('0xw2', 'Informed Specialist', 0.87, '2026-02-10 10:00:00')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at)
+                 VALUES ('0xw2', 'mirror', '0xm1', 'BUY', 25.0, 0.60, 'settled_win', 5.0, '2026-02-10 11:00:00')",
+                [],
+            )
+            .unwrap();
+
+        drop(db);
+        std::mem::forget(tmp);
+
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let prom_handle = metrics::init_global().unwrap();
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: None,
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            prom_handle,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+        });
+        let app = create_router_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/journey/0xw2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Journey"));
+        assert!(html.contains("0xw2"));
     }
 
     #[tokio::test]
@@ -1269,10 +1733,16 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
+        let prom_handle = metrics::init_global().unwrap();
         let state = Arc::new(AppState {
             db_path: db_path.into(),
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            prom_handle,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: cfg.risk.max_concurrent_positions,
         });
         let app = create_router_with_state(state);
 

@@ -2414,6 +2414,8 @@ dependencies = [
  "chrono",
  "common",
  "hex",
+ "metrics",
+ "metrics-exporter-prometheus",
  "rand 0.8.5",
  "rusqlite",
  "serde",

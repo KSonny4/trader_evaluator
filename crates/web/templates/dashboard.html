@@ -12,6 +12,11 @@
         <p class="text-gray-600 text-sm">Loading funnel...</p>
     </div>
 
+    <!-- Persona Funnel Bar (Strategy Bible §2): polls every 30s -->
+    <div hx-get="/partials/persona_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <p class="text-gray-600 text-sm">Loading persona funnel...</p>
+    </div>
+
     <!-- Stage 1: Markets -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">

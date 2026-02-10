@@ -20,7 +20,7 @@ prometheus.scrape "evaluator" {
 
 prometheus.scrape "evaluator_web" {
   targets = [{
-    __address__ = "localhost:3000",
+    __address__ = "localhost:8080",
   }]
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
   scrape_interval = "15s"
@@ -48,7 +48,7 @@ loki.source.journal "evaluator_logs" {
 loki.source.journal "evaluator_web_logs" {
   forward_to    = [loki.write.grafana_cloud.receiver]
   relabel_rules = loki.relabel.journal_labels.rules
-  matches       = "_SYSTEMD_UNIT=evaluator-web.service"
+  matches       = "_SYSTEMD_UNIT=web.service"
 }
 
 loki.relabel "journal_labels" {
