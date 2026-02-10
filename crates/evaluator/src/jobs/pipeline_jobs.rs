@@ -146,41 +146,78 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     let w = WScoreWeights {
         edge_weight: cfg.wallet_scoring.edge_weight,
         consistency_weight: cfg.wallet_scoring.consistency_weight,
+        market_skill_weight: cfg.wallet_scoring.market_skill_weight,
+        timing_skill_weight: cfg.wallet_scoring.timing_skill_weight,
+        behavior_quality_weight: cfg.wallet_scoring.behavior_quality_weight,
     };
 
     let windows_days = cfg.wallet_scoring.windows_days.clone();
     let bankroll = cfg.risk.paper_bankroll_usdc;
+    let trust_30_90_multiplier = cfg.personas.trust_30_90_multiplier;
+    let obscurity_bonus_multiplier = cfg.personas.obscurity_bonus_multiplier;
 
     // Batch read: fetch all (wallet, window) PnL values in one db.call().
     let windows_c = windows_days.clone();
-    let pnl_data: Vec<(String, i64, f64)> = db
+    let pnl_data: Vec<(String, String, i64, i64, f64, u32, u32)> = db
         .call_named("wallet_scoring.read_pnl_batch", move |conn| {
             let mut stmt = conn.prepare(
                 "
-                SELECT proxy_wallet
+                SELECT proxy_wallet,
+                       discovered_from,
+                       CAST((julianday('now') - julianday(discovered_at)) AS INTEGER) AS age_days
                 FROM wallets
                 WHERE is_active = 1
                 ORDER BY discovered_at DESC
                 LIMIT 500
                 ",
             )?;
-            let wallets: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+            let wallets: Vec<(String, String, i64)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
             let mut results = Vec::new();
             let mut pnl_stmt = conn.prepare(
                 "SELECT SUM(pnl) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
             )?;
+            let mut total_markets_stmt = conn.prepare(
+                "SELECT COUNT(DISTINCT condition_id) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
+            )?;
+            let mut profitable_markets_stmt = conn.prepare(
+                "
+                SELECT COUNT(*) FROM (
+                    SELECT condition_id, SUM(pnl) AS pnl_sum
+                    FROM paper_trades
+                    WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)
+                    GROUP BY condition_id
+                    HAVING pnl_sum > 0
+                )
+                ",
+            )?;
 
-            for wallet in &wallets {
+            for (wallet, discovered_from, age_days) in &wallets {
                 for &wd in &windows_c {
                     let window = format!("-{wd} days");
                     let pnl: Option<f64> = pnl_stmt.query_row(
                         rusqlite::params![wallet, window],
                         |row| row.get(0),
                     )?;
-                    results.push((wallet.clone(), i64::from(wd), pnl.unwrap_or(0.0)));
+                    let total_markets: u32 = total_markets_stmt.query_row(
+                        rusqlite::params![wallet, window],
+                        |row| row.get(0),
+                    )?;
+                    let profitable_markets: u32 = profitable_markets_stmt.query_row(
+                        rusqlite::params![wallet, window],
+                        |row| row.get(0),
+                    )?;
+                    results.push((
+                        wallet.clone(),
+                        discovered_from.clone(),
+                        *age_days,
+                        i64::from(wd),
+                        pnl.unwrap_or(0.0),
+                        profitable_markets,
+                        total_markets,
+                    ));
                 }
             }
             Ok(results)
@@ -189,7 +226,9 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
 
     // Compute scores in Rust (no DB needed).
     let mut score_rows = Vec::with_capacity(pnl_data.len());
-    for (wallet, window_days, pnl) in &pnl_data {
+    for (wallet, discovered_from, age_days, window_days, pnl, profitable_markets, total_markets) in
+        &pnl_data
+    {
         let roi_pct = if bankroll > 0.0 {
             100.0 * pnl / bankroll
         } else {
@@ -199,8 +238,19 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
             paper_roi_pct: roi_pct,
             daily_return_stdev_pct: 0.0,
             hit_rate: 0.50, // TODO(Task 38): calculate real hit rate from DB
+            profitable_markets: *profitable_markets,
+            total_markets: *total_markets,
+            avg_post_entry_drift_cents: 0.0, // TODO(Task 38): compute from post-entry price drift metrics
+            noise_trade_ratio: 0.0, // TODO(Task 38): compute based on persona/exclusion heuristics
+            wallet_age_days: (*age_days).max(0) as u32,
+            is_public_leaderboard_top_500: discovered_from == "LEADERBOARD",
         };
-        let wscore = compute_wscore(&input, &w);
+        let wscore = compute_wscore(
+            &input,
+            &w,
+            trust_30_90_multiplier,
+            obscurity_bonus_multiplier,
+        );
         score_rows.push(ScoreRow {
             proxy_wallet: wallet.clone(),
             window_days: *window_days,
