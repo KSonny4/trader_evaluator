@@ -1111,8 +1111,8 @@ mod tests {
             .call(|conn| {
                 Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
             })
-        .await
-        .unwrap();
+            .await
+            .unwrap();
         assert_eq!(cnt, 1);
     }
 
