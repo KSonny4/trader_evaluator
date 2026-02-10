@@ -8,6 +8,8 @@
 //   GRAFANA_CLOUD_API_KEY      - Grafana Cloud API key
 //   GRAFANA_CLOUD_LOKI_URL     - Loki push URL
 //   GRAFANA_CLOUD_LOKI_USER    - Loki username (instance ID)
+//   GRAFANA_CLOUD_TEMPO_URL    - Tempo OTLP endpoint
+//   GRAFANA_CLOUD_TEMPO_USER   - Tempo username (instance ID)
 
 prometheus.scrape "evaluator" {
   targets = [{
@@ -80,5 +82,45 @@ prometheus.remote_write "grafana_cloud" {
       username = env("GRAFANA_CLOUD_PROM_USER")
       password = env("GRAFANA_CLOUD_API_KEY")
     }
+  }
+}
+
+// ── OpenTelemetry Traces (Tempo) ─────────────────────────
+// Receive OTLP from local services and export to Grafana Cloud Tempo.
+//
+// App side (systemd):
+//   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+//   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+//
+// Alloy side (from /opt/evaluator/.env via /etc/default/alloy):
+//   GRAFANA_CLOUD_TEMPO_URL
+//   GRAFANA_CLOUD_TEMPO_USER
+//   GRAFANA_CLOUD_API_KEY
+
+otelcol.auth.basic "grafana_cloud_tempo" {
+  username = env("GRAFANA_CLOUD_TEMPO_USER")
+  password = env("GRAFANA_CLOUD_API_KEY")
+}
+
+otelcol.receiver.otlp "local" {
+  http {
+    endpoint = "127.0.0.1:4318"
+  }
+
+  output {
+    traces = [otelcol.processor.batch.traces.input]
+  }
+}
+
+otelcol.processor.batch "traces" {
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = env("GRAFANA_CLOUD_TEMPO_URL")
+    auth     = otelcol.auth.basic.grafana_cloud_tempo.handler
   }
 }

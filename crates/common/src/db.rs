@@ -59,6 +59,42 @@ impl AsyncDb {
             },
         )
     }
+
+    /// Like [`Self::call`], but records Prometheus metrics for DB latency and errors.
+    ///
+    /// This measures the full wall-clock time of the operation, including queueing
+    /// on the dedicated SQLite thread and execution of all SQL in the closure.
+    pub async fn call_named<F, R>(&self, op: &'static str, function: F) -> Result<R>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let start = std::time::Instant::now();
+        let res = self.call(function).await;
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        match &res {
+            Ok(_) => {
+                metrics::histogram!(
+                    "evaluator_db_query_latency_ms",
+                    "op" => op,
+                    "status" => "ok"
+                )
+                .record(ms);
+            }
+            Err(_) => {
+                metrics::histogram!(
+                    "evaluator_db_query_latency_ms",
+                    "op" => op,
+                    "status" => "err"
+                )
+                .record(ms);
+                metrics::counter!("evaluator_db_query_errors_total", "op" => op).increment(1);
+            }
+        }
+
+        res
+    }
 }
 
 impl Database {

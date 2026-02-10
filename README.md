@@ -106,6 +106,10 @@ After every meaningful deploy: `make deploy && make check-phase-N` to verify the
 | 3 | `docs/EVALUATION_STRATEGY.md` | Phase gates, evaluation metrics, decision rules. |
 | 4 | `CLAUDE.md` | Full project context: APIs, DB schema, domain concepts, competitive analysis. |
 | 5 | `config/default.toml` | All configurable parameters: risk limits, scoring weights, ingestion intervals. |
+| 6 | `docs/OBSERVABILITY.md` | Grafana Cloud: metrics, logs, traces (Tempo) wiring + verification. |
+| 7 | `docs/DASHBOARDS.md` | Dashboards repo layout + how to push to Grafana. |
+| 8 | `docs/DEPLOYMENT.md` | Deploy scripts and server paths. |
+| 9 | `docs/RUNBOOK.md` | Operations runbook: restart, logs, troubleshooting. |
 
 ## Project Structure
 
@@ -117,6 +121,7 @@ crates/
 config/
   default.toml  # All configuration
 deploy/         # Cross-compile, systemd units, server setup scripts
+dashboards/     # Grafana dashboards (JSON) for Prometheus + Loki
 docs/           # Strategy Bible, evaluation strategy, implementation plans
 ```
 

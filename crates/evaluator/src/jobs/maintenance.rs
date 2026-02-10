@@ -7,7 +7,7 @@ use common::db::AsyncDb;
 /// 6.5 GB after 28 hours). TRUNCATE mode resets the WAL to zero bytes after
 /// checkpointing all pages.
 pub async fn run_wal_checkpoint_once(db: &AsyncDb) -> Result<(i64, i64)> {
-    db.call(|conn| {
+    db.call_named("wal_checkpoint.run", |conn| {
         let mut stmt = conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)")?;
         let (busy, log, checkpointed) = stmt.query_row([], |row| {
             Ok((

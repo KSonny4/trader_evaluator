@@ -203,7 +203,11 @@ Full taxonomy with thresholds in `docs/EVALUATION_STRATEGY.md` Phase 2.
 # GRAFANA_CLOUD_API_KEY
 # GRAFANA_CLOUD_LOKI_URL
 # GRAFANA_CLOUD_LOKI_USER
+# GRAFANA_CLOUD_TEMPO_URL
+# GRAFANA_CLOUD_TEMPO_USER
 ```
+
+See `docs/OBSERVABILITY.md` for the full metrics/logs/traces wiring and verification steps.
 
 ## Competitive landscape (reference projects analyzed in depth)
 

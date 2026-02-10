@@ -1,0 +1,45 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Recent Logs (evaluator + web)",
+      "type": "logs",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "{unit=~\"evaluator.service|evaluator-web.service\"}",
+          "datasource": { "type": "loki", "uid": "grafanacloud-logs" }
+        }
+      ],
+      "datasource": { "type": "loki", "uid": "grafanacloud-logs" }
+    },
+    {
+      "title": "ERROR Logs (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum(rate({unit=~\"evaluator.service|evaluator-web.service\"} | json | level=\"ERROR\" [5m]))",
+          "legendFormat": "errors/s",
+          "datasource": { "type": "loki", "uid": "grafanacloud-logs" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["trader-evaluator"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "title": "Trader Evaluator Logs",
+  "uid": null,
+  "version": 1
+}
+

@@ -1,0 +1,221 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Trades Ingested (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(evaluator_trades_ingested_total[5m])",
+          "legendFormat": "ingested/s",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "API Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(evaluator_api_requests_total{status=\"error\"}[5m]))",
+          "legendFormat": "errors/s",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        },
+        {
+          "expr": "sum(rate(evaluator_api_requests_total[5m]))",
+          "legendFormat": "req/s",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "API Latency p95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(evaluator_api_latency_ms_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Ingestion Lag (secs)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "evaluator_ingestion_lag_secs",
+          "legendFormat": "lag",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Wallets On Watchlist",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "evaluator_wallets_on_watchlist",
+          "legendFormat": "watchlist",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Paper PnL (USDC)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 16 },
+      "targets": [
+        {
+          "expr": "evaluator_paper_pnl",
+          "legendFormat": "pnl",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Risk Violations (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(evaluator_risk_violations_total[15m]))",
+          "legendFormat": "violations/s",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Disk IO (bytes/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "sum(rate(node_disk_read_bytes_total{job=\"node\",device!~\"loop.*|ram.*\"}[5m]))",
+          "legendFormat": "read",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        },
+        {
+          "expr": "sum(rate(node_disk_written_bytes_total{job=\"node\",device!~\"loop.*|ram.*\"}[5m]))",
+          "legendFormat": "write",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Disk IO (ops/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        {
+          "expr": "sum(rate(node_disk_reads_completed_total{job=\"node\",device!~\"loop.*|ram.*\"}[5m]))",
+          "legendFormat": "reads",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        },
+        {
+          "expr": "sum(rate(node_disk_writes_completed_total{job=\"node\",device!~\"loop.*|ram.*\"}[5m]))",
+          "legendFormat": "writes",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Disk Used (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "expr": "(1 - (node_filesystem_avail_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\"})) * 100",
+          "legendFormat": "/",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "Disk Free (bytes)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 28 },
+      "targets": [
+        {
+          "expr": "node_filesystem_avail_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\"}",
+          "legendFormat": "/ free",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        },
+        {
+          "expr": "node_filesystem_size_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\"}",
+          "legendFormat": "/ size",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "DB latency p95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(evaluator_db_query_latency_ms_bucket{job=~\"evaluator|evaluator-web\"}[5m])) by (le, job, op))",
+          "legendFormat": "{{job}} {{op}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "DB errors (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "targets": [
+        {
+          "expr": "sum(rate(evaluator_db_query_errors_total{job=~\"evaluator|evaluator-web\"}[5m])) by (job, op)",
+          "legendFormat": "{{job}} {{op}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["trader-evaluator"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Trader Evaluator Overview",
+  "uid": null,
+  "version": 2
+}

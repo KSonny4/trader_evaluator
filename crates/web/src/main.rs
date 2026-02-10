@@ -10,6 +10,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use models::{
     FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow, SystemStatus, TrackingHealth,
     WalletOverview, WalletRow,
@@ -22,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tower_http::trace::TraceLayer;
 
 pub struct AppState {
     pub db_path: PathBuf,
@@ -515,15 +517,35 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
-    public_routes.merge(protected_routes).with_state(state)
+    public_routes
+        .merge(protected_routes)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     // Load config — use [web] section if present, otherwise defaults
     let config = common::config::Config::load()?;
+
+    let (dispatch, _otel_guard) =
+        common::observability::build_dispatch("evaluator-web", &config.general.log_level);
+    tracing::dispatcher::set_global_default(dispatch).map_err(anyhow::Error::msg)?;
+
+    // Prometheus endpoint for web service health. Alloy scrapes this on localhost:3000.
+    let metrics_addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Prefix("evaluator_".to_string()),
+            &[
+                1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0,
+                10000.0,
+            ],
+        )
+        .map_err(anyhow::Error::from)?
+        .with_http_listener(metrics_addr)
+        .install()
+        .map_err(anyhow::Error::msg)?;
     let db_path = PathBuf::from(&config.database.path);
     let web_port = config.web.as_ref().map_or(8080, |w| w.port);
     let web_host = config
