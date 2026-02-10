@@ -73,6 +73,48 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
 
     let mut inserted = 0_u64;
     for (trade_id, proxy_wallet, condition_id, side_s, price, outcome, outcome_index) in rows {
+        // Stop mirroring immediately if a wallet becomes non-followable while we're mid-batch.
+        // (The batch query above filters at selection time, but persona/exclusion state can
+        // change concurrently via the persona classification job.)
+        let proxy_wallet_check = proxy_wallet.clone();
+        let followable_now: bool = db
+            .call_named("paper_tick.wallet_is_followable_now", move |conn| {
+                let followable: i64 = conn.query_row(
+                    "
+                    SELECT
+                      CASE
+                        WHEN (
+                          SELECT MAX(classified_at)
+                          FROM wallet_personas
+                          WHERE proxy_wallet = ?1
+                        ) IS NULL THEN 0
+                        WHEN (
+                          SELECT MAX(excluded_at)
+                          FROM wallet_exclusions
+                          WHERE proxy_wallet = ?1
+                        ) IS NULL THEN 1
+                        WHEN (
+                          SELECT MAX(excluded_at)
+                          FROM wallet_exclusions
+                          WHERE proxy_wallet = ?1
+                        ) < (
+                          SELECT MAX(classified_at)
+                          FROM wallet_personas
+                          WHERE proxy_wallet = ?1
+                        ) THEN 1
+                        ELSE 0
+                      END
+                    ",
+                    rusqlite::params![proxy_wallet_check],
+                    |row| row.get(0),
+                )?;
+                Ok(followable == 1)
+            })
+            .await?;
+        if !followable_now {
+            continue;
+        }
+
         let side = match side_s.as_deref() {
             Some("SELL") => Side::Sell,
             _ => Side::Buy,
@@ -1423,6 +1465,134 @@ mod tests {
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                 VALUES
                     (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx1', '{}')
+                ",
+                rusqlite::params!["0xw", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 1);
+
+        let cnt: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+        .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_only_mirrors_followable_wallets_and_backfills_when_becoming_followable()
+    {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xunfollowable"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx_unfollowable', '{}')
+                ",
+                rusqlite::params!["0xunfollowable", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Not followable yet -> no paper trades.
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0);
+
+        let cnt: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt, 0);
+
+        // Become followable -> old (still-unprocessed) trade gets mirrored.
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES (?1, 'CONSISTENT_GENERALIST', 1.0, datetime('now'))",
+                rusqlite::params!["0xunfollowable"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted2 = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted2, 1);
+
+        let cnt2: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt2, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_stops_mirroring_immediately_when_wallet_becomes_excluded() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xw"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES (?1, 'CONSISTENT_GENERALIST', 1.0, datetime('now'))",
+                rusqlite::params!["0xw"],
+            )?;
+
+            // After the first paper trade is inserted, immediately exclude the wallet.
+            // This makes the "stop immediately" requirement deterministic in a unit test.
+            conn.execute_batch(
+                "
+                CREATE TRIGGER exclude_wallet_after_first_paper_trade
+                AFTER INSERT ON paper_trades
+                WHEN NEW.proxy_wallet = '0xw'
+                BEGIN
+                    INSERT OR IGNORE INTO wallet_exclusions
+                        (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                    VALUES
+                        ('0xw', 'STAGE1_TOO_YOUNG', 1.0, 30.0, datetime('now'));
+                END;
+                ",
+            )?;
+
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx1', '{}')
+                ",
+                rusqlite::params!["0xw", "0xcond"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.55, 2, '0xtx2', '{}')
                 ",
                 rusqlite::params!["0xw", "0xcond"],
             )?;
