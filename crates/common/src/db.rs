@@ -20,19 +20,68 @@ impl AsyncDb {
     /// and run migrations — all on the background thread.
     pub async fn open(path: &str) -> Result<Self> {
         let conn = tokio_rusqlite::Connection::open(path).await?;
-        conn.call(|conn| -> std::result::Result<(), rusqlite::Error> {
-            conn.busy_timeout(std::time::Duration::from_secs(30))?;
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-            conn.execute_batch(SCHEMA)?;
-            migrate_markets_is_crypto_15m(conn)
-        })
-        .await
-        .map_err(|e| match e {
-            tokio_rusqlite::Error::Error(err) => {
-                anyhow::Error::from(err).context("AsyncDb::open: migration failed")
+
+        // Startup migrations require a write lock. On production systems we can race with
+        // concurrent readers/writers (web requests, admin sqlite3 sessions, deploy checks).
+        // If we hard-fail on `database is locked`, systemd will crash-loop. Instead we retry
+        // migrations with backoff until the lock clears.
+        //
+        // IMPORTANT: Use a short SQLite busy_timeout per attempt so we can handle backoff in Rust.
+        let mut backoff = std::time::Duration::from_secs(1);
+        let max_backoff = std::time::Duration::from_secs(30);
+        let max_total_wait = std::time::Duration::from_secs(10 * 60);
+        let start = std::time::Instant::now();
+
+        loop {
+            let res = conn
+                .call(|conn| -> std::result::Result<(), rusqlite::Error> {
+                    conn.busy_timeout(std::time::Duration::from_secs(1))?;
+                    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+                    conn.execute_batch(SCHEMA)?;
+                    migrate_markets_is_crypto_15m(conn)?;
+                    // For normal runtime operations we still want a longer busy_timeout.
+                    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+                    Ok(())
+                })
+                .await;
+
+            match res {
+                Ok(()) => break,
+                Err(tokio_rusqlite::Error::Error(err)) => {
+                    let is_locked = matches!(
+                        err,
+                        rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error {
+                                code: rusqlite::ffi::ErrorCode::DatabaseBusy
+                                    | rusqlite::ffi::ErrorCode::DatabaseLocked,
+                                ..
+                            },
+                            _,
+                        )
+                    );
+                    if !is_locked {
+                        return Err(
+                            anyhow::Error::from(err).context("AsyncDb::open: migration failed")
+                        );
+                    }
+
+                    if start.elapsed() >= max_total_wait {
+                        return Err(anyhow::Error::from(err).context(
+                            "AsyncDb::open: migration failed (database stayed locked too long)",
+                        ));
+                    }
+
+                    tracing::warn!(
+                        wait_for = ?backoff,
+                        "AsyncDb::open: database is locked; retrying migrations"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+                Err(other) => return Err(anyhow::anyhow!("AsyncDb::open: {other}")),
             }
-            other => anyhow::anyhow!("AsyncDb::open: {other}"),
-        })?;
+        }
+
         Ok(Self { conn })
     }
 
