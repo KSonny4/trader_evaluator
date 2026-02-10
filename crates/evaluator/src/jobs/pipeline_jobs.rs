@@ -440,19 +440,22 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
     trades: &T,
     cfg: &Config,
 ) -> Result<u64> {
+    let top_n_markets = cfg.market_scoring.top_n_markets as i64;
     let markets: Vec<String> = db
-        .call(|conn| {
+        .call(move |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT condition_id
                 FROM market_scores_daily
                 WHERE score_date = date('now')
                 ORDER BY rank ASC
-                LIMIT 20
+                LIMIT ?1
                 ",
             )?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map(rusqlite::params![top_n_markets], |row| {
+                    row.get::<_, String>(0)
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -771,6 +774,57 @@ mod tests {
         }
     }
 
+    struct PerMarketHoldersFetcher {
+        by_market: std::collections::HashMap<String, Vec<ApiHolderResponse>>,
+    }
+
+    impl HoldersFetcher for PerMarketHoldersFetcher {
+        fn holders_url(&self, condition_id: &str, limit: u32) -> String {
+            format!("https://data-api.polymarket.com/holders?market={condition_id}&limit={limit}")
+        }
+
+        async fn fetch_holders(
+            &self,
+            condition_id: &str,
+            _limit: u32,
+        ) -> Result<(Vec<ApiHolderResponse>, Vec<u8>)> {
+            Ok((
+                self.by_market
+                    .get(condition_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                b"[]".to_vec(),
+            ))
+        }
+    }
+
+    struct PerMarketTradesFetcher {
+        by_market: std::collections::HashMap<String, Vec<ApiTrade>>,
+    }
+
+    impl MarketTradesFetcher for PerMarketTradesFetcher {
+        fn market_trades_url(&self, condition_id: &str, limit: u32, offset: u32) -> String {
+            format!(
+                "https://data-api.polymarket.com/trades?market={condition_id}&limit={limit}&offset={offset}"
+            )
+        }
+
+        async fn fetch_market_trades_page(
+            &self,
+            condition_id: &str,
+            _limit: u32,
+            _offset: u32,
+        ) -> Result<(Vec<ApiTrade>, Vec<u8>)> {
+            Ok((
+                self.by_market
+                    .get(condition_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                b"[]".to_vec(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn test_run_wallet_discovery_inserts_wallets() {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
@@ -897,6 +951,110 @@ mod tests {
             .await
             .unwrap();
         assert!(cnt_wallets >= 2); // holder + trader
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_discovery_respects_top_n_markets() {
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.market_scoring.top_n_markets = 1;
+        cfg.wallet_discovery.min_total_trades = 1;
+
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            // Three markets scored today, with ranks 1..3.
+            conn.execute(
+                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, 1)",
+                rusqlite::params!["0xcond1"],
+            )?;
+            conn.execute(
+                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.8, 2)",
+                rusqlite::params!["0xcond2"],
+            )?;
+            conn.execute(
+                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.7, 3)",
+                rusqlite::params!["0xcond3"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let mut holders_by_market: std::collections::HashMap<String, Vec<ApiHolderResponse>> =
+            std::collections::HashMap::new();
+        for cid in ["0xcond1", "0xcond2", "0xcond3"] {
+            holders_by_market.insert(
+                cid.to_string(),
+                vec![ApiHolderResponse {
+                    token: Some("0xtok".to_string()),
+                    holders: vec![common::types::ApiHolder {
+                        proxy_wallet: Some(format!("0xholder_{cid}")),
+                        amount: Some(123.0),
+                        asset: None,
+                        pseudonym: None,
+                        name: None,
+                        outcome_index: Some(0),
+                    }],
+                }],
+            );
+        }
+
+        let mut trades_by_market: std::collections::HashMap<String, Vec<ApiTrade>> =
+            std::collections::HashMap::new();
+        for cid in ["0xcond1", "0xcond2", "0xcond3"] {
+            trades_by_market.insert(
+                cid.to_string(),
+                vec![ApiTrade {
+                    proxy_wallet: Some(format!("0xtrader_{cid}")),
+                    condition_id: Some(cid.to_string()),
+                    asset: None,
+                    size: Some("1".to_string()),
+                    price: Some("0.5".to_string()),
+                    timestamp: Some(1),
+                    title: None,
+                    slug: None,
+                    outcome: None,
+                    outcome_index: None,
+                    transaction_hash: Some(format!("0xtx_{cid}")),
+                    side: None,
+                    pseudonym: None,
+                    name: None,
+                }],
+            );
+        }
+
+        let holders = PerMarketHoldersFetcher {
+            by_market: holders_by_market,
+        };
+        let trades = PerMarketTradesFetcher {
+            by_market: trades_by_market,
+        };
+
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+            .await
+            .unwrap();
+
+        // top_n_markets=1 => only rank=1 market should be processed (holder + trader).
+        assert_eq!(inserted, 2);
+
+        let cnt_wallets: i64 = db
+            .call(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM wallets", [], |row| row.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(cnt_wallets, 2);
+
+        let cnt_wallets_other_markets: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM wallets WHERE discovered_market IN ('0xcond2', '0xcond3')",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt_wallets_other_markets, 0);
     }
 
     #[tokio::test]
