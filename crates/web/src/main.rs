@@ -83,6 +83,12 @@ fn header_has_cookie_name(headers: &HeaderMap, name: &str) -> bool {
     iter_cookie_pairs(headers).any(|(n, _)| n == name)
 }
 
+fn header_get_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    iter_cookie_pairs(headers)
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| v.to_string())
+}
+
 /// Verify CSRF token from cookie against form submission
 fn verify_csrf_token(headers: &HeaderMap, form_token: &str) -> bool {
     header_has_cookie(headers, CSRF_COOKIE_NAME, form_token)
@@ -200,15 +206,19 @@ async fn index() -> impl IntoResponse {
     Html(DashboardTemplate.to_string())
 }
 
-async fn login_form(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn login_form(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     // If no auth configured, redirect to dashboard
     if state.auth_password.is_none() {
         return Redirect::to("/").into_response();
     }
 
-    // Generate CSRF token and set it in a cookie
-    let csrf_token = generate_csrf_token();
-    let csrf_cookie = format!("{CSRF_COOKIE_NAME}={csrf_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}");
+    // Reuse the CSRF cookie token if it already exists. This prevents multi-tab failures where
+    // opening /login in another tab rotates the CSRF cookie and invalidates the first tab's form.
+    let csrf_token =
+        header_get_cookie_value(&headers, CSRF_COOKIE_NAME).unwrap_or_else(generate_csrf_token);
+    let csrf_cookie = format!(
+        "{CSRF_COOKIE_NAME}={csrf_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}"
+    );
 
     let response = Html(
         LoginTemplate {
@@ -503,21 +513,18 @@ mod tests {
             )
             .await
             .unwrap();
-        let set_cookie = response
-            .headers()
-            .get("set-cookie")
-            .expect("login page must set CSRF cookie")
-            .to_str()
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
             .unwrap();
-        // Parse "evaluator_csrf=<token>; Path=/; ..."
-        set_cookie
-            .split(';')
-            .next()
-            .unwrap()
-            .split_once('=')
-            .unwrap()
-            .1
-            .to_string()
+        let html = String::from_utf8(body_bytes.to_vec()).unwrap();
+        // Parse `name="csrf_token" value="<token>"`
+        let marker = "name=\"csrf_token\" value=\"";
+        let start = html
+            .find(marker)
+            .expect("login page must include hidden csrf_token input")
+            + marker.len();
+        let end = html[start..].find('"').map(|i| start + i).unwrap();
+        html[start..end].to_string()
     }
 
     // --- Auth tests (updated for cookie-based auth) ---
@@ -656,6 +663,89 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(location, "/");
+    }
+
+    #[tokio::test]
+    async fn test_login_repeated_get_does_not_rotate_csrf_token() {
+        let app = create_test_app_with_auth("secret");
+
+        // First tab load.
+        let token1 = get_csrf_token_from_login(&app).await;
+
+        // Second tab load, with the browser sending the previously set cookie.
+        let response2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .header("Cookie", format!("{CSRF_COOKIE_NAME}={token1}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_bytes = axum::body::to_bytes(response2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html2 = String::from_utf8(body_bytes.to_vec()).unwrap();
+        let marker = "name=\"csrf_token\" value=\"";
+        let start = html2.find(marker).unwrap() + marker.len();
+        let end = html2[start..].find('"').map(|i| start + i).unwrap();
+        let token2 = &html2[start..end];
+
+        assert_eq!(token2, token1);
+    }
+
+    #[tokio::test]
+    async fn test_login_succeeds_even_if_user_submits_from_older_tab() {
+        let app = create_test_app_with_auth("secret");
+
+        // Tab A
+        let token_a = get_csrf_token_from_login(&app).await;
+
+        // Tab B (browser sends cookie from Tab A)
+        let response_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .header("Cookie", format!("{CSRF_COOKIE_NAME}={token_a}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let set_cookie_b = response_b
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let cookie_token_b = set_cookie_b
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string();
+
+        // User submits from Tab A while browser cookie jar has whatever Tab B last set.
+        let body = format!("password=secret&csrf_token={token_a}");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Cookie", format!("{CSRF_COOKIE_NAME}={cookie_token_b}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
 
     #[tokio::test]
