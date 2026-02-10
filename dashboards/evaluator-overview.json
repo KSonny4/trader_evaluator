@@ -177,6 +177,34 @@
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" } },
       "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "DB latency p95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(evaluator_db_query_latency_ms_bucket{job=~\"evaluator|evaluator-web\"}[5m])) by (le, job, op))",
+          "legendFormat": "{{job}} {{op}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "DB errors (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "targets": [
+        {
+          "expr": "sum(rate(evaluator_db_query_errors_total{job=~\"evaluator|evaluator-web\"}[5m])) by (job, op)",
+          "legendFormat": "{{job}} {{op}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
     }
   ],
   "refresh": "30s",
@@ -189,5 +217,5 @@
   "timezone": "browser",
   "title": "Trader Evaluator Overview",
   "uid": null,
-  "version": 1
+  "version": 2
 }
