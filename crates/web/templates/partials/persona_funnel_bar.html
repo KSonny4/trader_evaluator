@@ -1,0 +1,22 @@
+<div class="flex items-center gap-2 p-4 bg-gray-900 rounded-lg overflow-x-auto">
+    {% for stage in stages %}
+    <div class="flex-shrink-0 text-center px-4 py-2 rounded {{ stage.bg_color }}">
+        <div class="text-lg font-bold">{{ stage.count }}</div>
+        <div class="text-xs text-gray-400 flex items-center justify-center gap-0.5">
+            <span>{{ stage.label }}</span>
+        </div>
+    </div>
+    {% if !loop.last %}
+    <div class="flex-shrink-0 text-center">
+        <div class="text-gray-600">&rarr;</div>
+        {% match stage.drop_pct %}
+        {% when Some with (pct) %}
+        <div class="text-xs {{ stage.drop_color }}">{{ pct }}</div>
+        {% when None %}
+        <div class="text-xs text-gray-700">-</div>
+        {% endmatch %}
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
+
