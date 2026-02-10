@@ -53,6 +53,8 @@ pub fn install_prometheus(port: u16) -> Result<PrometheusHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     #[test]
     fn test_prometheus_handle_renders_metric_names() {
@@ -68,5 +70,47 @@ mod tests {
 
         let rendered = handle.render();
         assert!(rendered.contains("evaluator_markets_scored_total"));
+    }
+
+    fn free_local_port() -> u16 {
+        // Bind to an ephemeral port to reserve a likely-free port number.
+        // There is a small race between releasing it and our server binding,
+        // but this is acceptable for test purposes.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires opening local TCP sockets; not available in some sandboxed environments.
+    async fn test_install_prometheus_starts_http_listener() {
+        let port = free_local_port();
+
+        // This should start an HTTP listener serving /metrics.
+        let _handle = install_prometheus(port).unwrap();
+
+        // Wait briefly for the listener to come up.
+        let addr = format!("127.0.0.1:{port}");
+        let mut last_err: Option<String> = None;
+        for _ in 0..50 {
+            match TcpStream::connect(&addr).await {
+                Ok(mut stream) => {
+                    stream
+                        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let mut buf = vec![0u8; 1024];
+                    let n = stream.read(&mut buf).await.unwrap();
+                    let s = String::from_utf8_lossy(&buf[..n]);
+                    assert!(s.contains("200") || s.contains("# TYPE"), "response: {s}");
+                    return;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+
+        panic!("metrics listener did not start on {addr}; last_err={last_err:?}");
     }
 }
