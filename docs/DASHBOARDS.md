@@ -11,15 +11,22 @@ Dashboards assume Grafana Cloud datasources with UIDs:
 
 If your stack uses different datasource UIDs, update the JSON once and re-push.
 
+## Reuse Dashboards From `trading` Repo (Optional)
+
+If you keep dashboards in `/Users/petr.kubelka/git_projects/trading/dashboards`, you can reuse them without copying by setting:
+
+- `DASHBOARDS_DIR=/Users/petr.kubelka/git_projects/trading/dashboards`
+
 ## Pushing Dashboards To Grafana Cloud
 
-1. Copy and fill credentials:
-   - `cp .env.agent.example .env.agent`
+1. Provide credentials (either option works):
+   - Option A (recommended): `cp .env.agent.example .env.agent`
+   - Option B: set `GRAFANA_URL` + `GRAFANA_SA_TOKEN` in `.env`
 2. Set:
-   - `GRAFANA_URL`
+   - `GRAFANA_URL` (e.g. `https://your-slug.grafana.net`)
    - `GRAFANA_SA_TOKEN` (Grafana Service Account token with Editor/Admin)
-3. Push:
+3. Push (either works):
    - `source .env.agent && ./deploy/push-dashboards.sh`
+   - `./deploy/push-dashboards.sh` (auto-loads `.env.agent` then `.env`)
 
 `deploy/push-dashboards.sh` uploads dashboards into a Grafana folder named `trader-evaluator`.
-
