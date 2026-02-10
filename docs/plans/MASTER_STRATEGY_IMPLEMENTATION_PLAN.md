@@ -87,6 +87,8 @@
 - [ ] Task 23: WebSocket Book Streaming + Recording
 - [ ] Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)
 
+**See also:** [Paper orderbook verification](paper-orderbook-verification.md) — design for verifying paper fills using a **mini orderbook snapshot** (10–120 s window) after detection, without real-time streaming. Complements Task 22–24 and Strategy Bible §6 fill probability.
+
 **Future (not in current task list):** Promote wallet criteria and Real money transition (Strategy Bible §9) are post–Phase 6 and tracked separately.
 
 ---
