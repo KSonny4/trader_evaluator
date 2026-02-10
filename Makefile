@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean check-file-length
+.PHONY: todo todo-check todo-test
 
 # === Local enforcement ===
 setup-hooks:
@@ -12,6 +13,16 @@ setup-hooks:
 
 skills-sync:
 	./scripts/check_skills_sync.sh
+
+# === TODO guardrails ===
+todo:
+	python3 ./scripts/todo_guard.py list
+
+todo-check:
+	python3 ./scripts/todo_guard.py check
+
+todo-test:
+	python3 -m unittest -q scripts.tests.test_todo_guard
 
 # === Coverage ===
 coverage:
@@ -83,7 +94,9 @@ build-linux:
 	cross build --release --target x86_64-unknown-linux-musl
 
 # === Deploy ===
-SERVER ?= ubuntu@YOUR_SERVER_IP
+# Default deploy target is discovered via AWS (tag Name=trading-bot).
+# Override with `SERVER=ubuntu@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x`.
+SERVER ?= $(shell ./scripts/aws_find_server.sh)
 SSH_KEY ?= ~/git_projects/trading/trading-bot.pem
 REMOTE_DIR ?= /opt/evaluator
 DB = $(REMOTE_DIR)/data/evaluator.db

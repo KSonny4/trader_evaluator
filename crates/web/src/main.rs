@@ -12,6 +12,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use models::{
     ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow, PersonaFunnelStage,
     RankingRow, SystemStatus, TrackingHealth, WalletJourney, WalletOverview, WalletRow,
@@ -22,26 +23,60 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+use tower_http::trace::TraceLayer;
 
 pub struct AppState {
     pub db_path: PathBuf,
     pub auth_password: Option<String>,
     pub funnel_stage_infos: [String; 6],
-    pub prom_handle: metrics_exporter_prometheus::PrometheusHandle,
+    // Used to avoid async runtime starvation when DB reads are slow.
+    pub db_semaphore: Arc<Semaphore>,
+    pub db_timeout: Duration,
+    // Test-only knob to simulate a slow disk / slow sqlite open.
+    pub db_open_delay: Duration,
     pub paper_bankroll_usdc: f64,
     pub max_total_exposure_pct: f64,
     pub max_daily_loss_pct: f64,
-    pub max_concurrent_positions: u32,
+    pub max_concurrent_positions: i64,
 }
 
 /// Open a read-only connection to the evaluator DB.
 /// Each request gets a fresh connection — SQLite WAL handles concurrent reads fine.
 pub fn open_readonly(state: &AppState) -> Result<Connection> {
+    if !state.db_open_delay.is_zero() {
+        std::thread::sleep(state.db_open_delay);
+    }
     let conn = Connection::open_with_flags(
         &state.db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     Ok(conn)
+}
+
+/// Run a DB query without blocking tokio worker threads.
+///
+/// We limit concurrent DB work and apply a timeout to keep the dashboard responsive even under
+/// severe IO pressure.
+async fn with_db<R, F>(state: Arc<AppState>, f: F) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+{
+    let permit = state.db_semaphore.clone().acquire_owned().await?;
+    let timeout = state.db_timeout;
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let conn = open_readonly(&state)?;
+        f(&conn)
+    });
+
+    match tokio::time::timeout(timeout, handle).await {
+        Ok(joined) => joined?,
+        Err(_) => Err(anyhow::anyhow!("db query timed out after {timeout:?}")),
+    }
 }
 
 // --- Cookie-based Auth Middleware ---
@@ -370,64 +405,144 @@ async fn logout() -> impl IntoResponse {
 }
 
 async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let db_path_str = state.db_path.to_str().unwrap_or(":memory:");
-    let status = queries::system_status(&conn, db_path_str).unwrap();
-    Html(StatusStripTemplate { status }.to_string())
+    let db_path_str = state.db_path.to_string_lossy().to_string();
+    match with_db(state.clone(), move |conn| {
+        queries::system_status(conn, &db_path_str)
+    })
+    .await
+    {
+        Ok(status) => Html(StatusStripTemplate { status }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let counts = queries::funnel_counts(&conn).unwrap();
-    let stages = counts.to_stages(&state.funnel_stage_infos);
-    Html(FunnelBarTemplate { stages }.to_string())
+    let funnel_stage_infos = state.funnel_stage_infos.clone();
+    match with_db(state.clone(), move |conn| {
+        let counts = queries::funnel_counts(conn)?;
+        Ok(counts.to_stages(&funnel_stage_infos))
+    })
+    .await
+    {
+        Ok(stages) => Html(FunnelBarTemplate { stages }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn persona_funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let counts = queries::persona_funnel_counts(&conn).unwrap();
-    let stages = counts.to_stages();
-    Html(PersonaFunnelBarTemplate { stages }.to_string())
+    match with_db(state.clone(), move |conn| {
+        let counts = queries::persona_funnel_counts(conn)?;
+        Ok(counts.to_stages())
+    })
+    .await
+    {
+        Ok(stages) => Html(PersonaFunnelBarTemplate { stages }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let markets = queries::top_markets_today(&conn).unwrap();
-    Html(MarketsTemplate { markets }.to_string())
+    match with_db(state.clone(), queries::top_markets_today).await {
+        Ok(markets) => Html(MarketsTemplate { markets }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let overview = queries::wallet_overview(&conn).unwrap();
-    let wallets = queries::recent_wallets(&conn, 20).unwrap();
-    Html(WalletsTemplate { overview, wallets }.to_string())
+    match with_db(state.clone(), move |conn| {
+        let overview = queries::wallet_overview(conn)?;
+        let wallets = queries::recent_wallets(conn, 20)?;
+        Ok((overview, wallets))
+    })
+    .await
+    {
+        Ok((overview, wallets)) => {
+            Html(WalletsTemplate { overview, wallets }.to_string()).into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let health = queries::tracking_health(&conn).unwrap();
-    let stale = queries::stale_wallets(&conn).unwrap();
-    Html(TrackingTemplate { health, stale }.to_string())
+    match with_db(state.clone(), move |conn| {
+        let health = queries::tracking_health(conn)?;
+        let stale = queries::stale_wallets(conn)?;
+        Ok((health, stale))
+    })
+    .await
+    {
+        Ok((health, stale)) => Html(TrackingTemplate { health, stale }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let summary = queries::paper_summary(
-        &conn,
-        state.paper_bankroll_usdc,
-        state.max_total_exposure_pct,
-        state.max_daily_loss_pct,
-        i64::from(state.max_concurrent_positions),
-    )
-    .unwrap();
-    let trades = queries::recent_paper_trades(&conn, 20).unwrap();
-    Html(PaperTemplate { summary, trades }.to_string())
+    let bankroll = state.paper_bankroll_usdc;
+    let max_total_exposure_pct = state.max_total_exposure_pct;
+    let max_daily_loss_pct = state.max_daily_loss_pct;
+    let max_concurrent_positions = state.max_concurrent_positions;
+
+    match with_db(state.clone(), move |conn| {
+        let summary = queries::paper_summary(
+            conn,
+            bankroll,
+            max_total_exposure_pct,
+            max_daily_loss_pct,
+            max_concurrent_positions,
+        )?;
+        let trades = queries::recent_paper_trades(conn, 20)?;
+        Ok((summary, trades))
+    })
+    .await
+    {
+        Ok((summary, trades)) => {
+            Html(PaperTemplate { summary, trades }.to_string()).into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let rankings = queries::top_rankings(&conn, 30, 20).unwrap();
-    Html(RankingsTemplate { rankings }.to_string())
+    match with_db(state.clone(), move |conn| {
+        queries::top_rankings(conn, 30, 20)
+    })
+    .await
+    {
+        Ok(rankings) => Html(RankingsTemplate { rankings }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -443,40 +558,61 @@ async fn excluded_page(
     let page = params.page.unwrap_or(1).max(1);
     let page_size = params.page_size.unwrap_or(50).clamp(1, 200);
     let offset = ((page - 1) * page_size) as usize;
-
-    let conn = open_readonly(&state).unwrap();
-    let total = queries::excluded_wallets_count(&conn).unwrap();
-    let rows = queries::excluded_wallets_latest(&conn, page_size as usize, offset).unwrap();
-
-    let total_pages = ((total + page_size - 1) / page_size).max(1);
-    Html(
-        ExcludedTemplate {
-            rows,
-            total,
-            page,
-            page_size,
-            total_pages,
+    match with_db(state.clone(), move |conn| {
+        let total = queries::excluded_wallets_count(conn)?;
+        let rows = queries::excluded_wallets_latest(conn, page_size as usize, offset)?;
+        Ok((total, rows))
+    })
+    .await
+    {
+        Ok((total, rows)) => {
+            let total_pages = ((total + page_size - 1) / page_size).max(1);
+            Html(
+                ExcludedTemplate {
+                    rows,
+                    total,
+                    page,
+                    page_size,
+                    total_pages,
+                }
+                .to_string(),
+            )
+            .into_response()
         }
-        .to_string(),
-    )
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn journey_page(
     State(state): State<Arc<AppState>>,
     Path(wallet): Path<String>,
 ) -> impl IntoResponse {
-    let conn = open_readonly(&state).unwrap();
-    let Some(journey) = queries::wallet_journey(&conn, &wallet).unwrap() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    Html(JourneyTemplate { journey }.to_string()).into_response()
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_journey(conn, &wallet)
+    })
+    .await
+    {
+        Ok(Some(journey)) => Html(JourneyTemplate { journey }.to_string()).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
 }
 
-async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Opportunistically update derived gauges from SQLite so Grafana can chart drop-offs.
-    // This keeps metrics fresh even if the dashboard UI isn't being opened.
-    if let Ok(conn) = open_readonly(&state) {
-        if let Ok(c) = queries::funnel_counts(&conn) {
+async fn spawn_derived_gauges_updater(state: Arc<AppState>) {
+    // Best-effort: these are derived metrics for UI/Grafana; failures should never take down web.
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+
+        if let Ok(c) = with_db(state.clone(), queries::funnel_counts).await {
             ::metrics::gauge!(
                 "evaluator_pipeline_funnel_stage_count",
                 "stage" => "markets_fetched"
@@ -509,7 +645,7 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
             .set(c.wallets_ranked as f64);
         }
 
-        if let Ok(c) = queries::persona_funnel_counts(&conn) {
+        if let Ok(c) = with_db(state.clone(), queries::persona_funnel_counts).await {
             ::metrics::gauge!(
                 "evaluator_persona_funnel_stage_count",
                 "stage" => "wallets_discovered"
@@ -537,17 +673,6 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
             .set(c.follow_worthy_wallets as f64);
         }
     }
-
-    // Ensure exporter housekeeping runs so histograms don't grow without bound.
-    state.prom_handle.run_upkeep();
-
-    let rendered = state.prom_handle.render();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-    );
-    (headers, rendered)
 }
 
 // --- Router ---
@@ -560,8 +685,7 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", get(logout))
-        .route("/metrics", get(metrics_endpoint));
+        .route("/logout", get(logout));
 
     // Protected routes (auth required if password is set)
     let protected_routes = Router::new()
@@ -581,15 +705,35 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
-    public_routes.merge(protected_routes).with_state(state)
+    public_routes
+        .merge(protected_routes)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     // Load config — use [web] section if present, otherwise defaults
     let config = common::config::Config::load()?;
+
+    let (dispatch, _otel_guard) =
+        common::observability::build_dispatch("evaluator-web", &config.general.log_level);
+    tracing::dispatcher::set_global_default(dispatch).map_err(anyhow::Error::msg)?;
+
+    // Prometheus endpoint for web service health. Alloy scrapes this on localhost:3000.
+    let metrics_addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Prefix("evaluator_".to_string()),
+            &[
+                1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0,
+                10000.0,
+            ],
+        )
+        .map_err(anyhow::Error::from)?
+        .with_http_listener(metrics_addr)
+        .install()
+        .map_err(anyhow::Error::msg)?;
     let db_path = PathBuf::from(&config.database.path);
     let web_port = config.web.as_ref().map_or(8080, |w| w.port);
     let web_host = config
@@ -598,18 +742,22 @@ async fn main() -> Result<()> {
         .map_or("0.0.0.0".to_string(), |w| w.host.clone());
     let auth_password = config.web.as_ref().and_then(|w| w.auth_password.clone());
     let funnel_stage_infos = common::funnel::funnel_stage_infos(&config);
-    let prom_handle = metrics::init_global()?;
+    metrics::init()?;
 
     let state = Arc::new(AppState {
         db_path,
         auth_password,
         funnel_stage_infos,
-        prom_handle,
+        db_semaphore: Arc::new(Semaphore::new(8)),
+        db_timeout: Duration::from_secs(5),
+        db_open_delay: Duration::ZERO,
         paper_bankroll_usdc: config.risk.paper_bankroll_usdc,
         max_total_exposure_pct: config.paper_trading.max_total_exposure_pct,
         max_daily_loss_pct: config.paper_trading.max_daily_loss_pct,
-        max_concurrent_positions: config.risk.max_concurrent_positions,
+        max_concurrent_positions: i64::from(config.risk.max_concurrent_positions),
     });
+
+    tokio::spawn(spawn_derived_gauges_updater(state.clone()));
 
     let app = create_router_with_state(state);
     let addr: SocketAddr = format!("{web_host}:{web_port}").parse()?;
@@ -625,7 +773,53 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use common::db::Database;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
     use tower::ServiceExt;
+
+    #[test]
+    fn test_funnel_info_icon_uses_css_tooltip_data_tip() {
+        let info = "a>=b and \"quoted\"".to_string();
+        let stages = vec![FunnelStage {
+            label: "Markets".to_string(),
+            count: 1,
+            drop_pct: None,
+            bg_color: "bg-gray-800".to_string(),
+            drop_color: String::new(),
+            info,
+        }];
+
+        let html = FunnelBarTemplate { stages }.to_string();
+
+        // We intentionally avoid native `title` tooltips because some environments suppress them.
+        assert!(html.contains("class=\"help-tip"));
+        assert!(html.contains("data-tip=\""));
+        // The funnel bar must not clip tooltips vertically; Tailwind's `overflow-x-auto` sets
+        // `overflow-y: hidden`, so we use a custom scroll class instead.
+        assert!(html.contains("funnel-scroll"));
+        // Ensure the tooltip content is present and HTML-escaped for attributes.
+        assert!(html.contains("a&gt;=b") || html.contains("a&#62;=b"));
+        assert!(
+            html.contains("&quot;quoted&quot;") || html.contains("&#34;quoted&#34;"),
+            "expected quotes to be HTML-escaped in attribute"
+        );
+        // Ensure the help-tip span itself has no `title=...` attribute (avoid native tooltips).
+        let help_tip_start = html
+            .find("class=\"help-tip")
+            .expect("render must include help-tip span");
+        let help_tip_tag_end = html[help_tip_start..]
+            .find('>')
+            .map(|i| help_tip_start + i)
+            .expect("help-tip tag must have a closing '>'");
+        let help_tip_tag = &html[help_tip_start..help_tip_tag_end];
+        assert!(
+            !help_tip_tag.contains("title=\""),
+            "help-tip span should not use native title tooltips"
+        );
+    }
 
     fn create_test_app() -> Router {
         // For tests using partials, we need an in-memory DB with schema.
@@ -642,16 +836,18 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
-        let prom_handle = metrics::init_global().unwrap();
+        metrics::init().unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
-            prom_handle,
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
-            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+            max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
         });
         create_router_with_state(state)
     }
@@ -667,16 +863,45 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
-        let prom_handle = metrics::init_global().unwrap();
+        metrics::init().unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: Some(password.to_string()),
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
-            prom_handle,
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
-            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+            max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+        });
+        create_router_with_state(state)
+    }
+
+    fn create_test_app_with_auth_and_db_delay(password: &str, db_open_delay: Duration) -> Router {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let db = Database::open(path.to_str().unwrap()).unwrap();
+        db.run_migrations().unwrap();
+        drop(db);
+        std::mem::forget(tmp);
+
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        metrics::init().unwrap();
+        let state = Arc::new(AppState {
+            db_path: path,
+            auth_password: Some(password.to_string()),
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay,
+            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
+            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
+            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
+            max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
         });
         create_router_with_state(state)
     }
@@ -713,6 +938,105 @@ mod tests {
     }
 
     // --- Auth tests (updated for cookie-based auth) ---
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_login_not_blocked_by_slow_db_queries() {
+        fn http_get(
+            addr: SocketAddr,
+            path: &str,
+            extra_headers: &[(&str, &str)],
+            timeout: Duration,
+        ) -> std::io::Result<String> {
+            let mut stream = TcpStream::connect(addr)?;
+            stream.set_read_timeout(Some(timeout))?;
+            stream.set_write_timeout(Some(timeout))?;
+
+            let mut req =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
+            for (k, v) in extra_headers {
+                req.push_str(&format!("{k}: {v}\r\n"));
+            }
+            req.push_str("\r\n");
+
+            stream.write_all(req.as_bytes())?;
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf)?;
+            Ok(String::from_utf8_lossy(&buf).to_string())
+        }
+
+        // Run a real server on a dedicated runtime thread, so the requests behave like production:
+        // handlers are polled by the server runtime, not inline in the test future.
+        let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<tokio::sync::oneshot::Sender<()>>();
+
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async move {
+                let app =
+                    create_test_app_with_auth_and_db_delay("secret", Duration::from_millis(400));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
+                addr_tx.send(addr).unwrap();
+                shutdown_tx.send(sd_tx).unwrap();
+
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = sd_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+        });
+
+        let addr = addr_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sd = shutdown_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // Start two DB-backed requests that will occupy tokio worker threads if DB opens happen on them.
+        let cookie = auth_cookie("secret");
+        let addr1 = addr;
+        let addr2 = addr;
+        let cookie1 = cookie.clone();
+        let cookie2 = cookie.clone();
+
+        let h1 = thread::spawn(move || {
+            let _ = http_get(
+                addr1,
+                "/partials/status",
+                &[("Cookie", cookie1.as_str())],
+                Duration::from_secs(2),
+            );
+        });
+        let h2 = thread::spawn(move || {
+            let _ = http_get(
+                addr2,
+                "/partials/status",
+                &[("Cookie", cookie2.as_str())],
+                Duration::from_secs(2),
+            );
+        });
+
+        // Give the server a moment to accept and start processing the partial requests.
+        thread::sleep(Duration::from_millis(25));
+
+        // /login should stay responsive. In the broken implementation this times out (no worker threads left).
+        let login_resp = http_get(addr, "/login", &[], Duration::from_millis(120));
+        assert!(
+            login_resp.is_ok(),
+            "/login timed out while DB partials were in flight"
+        );
+
+        // Cleanup
+        let _ = sd.send(());
+        let _ = h1.join();
+        let _ = h2.join();
+    }
 
     #[tokio::test]
     async fn test_auth_redirects_to_login_without_cookie() {
@@ -1149,92 +1473,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metrics_endpoint_returns_200_and_contains_build_info() {
-        let app = create_test_app();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/metrics")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains("evaluator_web_build_info"));
-    }
-
-    #[tokio::test]
-    async fn test_metrics_exports_persona_funnel_stage_gauges() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        let db = Database::open(path.to_str().unwrap()).unwrap();
-        db.run_migrations().unwrap();
-
-        // Minimal data to produce a non-zero Stage 1 passed count.
-        db.conn
-            .execute(
-                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw1', 'HOLDER', 1)",
-                [],
-            )
-            .unwrap();
-        db.conn
-            .execute(
-                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw2', 'HOLDER', 1)",
-                [],
-            )
-            .unwrap();
-        db.conn
-            .execute(
-                "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold)
-                 VALUES ('0xw1', 'STAGE1_TOO_YOUNG', 5.0, 30.0)",
-                [],
-            )
-            .unwrap();
-
-        drop(db); // close write connection so read-only can open
-        std::mem::forget(tmp); // keep tempfile alive for this test
-
-        let cfg =
-            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
-                .unwrap();
-        let prom_handle = metrics::init_global().unwrap();
-        let state = Arc::new(AppState {
-            db_path: path,
-            auth_password: None,
-            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
-            prom_handle,
-            paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
-            max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
-            max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
-            max_concurrent_positions: cfg.risk.max_concurrent_positions,
-        });
-        let app = create_router_with_state(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/metrics")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains("evaluator_persona_funnel_stage_count"));
-        assert!(text.contains("stage=\"stage1_passed\""));
-    }
-
-    #[tokio::test]
     async fn test_status_partial_returns_200() {
         let app = create_test_app();
         let response = app
@@ -1369,16 +1607,18 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
-        let prom_handle = metrics::init_global().unwrap();
+        metrics::init().unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
-            prom_handle,
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
-            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+            max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
         });
         let app = create_router_with_state(state);
 
@@ -1468,16 +1708,18 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
-        let prom_handle = metrics::init_global().unwrap();
+        metrics::init().unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
-            prom_handle,
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
-            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+            max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
         });
         let app = create_router_with_state(state);
 
@@ -1733,16 +1975,18 @@ mod tests {
         let cfg =
             common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
                 .unwrap();
-        let prom_handle = metrics::init_global().unwrap();
+        metrics::init().unwrap();
         let state = Arc::new(AppState {
             db_path: db_path.into(),
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
-            prom_handle,
+            db_semaphore: Arc::new(Semaphore::new(8)),
+            db_timeout: Duration::from_secs(5),
+            db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
-            max_concurrent_positions: cfg.risk.max_concurrent_positions,
+            max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
         });
         let app = create_router_with_state(state);
 

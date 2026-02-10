@@ -12,6 +12,7 @@ ExecStart=/opt/evaluator/evaluator
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+EnvironmentFile=-/opt/evaluator/.env
 
 # Hardening
 ProtectSystem=strict
@@ -21,4 +22,3 @@ NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
-

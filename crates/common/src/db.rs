@@ -20,19 +20,68 @@ impl AsyncDb {
     /// and run migrations — all on the background thread.
     pub async fn open(path: &str) -> Result<Self> {
         let conn = tokio_rusqlite::Connection::open(path).await?;
-        conn.call(|conn| -> std::result::Result<(), rusqlite::Error> {
-            conn.busy_timeout(std::time::Duration::from_secs(30))?;
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-            conn.execute_batch(SCHEMA)?;
-            migrate_markets_is_crypto_15m(conn)
-        })
-        .await
-        .map_err(|e| match e {
-            tokio_rusqlite::Error::Error(err) => {
-                anyhow::Error::from(err).context("AsyncDb::open: migration failed")
+
+        // Startup migrations require a write lock. On production systems we can race with
+        // concurrent readers/writers (web requests, admin sqlite3 sessions, deploy checks).
+        // If we hard-fail on `database is locked`, systemd will crash-loop. Instead we retry
+        // migrations with backoff until the lock clears.
+        //
+        // IMPORTANT: Use a short SQLite busy_timeout per attempt so we can handle backoff in Rust.
+        let mut backoff = std::time::Duration::from_secs(1);
+        let max_backoff = std::time::Duration::from_secs(30);
+        let max_total_wait = std::time::Duration::from_secs(10 * 60);
+        let start = std::time::Instant::now();
+
+        loop {
+            let res = conn
+                .call(|conn| -> std::result::Result<(), rusqlite::Error> {
+                    conn.busy_timeout(std::time::Duration::from_secs(1))?;
+                    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+                    conn.execute_batch(SCHEMA)?;
+                    migrate_markets_is_crypto_15m(conn)?;
+                    // For normal runtime operations we still want a longer busy_timeout.
+                    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+                    Ok(())
+                })
+                .await;
+
+            match res {
+                Ok(()) => break,
+                Err(tokio_rusqlite::Error::Error(err)) => {
+                    let is_locked = matches!(
+                        err,
+                        rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error {
+                                code: rusqlite::ffi::ErrorCode::DatabaseBusy
+                                    | rusqlite::ffi::ErrorCode::DatabaseLocked,
+                                ..
+                            },
+                            _,
+                        )
+                    );
+                    if !is_locked {
+                        return Err(
+                            anyhow::Error::from(err).context("AsyncDb::open: migration failed")
+                        );
+                    }
+
+                    if start.elapsed() >= max_total_wait {
+                        return Err(anyhow::Error::from(err).context(
+                            "AsyncDb::open: migration failed (database stayed locked too long)",
+                        ));
+                    }
+
+                    tracing::warn!(
+                        wait_for = ?backoff,
+                        "AsyncDb::open: database is locked; retrying migrations"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+                Err(other) => return Err(anyhow::anyhow!("AsyncDb::open: {other}")),
             }
-            other => anyhow::anyhow!("AsyncDb::open: {other}"),
-        })?;
+        }
+
         Ok(Self { conn })
     }
 
@@ -58,6 +107,42 @@ impl AsyncDb {
                 other => anyhow::anyhow!("database error: {other}"),
             },
         )
+    }
+
+    /// Like [`Self::call`], but records Prometheus metrics for DB latency and errors.
+    ///
+    /// This measures the full wall-clock time of the operation, including queueing
+    /// on the dedicated SQLite thread and execution of all SQL in the closure.
+    pub async fn call_named<F, R>(&self, op: &'static str, function: F) -> Result<R>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let start = std::time::Instant::now();
+        let res = self.call(function).await;
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        match &res {
+            Ok(_) => {
+                metrics::histogram!(
+                    "evaluator_db_query_latency_ms",
+                    "op" => op,
+                    "status" => "ok"
+                )
+                .record(ms);
+            }
+            Err(_) => {
+                metrics::histogram!(
+                    "evaluator_db_query_latency_ms",
+                    "op" => op,
+                    "status" => "err"
+                )
+                .record(ms);
+                metrics::counter!("evaluator_db_query_errors_total", "op" => op).increment(1);
+            }
+        }
+
+        res
     }
 }
 
@@ -299,7 +384,7 @@ CREATE TABLE IF NOT EXISTS wallet_personas (
     persona TEXT NOT NULL,             -- Informed Specialist, Consistent Generalist, etc.
     confidence REAL NOT NULL,          -- 0.0 to 1.0
     feature_values_json TEXT,          -- JSON: trade_count, win_rate, unique_markets, etc.
-    classified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    classified_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
     UNIQUE(proxy_wallet, classified_at)
 );
 
@@ -309,20 +394,29 @@ CREATE TABLE IF NOT EXISTS wallet_exclusions (
     reason TEXT NOT NULL,              -- e.g. "tail_risk_seller", "noise_trader", "too_young"
     metric_value REAL,                 -- the actual value that triggered exclusion
     threshold REAL,                    -- the threshold it was compared against
-    excluded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    excluded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
     UNIQUE(proxy_wallet, reason)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_timestamp ON trades_raw(timestamp);
+CREATE INDEX IF NOT EXISTS idx_trades_raw_ingested_at ON trades_raw(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_activity_raw_wallet ON activity_raw(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_activity_raw_ingested_at ON activity_raw(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions_snapshots(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_positions_snapshots_snapshot_at ON positions_snapshots(snapshot_at);
 CREATE INDEX IF NOT EXISTS idx_holders_market ON holders_snapshots(condition_id);
+CREATE INDEX IF NOT EXISTS idx_holders_snapshots_snapshot_at ON holders_snapshots(snapshot_at);
 CREATE INDEX IF NOT EXISTS idx_raw_api_responses_fetched_at ON raw_api_responses(fetched_at);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_wallet ON paper_trades(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_created_at ON paper_trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_triggered_by_trade_id ON paper_trades(triggered_by_trade_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_discovered_at ON wallets(discovered_at);
+CREATE INDEX IF NOT EXISTS idx_market_scores_date_rank ON market_scores_daily(score_date, rank);
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date ON wallet_scores_daily(score_date);
+CREATE INDEX IF NOT EXISTS idx_wallet_scores_date_window_wscore ON wallet_scores_daily(score_date, window_days, wscore DESC);
 CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_exclusions_wallet ON wallet_exclusions(proxy_wallet);
 
@@ -392,6 +486,41 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         db.run_migrations().unwrap();
         db.run_migrations().unwrap(); // second call must not fail
+    }
+
+    #[test]
+    fn test_migrations_create_expected_indexes() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let indexes: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        // These are required for the dashboard and pipeline to remain fast as the DB grows.
+        let expected = [
+            "idx_paper_trades_triggered_by_trade_id",
+            "idx_paper_trades_created_at",
+            "idx_wallets_discovered_at",
+            "idx_wallet_scores_date_window_wscore",
+            "idx_market_scores_date_rank",
+            "idx_trades_raw_ingested_at",
+            "idx_activity_raw_ingested_at",
+            "idx_positions_snapshots_snapshot_at",
+            "idx_holders_snapshots_snapshot_at",
+        ];
+
+        for name in expected {
+            assert!(
+                indexes.contains(&name.to_string()),
+                "missing index {name}; existing indexes: {indexes:?}"
+            );
+        }
     }
 
     #[tokio::test]

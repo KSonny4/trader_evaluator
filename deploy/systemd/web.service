@@ -12,6 +12,7 @@ ExecStart=/opt/evaluator/web
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+EnvironmentFile=-/opt/evaluator/.env
 
 # Hardening
 ProtectSystem=strict
