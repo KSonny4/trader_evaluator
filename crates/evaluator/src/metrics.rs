@@ -46,6 +46,10 @@ pub fn describe() {
         "evaluator_api_requests_total",
         "Number of API requests made."
     );
+    describe_counter!(
+        "evaluator_api_errors_total",
+        "Number of API request failures classified by kind."
+    );
     describe_histogram!(
         "evaluator_api_latency_ms",
         "API request latency in milliseconds."
@@ -61,6 +65,55 @@ pub fn describe() {
     describe_counter!(
         "evaluator_recovery_paper_trades_total",
         "Paper trades processed during startup recovery (after process was killed)."
+    );
+    // Flow visualization (funnel + classification) — current counts for Grafana Canvas/Node Graph
+    describe_gauge!(
+        "evaluator_flow_funnel_markets_fetched",
+        "Funnel: total markets in DB."
+    );
+    describe_gauge!(
+        "evaluator_flow_funnel_markets_scored_today",
+        "Funnel: markets scored today (MScore)."
+    );
+    describe_gauge!(
+        "evaluator_flow_funnel_wallets_discovered",
+        "Funnel: total wallets discovered."
+    );
+    describe_gauge!(
+        "evaluator_flow_funnel_wallets_tracked",
+        "Funnel: active wallets on watchlist."
+    );
+    describe_gauge!(
+        "evaluator_flow_funnel_paper_trades_total",
+        "Funnel: total paper trade rows."
+    );
+    describe_gauge!(
+        "evaluator_flow_funnel_wallets_ranked_today",
+        "Funnel: wallets with WScore today."
+    );
+    describe_gauge!(
+        "evaluator_flow_classification_wallets_tracked",
+        "Classification: active wallets (same as funnel)."
+    );
+    describe_gauge!(
+        "evaluator_flow_classification_stage1_excluded",
+        "Classification: excluded at Stage 1 (fast filters)."
+    );
+    describe_gauge!(
+        "evaluator_flow_classification_stage1_passed",
+        "Classification: passed Stage 1."
+    );
+    describe_gauge!(
+        "evaluator_flow_classification_stage2_followable",
+        "Classification: followable persona at Stage 2."
+    );
+    describe_gauge!(
+        "evaluator_flow_classification_stage2_excluded",
+        "Classification: excluded at Stage 2."
+    );
+    describe_gauge!(
+        "evaluator_flow_classification_stage2_unclassified",
+        "Classification: passed Stage 1, not yet classified at Stage 2."
     );
 }
 
@@ -106,6 +159,47 @@ mod tests {
         let rendered = handle.render();
         assert!(rendered.contains("evaluator_markets_scored_total"));
         assert!(rendered.contains("tracing_error_events"));
+    }
+
+    #[test]
+    fn test_flow_gauges_described_and_recorded_in_prometheus_output() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        describe();
+
+        let counts = crate::flow_metrics::FlowCounts {
+            funnel: crate::flow_metrics::FunnelFlowCounts {
+                markets_fetched: 10,
+                markets_scored_today: 5,
+                wallets_discovered: 100,
+                wallets_tracked: 80,
+                paper_trades_total: 200,
+                wallets_ranked_today: 3,
+            },
+            classification: crate::flow_metrics::ClassificationFlowCounts {
+                wallets_tracked: 80,
+                stage1_excluded: 5,
+                stage1_passed: 75,
+                stage2_followable: 20,
+                stage2_excluded: 2,
+                stage2_unclassified: 53,
+            },
+        };
+
+        metrics::with_local_recorder(&recorder, || {
+            crate::flow_metrics::record_flow_counts(&counts);
+        });
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("evaluator_flow_funnel_markets_fetched"),
+            "flow funnel gauges should appear in Prometheus output"
+        );
+        assert!(
+            rendered.contains("evaluator_flow_classification_stage2_followable"),
+            "flow classification gauges should appear in Prometheus output"
+        );
     }
 
     fn free_local_port() -> u16 {

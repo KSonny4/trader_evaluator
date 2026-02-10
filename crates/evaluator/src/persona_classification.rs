@@ -265,6 +265,14 @@ impl Persona {
     }
 }
 
+/// Personas that are considered followable at Stage 2 (for flow metrics and ranking).
+/// Single source of truth: when adding a followable Persona variant, add it here.
+pub const FOLLOWABLE_PERSONAS: &[Persona] = &[
+    Persona::InformedSpecialist,
+    Persona::ConsistentGeneralist,
+    Persona::PatientAccumulator,
+];
+
 /// Detect the Informed Specialist persona: concentrated positions, high win rate.
 /// Combines active_positions count AND concentration_ratio to identify true specialists.
 /// Returns Some(InformedSpecialist) if criteria are met, None otherwise.
