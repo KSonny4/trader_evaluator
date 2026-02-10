@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _prom_handle = metrics::install_prometheus(config.observability.prometheus_port)?;
+    metrics::install_prometheus(config.observability.prometheus_port)?;
     metrics::describe();
 
     // AsyncDb for the main evaluator process — dedicated background thread for SQLite.
