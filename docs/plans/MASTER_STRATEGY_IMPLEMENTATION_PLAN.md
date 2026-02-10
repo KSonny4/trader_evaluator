@@ -1977,7 +1977,7 @@ Expected: FAIL
 
 **Step 3: Implement**
 
-Add copy fidelity event recording to `mirror_trade_to_paper` — at every exit point (copy or skip), insert a row into `copy_fidelity_events`. Ensure all outcome types are recorded where applicable: SKIPPED_DAILY_LOSS when daily loss limit hit; SKIPPED_MARKET_CLOSED when market already resolved/expired; SKIPPED_DETECTION_LAG when detected too late (price moved beyond threshold). Schema and `record_fidelity_event` must support these outcome strings.
+Add copy fidelity event recording to `mirror_trade_to_paper` — at every exit point (copy or skip), insert a row into `copy_fidelity_events`. Ensure all outcome types are recorded where applicable: SKIPPED_DAILY_LOSS when daily loss limit hit; SKIPPED_MARKET_CLOSED when market already resolved/expired; SKIPPED_DETECTION_LAG when detected too late (book-walked fill price implies slippage beyond our slippage budget; use `slippage_default_cents` as the current budget when orderbook is available). Schema and `record_fidelity_event` must support these outcome strings.
 
 ```rust
 pub fn compute_copy_fidelity(copied: u32, skipped: u32) -> f64 {
