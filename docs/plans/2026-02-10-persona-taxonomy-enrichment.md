@@ -21,6 +21,7 @@ Concrete touchpoints:
 - Master Task 2 (Schema): we add `wallet_persona_traits` (new table).
 - Master Task 3 (Wallet Feature Computation): we add burstiness/two-sidedness/extreme price ratio/category concentration features.
 - Master Stage 2 exclusions: we add new exclusion reasons that are “execution-speed/infrastructure dependent” (A/B/G) and “PnL spike” risky (F).
+- Strategy Bible “Who We Follow”: we surface `TOPIC_LANE=<category>` as a trait and allow an optional “mirror in-lane only” mode for strong lane-specialists.
 
 ## Persona Model (Target)
 

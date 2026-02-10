@@ -54,11 +54,13 @@ Each stage has measurable drop-off rates visible in the UI and Grafana.
 
 Only three personas advance to paper trading. Everything else is excluded.
 
-| Persona | Key Signals | Follow Mode | Trust Level |
-|---------|------------|-------------|-------------|
-| **Informed Specialist** | active_positions ≤ 5, concentration ≥ 60%, win_rate > 60% | Mirror with 5-30s delay | PRIMARY target |
-| **Consistent Generalist** | unique_markets > 20, win_rate 52-60%, low drawdown, Sharpe > 1 | Mirror | SECONDARY |
-| **Patient Accumulator** | avg_hold_time > 48h, large positions (>90th percentile), < 5 trades/week | Mirror with 24h+ delay | SLOW but reliable |
+| Persona | Key Signals | Topic Lane (if detected) | Follow Mode | Trust Level |
+|---------|------------|---------------------------|-------------|-------------|
+| **Informed Specialist** | active_positions ≤ 5, concentration ≥ 60%, win_rate > 60% | If `TOPIC_LANE` exists: prefer mirroring **in-lane** first; expand out-of-lane only if proven | Mirror with 5-30s delay | PRIMARY target |
+| **Consistent Generalist** | unique_markets > 20, win_rate 52-60%, low drawdown, Sharpe > 1 | If `TOPIC_LANE` exists: treat as “generalist with a strong lane” and evaluate per-topic | Mirror | SECONDARY |
+| **Patient Accumulator** | avg_hold_time > 48h, large positions (>90th percentile), < 5 trades/week | If `TOPIC_LANE` exists: copy only in-lane unless out-of-lane performance is comparable | Mirror with 24h+ delay | SLOW but reliable |
+
+**Topic lane definition:** A wallet’s “lane” is the dominant market category they trade (e.g. politics/Trump, sports/football). Lane is a **trait** (`TOPIC_LANE=<category>`), not a persona. We use it to avoid copying a specialist outside their proven domain.
 
 ### Classification thresholds (configurable in `default.toml`)
 
