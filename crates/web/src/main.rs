@@ -58,20 +58,34 @@ fn generate_csrf_token() -> String {
     hex::encode(token)
 }
 
-/// Verify CSRF token from cookie against form submission
-fn verify_csrf_token(headers: &HeaderMap, form_token: &str) -> bool {
-    // Some proxies/clients can send multiple Cookie headers (especially with many cookies).
-    // Hyper/Axum preserves them as multiple header values, so we must scan them all.
-    let expected = format!("{CSRF_COOKIE_NAME}={form_token}");
+/// Iterate all cookie name/value pairs from (possibly multiple) Cookie headers.
+///
+/// Note: Some HTTP/2 intermediaries incorrectly join multiple Cookie headers using commas. We
+/// accept both `;` and `,` separators to be robust in the presence of such proxies.
+fn iter_cookie_pairs(headers: &HeaderMap) -> impl Iterator<Item = (&str, &str)> + '_ {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|cookie_header: &header::HeaderValue| cookie_header.to_str().ok())
-        .any(|cookie_str: &str| {
-            cookie_str
-                .split(';')
-                .any(|cookie: &str| cookie.trim() == expected)
+        .flat_map(|cookie_str: &str| cookie_str.split([';', ',']))
+        .filter_map(|cookie: &str| {
+            let cookie = cookie.trim();
+            let (name, value) = cookie.split_once('=')?;
+            Some((name.trim(), value.trim()))
         })
+}
+
+fn header_has_cookie(headers: &HeaderMap, name: &str, expected_value: &str) -> bool {
+    iter_cookie_pairs(headers).any(|(n, v)| n == name && v == expected_value)
+}
+
+fn header_has_cookie_name(headers: &HeaderMap, name: &str) -> bool {
+    iter_cookie_pairs(headers).any(|(n, _)| n == name)
+}
+
+/// Verify CSRF token from cookie against form submission
+fn verify_csrf_token(headers: &HeaderMap, form_token: &str) -> bool {
+    header_has_cookie(headers, CSRF_COOKIE_NAME, form_token)
 }
 
 /// Constant-time comparison to prevent timing attacks
@@ -100,17 +114,7 @@ async fn auth_middleware(
 
     // Check auth cookie
     let auth_token = generate_auth_token(state.auth_password.as_ref().unwrap());
-    let is_authenticated = request
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|cookie_header: &header::HeaderValue| cookie_header.to_str().ok())
-        .is_some_and(|cookie_str: &str| {
-            cookie_str.split(';').any(|cookie: &str| {
-                let cookie = cookie.trim();
-                cookie.starts_with(&format!("{AUTH_COOKIE_NAME}="))
-                    && cookie == format!("{AUTH_COOKIE_NAME}={auth_token}")
-            })
-        });
+    let is_authenticated = header_has_cookie(request.headers(), AUTH_COOKIE_NAME, &auth_token);
 
     if is_authenticated {
         next.run(request).await
@@ -244,13 +248,7 @@ async fn login_submit(
     if !verify_csrf_token(&headers, &form.csrf_token) {
         let cookie_headers = headers.get_all(header::COOKIE);
         let has_cookie = cookie_headers.iter().next().is_some();
-        let has_csrf_cookie = cookie_headers
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .any(|s| {
-                s.split(';')
-                    .any(|c| c.trim().starts_with(&format!("{CSRF_COOKIE_NAME}=")))
-            });
+        let has_csrf_cookie = header_has_cookie_name(&headers, CSRF_COOKIE_NAME);
         tracing::debug!(
             has_cookie,
             has_csrf_cookie,
@@ -630,6 +628,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_login_with_comma_joined_cookie_header_succeeds() {
+        let app = create_test_app_with_auth("secret");
+        let csrf_token = get_csrf_token_from_login(&app).await;
+        let body = format!("password=secret&csrf_token={csrf_token}");
+        // Some proxies improperly join Cookie headers using commas instead of semicolons.
+        let cookie = format!("{CSRF_COOKIE_NAME}={csrf_token}, foo=bar");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .method("POST")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Cookie", cookie)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(location, "/");
+    }
+
+    #[tokio::test]
     async fn test_login_with_wrong_password_shows_error() {
         let app = create_test_app_with_auth("secret");
         let csrf_token = get_csrf_token_from_login(&app).await;
@@ -759,6 +788,23 @@ mod tests {
                 Request::builder()
                     .uri("/")
                     .header("Cookie", auth_cookie("secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_access_with_auth_cookie_comma_joined_succeeds() {
+        let app = create_test_app_with_auth("secret");
+        let cookie = format!("{}, foo=bar", auth_cookie("secret"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Cookie", cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
