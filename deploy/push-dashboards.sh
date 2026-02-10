@@ -14,11 +14,36 @@ set -euo pipefail
 # does NOT have permissions to manage dashboards.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARDS_DIR="$SCRIPT_DIR/../dashboards"
 FOLDER_TITLE="trader-evaluator"
 
-: "${GRAFANA_URL:?Set GRAFANA_URL to your Grafana Cloud instance URL (e.g. https://meowlabs.grafana.net)}"
-: "${GRAFANA_SA_TOKEN:?Set GRAFANA_SA_TOKEN to a Grafana Service Account token with Editor role}"
+# Convenience: allow running without manually sourcing env files.
+# Prefer .env.agent, fallback to .env. Both are optional.
+if [ -z "${GRAFANA_URL:-}" ] || [ -z "${GRAFANA_SA_TOKEN:-}" ]; then
+  if [ -f "$PROJECT_DIR/.env.agent" ]; then
+    # shellcheck disable=SC1091
+    source "$PROJECT_DIR/.env.agent"
+  elif [ -f "$PROJECT_DIR/.env" ]; then
+    # .env commonly contains KEY=VALUE (not exported); export while sourcing.
+    set -a
+    # shellcheck disable=SC1091
+    source "$PROJECT_DIR/.env"
+    set +a
+  fi
+fi
+
+if [ -z "${GRAFANA_URL:-}" ]; then
+  echo "ERROR: GRAFANA_URL is not set (e.g. https://your-slug.grafana.net)" >&2
+  echo "Tip: cp .env.agent.example .env.agent && edit it, then run: source .env.agent && ./deploy/push-dashboards.sh" >&2
+  exit 1
+fi
+
+if [ -z "${GRAFANA_SA_TOKEN:-}" ]; then
+  echo "ERROR: GRAFANA_SA_TOKEN is not set (Grafana Service Account token, Editor/Admin)" >&2
+  echo "Tip: this is NOT GRAFANA_CLOUD_API_KEY. Create a Grafana Service Account token and set GRAFANA_SA_TOKEN." >&2
+  exit 1
+fi
 
 GRAFANA_URL="${GRAFANA_URL%/}"
 
@@ -107,4 +132,3 @@ if [ "$ERRORS" -gt 0 ]; then
 fi
 
 echo "All dashboards pushed successfully"
-

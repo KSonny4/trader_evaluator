@@ -27,7 +27,7 @@ What `deploy/deploy.sh` does (high level):
 3. Uploads `config/default.toml` (and `.env` if present).
 4. Installs systemd units.
 5. If `.env` contains `GRAFANA_CLOUD*`, installs `/etc/alloy/config.alloy` and injects env vars into `/etc/default/alloy`, then restarts Alloy.
-6. If `.env.agent` provides `GRAFANA_URL` + `GRAFANA_SA_TOKEN`, pushes dashboards.
+6. If `GRAFANA_URL` + `GRAFANA_SA_TOKEN` are available (from `.env.agent` or `.env`), pushes dashboards.
 7. Restarts `evaluator` + `web`.
 
 ## Common Paths (Server)
@@ -37,4 +37,3 @@ What `deploy/deploy.sh` does (high level):
 - Data: `/opt/evaluator/data/evaluator.db`
 - Alloy config: `/etc/alloy/config.alloy`
 - Alloy env: `/etc/default/alloy`
-
