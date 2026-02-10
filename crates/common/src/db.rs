@@ -316,13 +316,22 @@ CREATE TABLE IF NOT EXISTS wallet_exclusions (
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_timestamp ON trades_raw(timestamp);
+CREATE INDEX IF NOT EXISTS idx_trades_raw_ingested_at ON trades_raw(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_activity_raw_wallet ON activity_raw(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_activity_raw_ingested_at ON activity_raw(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions_snapshots(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_positions_snapshots_snapshot_at ON positions_snapshots(snapshot_at);
 CREATE INDEX IF NOT EXISTS idx_holders_market ON holders_snapshots(condition_id);
+CREATE INDEX IF NOT EXISTS idx_holders_snapshots_snapshot_at ON holders_snapshots(snapshot_at);
 CREATE INDEX IF NOT EXISTS idx_raw_api_responses_fetched_at ON raw_api_responses(fetched_at);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_wallet ON paper_trades(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_created_at ON paper_trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_triggered_by_trade_id ON paper_trades(triggered_by_trade_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_discovered_at ON wallets(discovered_at);
+CREATE INDEX IF NOT EXISTS idx_market_scores_date_rank ON market_scores_daily(score_date, rank);
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date ON wallet_scores_daily(score_date);
+CREATE INDEX IF NOT EXISTS idx_wallet_scores_date_window_wscore ON wallet_scores_daily(score_date, window_days, wscore DESC);
 CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_exclusions_wallet ON wallet_exclusions(proxy_wallet);
 
@@ -392,6 +401,41 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         db.run_migrations().unwrap();
         db.run_migrations().unwrap(); // second call must not fail
+    }
+
+    #[test]
+    fn test_migrations_create_expected_indexes() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let indexes: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        // These are required for the dashboard and pipeline to remain fast as the DB grows.
+        let expected = [
+            "idx_paper_trades_triggered_by_trade_id",
+            "idx_paper_trades_created_at",
+            "idx_wallets_discovered_at",
+            "idx_wallet_scores_date_window_wscore",
+            "idx_market_scores_date_rank",
+            "idx_trades_raw_ingested_at",
+            "idx_activity_raw_ingested_at",
+            "idx_positions_snapshots_snapshot_at",
+            "idx_holders_snapshots_snapshot_at",
+        ];
+
+        for name in expected {
+            assert!(
+                indexes.contains(&name.to_string()),
+                "missing index {name}; existing indexes: {indexes:?}"
+            );
+        }
     }
 
     #[tokio::test]
