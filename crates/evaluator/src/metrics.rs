@@ -41,6 +41,10 @@ pub fn describe() {
         "evaluator_risk_violations_total",
         "Number of risk rule violations."
     );
+    describe_counter!(
+        "evaluator_recovery_paper_trades_total",
+        "Paper trades processed during startup recovery (after process was killed)."
+    );
 }
 
 pub fn install_prometheus(port: u16) -> Result<PrometheusHandle> {

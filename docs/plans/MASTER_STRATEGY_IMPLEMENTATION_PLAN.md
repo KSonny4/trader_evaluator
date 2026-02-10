@@ -65,6 +65,20 @@
 
 ---
 
+## Execution interface (paper vs live)
+
+**Design principle:** The paper trading client and the live trading client must implement the **same interface**. The pipeline (decision logic, risk checks, what to copy) should not depend on whether execution is paper or real — it calls one abstraction and gets back success or skip reason.
+
+- **Shared:** Decision input (condition_id, side, size, limit price, fee, wallet, triggered_by_trade_id). All risk checks (portfolio stop, daily cap, exposure, slippage, fee) run before calling the executor. The caller does not know if the executor is paper or live.
+- **Same interface (e.g. trait `MirrorExecutor`):** One method such as `execute_trade(request: ExecuteTradeRequest) -> Result<ExecuteTradeResult, ExecuteError>`. Same request/response shape for both.
+- **Two implementations:**
+  - **Paper:** Writes to `paper_trades` and `paper_positions`; "fill" is immediate; settlement via `settle_paper_trades_for_market` when market resolves.
+  - **Live:** Calls CLOB API (place order), returns order id, tracks fills and real settlement.
+
+Refactor when introducing real execution: extract the current `mirror_trade_to_paper` logic into (1) a **decision** function that returns an `ExecuteTradeRequest` or skip reason, and (2) a **PaperExecutor** that implements the executor trait. Then add **LiveExecutor** implementing the same trait. The pipeline invokes the executor via the trait only.
+
+---
+
 ## Task 1: Config — Add Persona, Risk, Copy Fidelity, and Anomaly Config Sections
 
 **Files:**

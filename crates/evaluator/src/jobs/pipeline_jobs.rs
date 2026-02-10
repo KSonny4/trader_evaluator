@@ -102,6 +102,18 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     Ok(inserted)
 }
 
+/// Run once at startup to recover work that may have been in progress when the process
+/// was killed. Processes any unprocessed trades into paper trades (idempotent).
+/// Ingestion jobs are already idempotent (INSERT OR IGNORE / UNIQUE) so the next
+/// scheduled run will catch up; we only run paper_tick here to keep startup fast.
+pub async fn run_recovery_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    let n = run_paper_tick_once(db, cfg).await?;
+    if n > 0 {
+        metrics::counter!("evaluator_recovery_paper_trades_total").increment(n);
+    }
+    Ok(n)
+}
+
 pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     struct ScoreRow {
         proxy_wallet: String,
@@ -961,5 +973,13 @@ mod tests {
             .await
             .unwrap();
         assert!(cnt > 0);
+    }
+
+    #[tokio::test]
+    async fn test_recovery_once_empty_db_returns_zero() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        let n = run_recovery_once(&db, &cfg).await.unwrap();
+        assert_eq!(n, 0, "recovery with no unprocessed trades should process 0");
     }
 }
