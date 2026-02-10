@@ -55,3 +55,11 @@ Key vars:
    - Loki shows `unit=evaluator.service` and `unit=evaluator-web.service`
    - Tempo shows services `evaluator` and `evaluator-web`
 
+## Suggested Alerts
+
+Create a Grafana alert rule based on API error *kinds*:
+
+- Query (errors/min, 5m window): `sum(rate(evaluator_api_errors_total{kind!="pagination_offset_cap"}[5m])) * 60`
+- Suggested trigger: `> 1` for `10m`
+
+Rationale: we exclude `pagination_offset_cap` because it indicates a known upstream pagination limit, not an availability incident.

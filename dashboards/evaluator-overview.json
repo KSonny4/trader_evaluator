@@ -205,6 +205,20 @@
       ],
       "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+    },
+    {
+      "title": "API Errors / min (by kind)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 42 },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(evaluator_api_errors_total[5m])) * 60",
+          "legendFormat": "{{kind}}",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
     }
   ],
   "refresh": "30s",
