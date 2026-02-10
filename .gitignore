@@ -15,3 +15,6 @@ data/
 # Local tool configurations
 .gemini/
 .opencode/
+
+# Python
+__pycache__/

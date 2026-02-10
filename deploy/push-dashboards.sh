@@ -15,10 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# Allow overriding dashboards location (e.g. reuse dashboards from another repo).
-DASHBOARDS_DIR_DEFAULT="$SCRIPT_DIR/../dashboards"
-DASHBOARDS_DIR="${DASHBOARDS_DIR:-$DASHBOARDS_DIR_DEFAULT}"
-FOLDER_TITLE="trader-evaluator"
+FOLDER_TITLE="${GRAFANA_FOLDER_TITLE:-trader-evaluator}"
 
 # Convenience: allow running without manually sourcing env files.
 # Prefer .env.agent, fallback to .env. Both are optional.
@@ -34,6 +31,18 @@ if [ -z "${GRAFANA_URL:-}" ] || [ -z "${GRAFANA_SA_TOKEN:-}" ]; then
     set +a
   fi
 fi
+
+DEFAULT_DASHBOARDS_DIR="$SCRIPT_DIR/../dashboards"
+# Prevent accidental cross-project uploads (e.g. exporting DASHBOARDS_DIR from another repo).
+# If you really want to override, set ALLOW_DASHBOARDS_DIR_OVERRIDE=1 explicitly.
+if [ -n "${DASHBOARDS_DIR:-}" ] && [ "${ALLOW_DASHBOARDS_DIR_OVERRIDE:-}" != "1" ]; then
+  echo "WARNING: DASHBOARDS_DIR is set but override is disabled; ignoring it to avoid cross-project dashboard uploads." >&2
+  echo "  DASHBOARDS_DIR=$DASHBOARDS_DIR" >&2
+  echo "  Using default: $DEFAULT_DASHBOARDS_DIR" >&2
+  unset DASHBOARDS_DIR
+fi
+
+DASHBOARDS_DIR="${DASHBOARDS_DIR:-$DEFAULT_DASHBOARDS_DIR}"
 
 if [ -z "${GRAFANA_URL:-}" ]; then
   echo "ERROR: GRAFANA_URL is not set (e.g. https://your-slug.grafana.net)" >&2
