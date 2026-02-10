@@ -83,7 +83,9 @@ build-linux:
 	cross build --release --target x86_64-unknown-linux-musl
 
 # === Deploy ===
-SERVER ?= ubuntu@YOUR_SERVER_IP
+# Default deploy target is discovered via AWS (tag Name=trading-bot).
+# Override with `SERVER=ubuntu@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x`.
+SERVER ?= $(shell ./scripts/aws_find_server.sh)
 SSH_KEY ?= ~/git_projects/trading/trading-bot.pem
 REMOTE_DIR ?= /opt/evaluator
 DB = $(REMOTE_DIR)/data/evaluator.db
