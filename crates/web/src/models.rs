@@ -24,6 +24,8 @@ pub struct FunnelStage {
     pub bg_color: String,
     /// Tailwind text color class for drop-off
     pub drop_color: String,
+    /// Tooltip text: code-derived criteria and what this stage represents
+    pub info: String,
 }
 
 /// A job heartbeat for the status strip
@@ -145,7 +147,7 @@ pub fn shorten_wallet(addr: &str) -> String {
 }
 
 impl FunnelCounts {
-    pub fn to_stages(&self) -> Vec<FunnelStage> {
+    pub fn to_stages(&self, infos: &[String]) -> Vec<FunnelStage> {
         let pairs = [
             ("Markets", self.markets_fetched, self.markets_scored),
             ("Scored", self.markets_scored, self.wallets_discovered),
@@ -154,6 +156,11 @@ impl FunnelCounts {
             ("Paper", self.paper_trades_total, self.wallets_ranked),
             ("Ranked", self.wallets_ranked, 0),
         ];
+        debug_assert_eq!(
+            pairs.len(),
+            infos.len(),
+            "funnel stages and infos must stay in sync; add an info string for each stage"
+        );
 
         pairs
             .iter()
@@ -186,6 +193,7 @@ impl FunnelCounts {
                     drop_pct,
                     bg_color: bg.to_string(),
                     drop_color,
+                    info: infos[i].clone(),
                 }
             })
             .collect()
@@ -212,13 +220,38 @@ mod tests {
             paper_trades_total: 5,
             wallets_ranked: 3,
         };
-        let stages = counts.to_stages();
+        let infos = vec!["x".to_string(); 6];
+        let stages = counts.to_stages(&infos);
         assert_eq!(stages.len(), 6);
         assert_eq!(stages[0].label, "Markets");
         assert_eq!(stages[0].count, 100);
         // 20/100 = 20%
         assert_eq!(stages[0].drop_pct.as_deref(), Some("20.0%"));
         assert_eq!(stages[0].drop_color, "text-yellow-400");
+        assert!(!stages[0].info.is_empty());
+    }
+
+    #[test]
+    fn test_funnel_stages_have_info_tooltips() {
+        let counts = FunnelCounts {
+            markets_fetched: 1,
+            markets_scored: 1,
+            wallets_discovered: 1,
+            wallets_active: 1,
+            paper_trades_total: 1,
+            wallets_ranked: 1,
+        };
+        let infos = vec!["x".to_string(); 6];
+        let stages = counts.to_stages(&infos);
+        assert_eq!(stages.len(), infos.len());
+        for (i, stage) in stages.iter().enumerate() {
+            assert!(
+                !stage.info.is_empty(),
+                "stage {} ({}) must have non-empty info",
+                i,
+                stage.label
+            );
+        }
     }
 
     #[test]
@@ -231,7 +264,8 @@ mod tests {
             paper_trades_total: 0,
             wallets_ranked: 0,
         };
-        let stages = counts.to_stages();
+        let infos = vec!["x".to_string(); 6];
+        let stages = counts.to_stages(&infos);
         // Zero count => no drop-off
         assert!(stages[0].drop_pct.is_none());
     }
@@ -246,7 +280,8 @@ mod tests {
             paper_trades_total: 1,
             wallets_ranked: 1,
         };
-        let stages = counts.to_stages();
+        let infos = vec!["x".to_string(); 6];
+        let stages = counts.to_stages(&infos);
         assert!(stages.last().unwrap().drop_pct.is_none());
     }
 }

@@ -96,12 +96,22 @@ trader_evaluator/
 
 ## Reference implementations
 
+See `docs/ARCHITECTURE.md` for runtime and orchestration (current and target).
+
 This project applies proven Polymarket patterns from production systems. Key architectural patterns include:
 - SQLite append-only storage with WAL mode for concurrent reads/writes
 - Tokio-based async jobs with configurable scheduling
 - Prometheus metrics for observability
 - Cross-compiled musl binaries for zero-dependency deployment
 - Systemd service management on AWS t3.micro
+
+## Durability and recovery
+
+The implementation is **durable** (each unit of work is committed in a transaction) and **recoverable** (after a sudden kill, the next run catches up).
+
+- **Paper trading:** Each mirror decision runs in a single SQLite transaction (insert `paper_trades` + upsert `paper_positions`). If the process is killed mid-transaction, that transaction is rolled back; at most one trade is lost until the next run. Processing is idempotent per source trade (keyed by `triggered_by_trade_id`).
+- **Ingestion:** `trades_raw` and `activity_raw` use `INSERT OR IGNORE` with UNIQUE constraints, so re-running after a kill does not duplicate rows. Positions and holders snapshots are append-only; re-run may add duplicate snapshot rows for the same time (acceptable).
+- **Startup recovery:** Before the scheduler starts, the evaluator runs **recovery** once: it processes any unprocessed `trades_raw` into paper trades (same logic as the periodic paper_tick job). So work that was in progress when the process was killed is completed on the next boot. Metric: `evaluator_recovery_paper_trades_total`.
 
 ## Data saving and replay
 
@@ -156,7 +166,16 @@ Every wallet is classified into a persona before paper-trading. This is the gate
 | **Tail Risk Seller** | NO | 80%+ win rate, occasional massive blowup | Will destroy you |
 | **Noise Trader** | NO | High churn, no statistical edge | No signal |
 | **Sniper/Insider** | AVOID | New wallet, suspicious timing, clustered entries | Adversarial |
+| **News Sniper** | AVOID | Ultra-short edge, bursty timing | Not copyable with delay |
+| **Liquidity Provider / Market Maker** | AVOID | Two-sided flow, execution edge | Fill/latency dependent |
+| **Jackpot Gambler** | AVOID | PnL concentrated in few trades | Not stable / not repeatable |
+| **Bot Swarm / Micro-trader** | AVOID | Extreme frequency, micro sizing | Infra-dependent |
 | **Sybil Cluster** | AVOID | Correlated trades, shared funding chain | Fake signal |
+
+**Persona traits (stored separately):**
+- `TOPIC_LANE=<category>`: domain specialist lane (copy only inside that lane).
+- `BONDER=1`: high-probability grinder (often copyable at longer delays).
+- `WHALE=1`: large sizing / slow accumulation (model impact carefully).
 
 **Obscurity bonus:** Wallets NOT on public leaderboards get 1.2x WScore multiplier (fewer copiers = less front-running = better fills).
 

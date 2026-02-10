@@ -41,7 +41,7 @@ pub fn funnel_stage_infos(cfg: &Config) -> [String; 6] {
         fmt_f64(cfg.risk.max_exposure_per_market_pct),
         fmt_f64(cfg.risk.max_exposure_per_wallet_pct),
         cfg.risk.max_daily_trades,
-        fmt_f64(cfg.risk.portfolio_stop_drawdown_pct)
+        fmt_f64(cfg.risk.portfolio_stop_drawdown_pct),
     );
 
     let windows = cfg

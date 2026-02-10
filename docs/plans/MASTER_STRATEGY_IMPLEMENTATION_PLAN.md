@@ -16,6 +16,16 @@
 
 **Development setup:** When working on plan tasks, create a worktree from main: `make worktree NAME=<feature-name>`, then `cd .worktrees/<feature-name>`. Do not commit to main. After merge, run `make worktree-clean NAME=<feature-name>`.
 
+**Architecture guidance (paper fast path + saga):** See `docs/ARCHITECTURE.md` for current vs target runtime, and `docs/plans/2026-02-10-paper-fast-path-and-saga.md` for a concrete implementation plan that keeps paper trading low-latency and saga-driven (even before live trading).
+
+## Related Plans
+
+- Persona taxonomy enrichment (A–G copyability styles): `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
+  - Extends our current persona/exclusion model with additional styles (news sniper, liquidity provider, jackpot gambler, bot swarm) and adds trait-labeling (topic lane, bonder, whale).
+  - Touches/extends work from Phase 1 tasks (wallet features + exclusions) and is easiest to execute once Task 12 (classification orchestrator) is wired so the new labels show up automatically.
+- Paper fast path + saga (paper trading runtime robustness): `docs/plans/2026-02-10-paper-fast-path-and-saga.md`
+  - Turns `docs/ARCHITECTURE.md` guidance into implementable steps: fast-path triggering, coalescing, durable paper event log, and saga-like idempotency.
+
 ---
 
 ## Progress
@@ -53,6 +63,20 @@
 - [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
 - [ ] Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
 - [ ] Task 29: Wallet scorecard screen (per-wallet detail page)
+- [ ] Task 30: Bagholding Risk Flag (win rate bias from open losing positions)
+- [ ] Task 31: Adjusted Win Rate (penalize open losing positions)
+- [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
+  - Implement `TOPIC_LANE` trait computation + storage.
+  - Add per-topic ranking surfaces (at least “overall vs in-lane”), and support an optional “mirror in-lane only” follow mode for lane-specialists.
+  - Timing: do Task 32 **after Task 12** (classification job wired), and ideally after Task 18 (WScore components) so lane scoring has real inputs.
+
+### 📌 Phase 2.5: Paper Runtime Robustness (Tasks 33-36) — PLANNED
+*Goal: make paper trading fast (near-real-time) and resilient (saga-like), without splitting into multiple processes yet.*
+
+- [ ] Task 33: Paper Fast Path Triggering + Tick Coalescing (react immediately to new trades)
+- [ ] Task 34: Paper Trading Saga (persisted state machine + idempotency)
+- [ ] Task 35: Paper Events Table (durable audit log of risk gates, skips, and decisions)
+- [ ] Task 36: Backpressure + Latency Metrics for Paper/Live-Critical Paths
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*
@@ -62,6 +86,20 @@
 - [ ] Task 24: Depth-Aware Paper Trading (Book-Walking Slippage)
 
 **Future (not in current task list):** Promote wallet criteria and Real money transition (Strategy Bible §9) are post–Phase 6 and tracked separately.
+
+---
+
+## Execution interface (paper vs live)
+
+**Design principle:** The paper trading client and the live trading client must implement the **same interface**. The pipeline (decision logic, risk checks, what to copy) should not depend on whether execution is paper or real — it calls one abstraction and gets back success or skip reason.
+
+- **Shared:** Decision input (condition_id, side, size, limit price, fee, wallet, triggered_by_trade_id). All risk checks (portfolio stop, daily cap, exposure, slippage, fee) run before calling the executor. The caller does not know if the executor is paper or live.
+- **Same interface (e.g. trait `MirrorExecutor`):** One method such as `execute_trade(request: ExecuteTradeRequest) -> Result<ExecuteTradeResult, ExecuteError>`. Same request/response shape for both.
+- **Two implementations:**
+  - **Paper:** Writes to `paper_trades` and `paper_positions`; "fill" is immediate; settlement via `settle_paper_trades_for_market` when market resolves.
+  - **Live:** Calls CLOB API (place order), returns order id, tracks fills and real settlement.
+
+Refactor when introducing real execution: extract the current `mirror_trade_to_paper` logic into (1) a **decision** function that returns an `ExecuteTradeRequest` or skip reason, and (2) a **PaperExecutor** that implements the executor trait. Then add **LiveExecutor** implementing the same trait. The pipeline invokes the executor via the trait only.
 
 ---
 
@@ -3644,9 +3682,162 @@ git commit -am "feat: depth-aware paper trading — book-walking slippage with f
 
 ---
 
+## Task 30: Bagholding Risk Flag (Win Rate Bias From Open Losing Positions)
+
+**Problem:** Community analysis shows many wallets keep losing positions open (never realize the loss), so their apparent win rate is artificially high.
+
+**Goal:** Add an auditable risk flag `BAGHOLDING_WINRATE_BIAS` driven by latest `positions_snapshots` and use it to reduce persona confidence and surface a badge in the web UI. Do not hard-exclude wallets in this task.
+
+**Files:**
+- Modify: `crates/common/src/db.rs`
+- Modify: `crates/common/src/config.rs`
+- Modify: `config/default.toml`
+- Modify: `crates/evaluator/src/wallet_features.rs`
+- Modify: `crates/evaluator/src/persona_classification.rs`
+- Modify: `crates/web/src/queries.rs`
+- Modify: `crates/web/src/models.rs`
+- Modify: `crates/web/templates/partials/rankings.html` (and/or `partials/wallets.html`)
+
+**Defaults (configurable):**
+- Losing open position definition: `cash_pnl <= -1.0`
+- Flag if `raw_win_rate >= 0.65` AND (`open_losing_positions_count >= 3` OR `open_unrealized_loss_usd_total <= -50.0`)
+- Persona confidence multiplier when flagged: `0.70`
+
+**Step 1: Write failing DB migration test**
+
+In `crates/common/src/db.rs` tests, assert that after `run_migrations()`:
+- Table `wallet_risk_flags` exists
+- `wallet_features_daily` has columns:
+  - `open_positions_total`
+  - `open_losing_positions_count`
+  - `open_unrealized_loss_usd_total`
+
+Run: `cargo test -p common`
+Expected: FAIL — missing table/columns.
+
+**Step 2: Add schema + forward-only migrations**
+
+In `crates/common/src/db.rs`:
+- Add `CREATE TABLE IF NOT EXISTS wallet_risk_flags (...)`
+- Add forward-only migrations that `ALTER TABLE wallet_features_daily ADD COLUMN ...` for the 3 new columns (for existing DBs)
+
+Run: `cargo test -p common`
+Expected: PASS.
+
+**Step 3: Write failing wallet feature test for open-loss metrics**
+
+In `crates/evaluator/src/wallet_features.rs` tests:
+1. Insert two snapshots per `condition_id` into `positions_snapshots` and verify only the newest snapshot per market is used.
+2. Verify aggregated metrics:
+   - `open_positions_total` (distinct markets from latest snapshot set)
+   - `open_losing_positions_count` counts only `cash_pnl <= -1.0`
+   - `open_unrealized_loss_usd_total` sums only negative `cash_pnl`
+
+Run: `cargo test -p evaluator test_compute_features`
+Expected: FAIL.
+
+**Step 4: Implement open-loss metrics in wallet feature computation**
+
+In `compute_wallet_features`:
+- Extend `WalletFeatures` struct with the 3 new fields.
+- Query `positions_snapshots` for latest per `(proxy_wallet, condition_id)` and aggregate totals.
+
+Run: `cargo test -p evaluator`
+Expected: PASS.
+
+**Step 5: Write failing persona classification test for bagholding penalty + flag record**
+
+In `crates/evaluator/src/persona_classification.rs` tests:
+- Construct `WalletFeatures` with high raw win rate and bagholding metrics that cross thresholds.
+- Run classification and assert:
+  - Persona remains followable (not excluded)
+  - Stored persona confidence is multiplied by `bagholding_confidence_multiplier`
+  - A `wallet_risk_flags` row exists with `flag = 'BAGHOLDING_WINRATE_BIAS'`
+
+Run: `cargo test -p evaluator`
+Expected: FAIL.
+
+**Step 6: Implement risk flagging in classification**
+
+In `crates/evaluator/src/persona_classification.rs`:
+- Add a detector `detect_bagholding_winrate_bias(features, raw_win_rate, config) -> Option<...>`.
+- If flagged:
+  - insert into `wallet_risk_flags` with details JSON (raw win rate + open-loss metrics)
+  - apply confidence multiplier to the stored persona confidence
+
+Run: `cargo test -p evaluator`
+Expected: PASS.
+
+**Step 7: Surface in web UI**
+
+In web queries/templates:
+- Fetch latest bagholding flag per wallet (or “flagged in last 7 days”)
+- Render a `BAGHOLDING` badge in rankings/wallet list
+
+Run: `cargo test -p web`
+Expected: PASS.
+
+---
+
+## Task 31: Adjusted Win Rate (Penalize Open Losing Positions)
+
+**Goal:** Add an `adjusted_win_rate` metric that reduces win rate when a wallet carries multiple meaningful open losing positions, then use it for win-rate-gated persona checks (start with Informed Specialist).
+
+**Definition (configurable):**
+Let:
+- `wins = win_count`
+- `losses = loss_count`
+- `open_losing = open_losing_positions_count`
+- `k = 0.50` (each open losing position counts as half a loss)
+- `cap = 10` (cap open_losing contribution)
+
+Compute:
+- `effective_losses = losses + min(open_losing, cap) * k`
+- `adjusted_win_rate = wins / (wins + effective_losses)` if denominator > 0 else 0
+
+**Files:**
+- Modify: `crates/common/src/db.rs`
+- Modify: `crates/common/src/config.rs`
+- Modify: `config/default.toml`
+- Modify: `crates/evaluator/src/wallet_features.rs`
+- Modify: `crates/evaluator/src/persona_classification.rs`
+
+**Step 1: Write failing migration + formula tests**
+
+In `crates/common/src/db.rs` tests, assert `wallet_features_daily` has a new column:
+- `adjusted_win_rate`
+
+In `crates/evaluator/src/wallet_features.rs` tests, verify adjusted win rate formula on a known input.
+
+Run: `cargo test -p common && cargo test -p evaluator`
+Expected: FAIL.
+
+**Step 2: Implement migration + computation**
+
+In `crates/common/src/db.rs`:
+- Add forward-only migration for `wallet_features_daily.adjusted_win_rate`.
+
+In `crates/evaluator/src/wallet_features.rs`:
+- Compute `adjusted_win_rate` and persist it via `save_wallet_features`.
+
+Run: `cargo test -p common && cargo test -p evaluator`
+Expected: PASS.
+
+**Step 3: Switch win-rate-gated persona checks to adjusted win rate**
+
+In `crates/evaluator/src/persona_classification.rs`:
+- Keep raw win rate for transparency and for risk-flag logic.
+- Use `adjusted_win_rate` for persona win-rate thresholds (start with Informed Specialist).
+- Add a regression test: wallet passes raw threshold but fails adjusted threshold => should not be classified as that persona.
+
+Run: `cargo test -p evaluator`
+Expected: PASS.
+
+---
+
 ## Verification Checklist
 
-After all 24 tasks are complete, verify:
+After all plan tasks are complete, verify:
 
 ```bash
 # All tests pass
@@ -3675,4 +3866,6 @@ cargo fmt --check
 # 14. Paper trading uses book-walked VWAP when available, flat slippage as fallback
 # 15. Taker fee is zero for non-crypto markets, quartic for 15m crypto markets
 # 16. markets table has yes_token_id and no_token_id columns populated
+# 17. Bagholding flag is recorded when wallets have meaningful open unrealized losses
+# 18. adjusted_win_rate is persisted and used for win-rate-gated persona checks
 ```

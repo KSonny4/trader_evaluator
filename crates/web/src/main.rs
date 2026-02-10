@@ -339,7 +339,7 @@ async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
 async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = open_readonly(&state).unwrap();
     let counts = queries::funnel_counts(&conn).unwrap();
-    let stages = counts.to_stages();
+    let stages = counts.to_stages(&state.funnel_stage_infos);
     Html(FunnelBarTemplate { stages }.to_string())
 }
 
@@ -455,15 +455,13 @@ mod tests {
         // Leak the tempfile to keep it alive for the test
         std::mem::forget(tmp);
 
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: None,
-            funnel_stage_infos: common::funnel::funnel_stage_infos(
-                &common::config::Config::from_toml_str(include_str!(
-                    "../../../config/default.toml"
-                ))
-                .unwrap(),
-            ),
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
         });
         create_router_with_state(state)
     }
@@ -476,15 +474,13 @@ mod tests {
         drop(db);
         std::mem::forget(tmp);
 
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
         let state = Arc::new(AppState {
             db_path: path,
             auth_password: Some(password.to_string()),
-            funnel_stage_infos: common::funnel::funnel_stage_infos(
-                &common::config::Config::from_toml_str(include_str!(
-                    "../../../config/default.toml"
-                ))
-                .unwrap(),
-            ),
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
         });
         create_router_with_state(state)
     }
@@ -1096,15 +1092,13 @@ mod tests {
             return;
         }
 
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
         let state = Arc::new(AppState {
             db_path: db_path.into(),
             auth_password: None,
-            funnel_stage_infos: common::funnel::funnel_stage_infos(
-                &common::config::Config::from_toml_str(include_str!(
-                    "../../../config/default.toml"
-                ))
-                .unwrap(),
-            ),
+            funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
         });
         let app = create_router_with_state(state);
 
