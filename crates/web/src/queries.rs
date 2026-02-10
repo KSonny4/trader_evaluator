@@ -452,6 +452,10 @@ pub fn excluded_wallets_latest(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<ExcludedWalletRow>> {
+    // NOTE: If multiple exclusion rows share the same `excluded_at` for a wallet, this query can
+    // return multiple rows for that wallet (tie on MAX(excluded_at)). Current semantics: show all
+    // "latest-timestamp" reasons. If we want strictly one row per wallet, add a deterministic
+    // tiebreak (e.g. MAX(id) among rows at MAX(excluded_at)) and join on that.
     let mut stmt = conn.prepare(
         "
         SELECT e.proxy_wallet, e.reason, e.metric_value, e.threshold, e.excluded_at
