@@ -15,7 +15,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DASHBOARDS_DIR="$SCRIPT_DIR/../dashboards"
+# Allow overriding dashboards location (e.g. reuse dashboards from another repo).
+DASHBOARDS_DIR_DEFAULT="$SCRIPT_DIR/../dashboards"
+DASHBOARDS_DIR="${DASHBOARDS_DIR:-$DASHBOARDS_DIR_DEFAULT}"
 FOLDER_TITLE="trader-evaluator"
 
 # Convenience: allow running without manually sourcing env files.
@@ -56,6 +58,23 @@ echo ""
 if [ ! -d "$DASHBOARDS_DIR" ]; then
   echo "ERROR: dashboards directory not found: $DASHBOARDS_DIR" >&2
   exit 1
+fi
+
+if [ "${DRY_RUN:-}" = "1" ]; then
+  echo "DRY RUN: validating dashboards only (no Grafana API calls)"
+  for DASHBOARD_FILE in "$DASHBOARDS_DIR"/*.json; do
+    FILENAME=$(basename "$DASHBOARD_FILE")
+    # Validate JSON is parseable and can be wrapped into the API payload shape.
+    jq -e '.' "$DASHBOARD_FILE" >/dev/null
+    jq -n --slurpfile dash "$DASHBOARD_FILE" --arg folderUid "dry-run" '{
+      dashboard: $dash[0],
+      folderUid: $folderUid,
+      overwrite: true,
+      message: "Updated via push-dashboards.sh"
+    }' >/dev/null
+    echo "DRY RUN: would push $FILENAME"
+  done
+  exit 0
 fi
 
 echo "Testing connection..."
