@@ -67,7 +67,7 @@ where
 
     match tokio::time::timeout(timeout, handle).await {
         Ok(joined) => joined?,
-        Err(_) => Err(anyhow::anyhow!("db query timed out after {:?}", timeout)),
+        Err(_) => Err(anyhow::anyhow!("db query timed out after {timeout:?}")),
     }
 }
 
@@ -376,7 +376,11 @@ async fn logout() -> impl IntoResponse {
 
 async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_path_str = state.db_path.to_string_lossy().to_string();
-    match with_db(state.clone(), move |conn| queries::system_status(conn, &db_path_str)).await {
+    match with_db(state.clone(), move |conn| {
+        queries::system_status(conn, &db_path_str)
+    })
+    .await
+    {
         Ok(status) => Html(StatusStripTemplate { status }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -404,7 +408,7 @@ async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match with_db(state.clone(), move |conn| queries::top_markets_today(conn)).await {
+    match with_db(state.clone(), queries::top_markets_today).await {
         Ok(markets) => Html(MarketsTemplate { markets }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -422,7 +426,9 @@ async fn wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoRespons
     })
     .await
     {
-        Ok((overview, wallets)) => Html(WalletsTemplate { overview, wallets }.to_string()).into_response(),
+        Ok((overview, wallets)) => {
+            Html(WalletsTemplate { overview, wallets }.to_string()).into_response()
+        }
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -456,7 +462,9 @@ async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     })
     .await
     {
-        Ok((summary, trades)) => Html(PaperTemplate { summary, trades }.to_string()).into_response(),
+        Ok((summary, trades)) => {
+            Html(PaperTemplate { summary, trades }.to_string()).into_response()
+        }
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -466,7 +474,11 @@ async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 }
 
 async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match with_db(state.clone(), move |conn| queries::top_rankings(conn, 30, 20)).await {
+    match with_db(state.clone(), move |conn| {
+        queries::top_rankings(conn, 30, 20)
+    })
+    .await
+    {
         Ok(rankings) => Html(RankingsTemplate { rankings }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -548,8 +560,8 @@ mod tests {
     use std::net::{SocketAddr, TcpStream};
     use std::sync::mpsc;
     use std::thread;
-    use tower::ServiceExt;
     use std::time::Duration;
+    use tower::ServiceExt;
 
     fn create_test_app() -> Router {
         // For tests using partials, we need an in-memory DB with schema.
@@ -656,14 +668,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_login_not_blocked_by_slow_db_queries() {
-        fn http_get(addr: SocketAddr, path: &str, extra_headers: &[(&str, &str)], timeout: Duration) -> std::io::Result<String> {
+        fn http_get(
+            addr: SocketAddr,
+            path: &str,
+            extra_headers: &[(&str, &str)],
+            timeout: Duration,
+        ) -> std::io::Result<String> {
             let mut stream = TcpStream::connect(addr)?;
             stream.set_read_timeout(Some(timeout))?;
             stream.set_write_timeout(Some(timeout))?;
 
-            let mut req = format!(
-                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
-            );
+            let mut req =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
             for (k, v) in extra_headers {
                 req.push_str(&format!("{k}: {v}\r\n"));
             }
@@ -688,7 +704,8 @@ mod tests {
                 .unwrap();
 
             rt.block_on(async move {
-                let app = create_test_app_with_auth_and_db_delay("secret", Duration::from_millis(400));
+                let app =
+                    create_test_app_with_auth_and_db_delay("secret", Duration::from_millis(400));
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
 
