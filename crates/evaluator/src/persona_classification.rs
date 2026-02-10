@@ -124,6 +124,8 @@ pub enum ExclusionReason {
         min_win_rate_threshold: f64,
         max_trades_threshold: u32,
     },
+    /// Wallet is in the configured known_bots list (Strategy Bible §4 Stage 1).
+    KnownBot,
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -137,6 +139,7 @@ impl ExclusionReason {
             Self::TailRiskSeller { .. } => "TAIL_RISK_SELLER",
             Self::NoiseTrader { .. } => "NOISE_TRADER",
             Self::SniperInsider { .. } => "SNIPER_INSIDER",
+            Self::KnownBot => "KNOWN_BOT",
         }
     }
 
@@ -156,6 +159,7 @@ impl ExclusionReason {
                 trades_per_week, ..
             } => *trades_per_week,
             Self::SniperInsider { win_rate, .. } => *win_rate,
+            Self::KnownBot => 1.0,
         }
     }
 
@@ -177,6 +181,7 @@ impl ExclusionReason {
                 min_win_rate_threshold,
                 ..
             } => *min_win_rate_threshold,
+            Self::KnownBot => 0.0,
         }
     }
 }
@@ -187,6 +192,18 @@ pub struct Stage1Config {
     pub min_wallet_age_days: u32,
     pub min_total_trades: u32,
     pub max_inactive_days: u32,
+    /// Proxy wallet addresses to exclude as known bots (Strategy Bible §4 Stage 1).
+    pub known_bots: Vec<String>,
+}
+
+/// Returns Some(KnownBot) if proxy_wallet is in the known_bots list, None otherwise.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn stage1_known_bot_check(proxy_wallet: &str, known_bots: &[String]) -> Option<ExclusionReason> {
+    if known_bots.iter().any(|b| b.as_str() == proxy_wallet) {
+        Some(ExclusionReason::KnownBot)
+    } else {
+        None
+    }
 }
 
 /// Returns Some(reason) if the wallet should be excluded, None if it passes.
@@ -554,6 +571,40 @@ mod tests {
     use common::db::Database;
 
     #[test]
+    fn test_known_bot_excluded_when_in_list() {
+        let known_bots = vec!["0xbot".to_string(), "0xother".to_string()];
+        let result = stage1_known_bot_check("0xbot", &known_bots);
+        assert_eq!(result, Some(ExclusionReason::KnownBot));
+    }
+
+    #[test]
+    fn test_known_bot_not_excluded_when_not_in_list() {
+        let known_bots = vec!["0xbot".to_string()];
+        let result = stage1_known_bot_check("0xhuman", &known_bots);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_known_bot_record_exclusion_persists() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let reason = ExclusionReason::KnownBot;
+        record_exclusion(&db.conn, "0xbot", &reason).unwrap();
+
+        let (stored_reason, metric, threshold): (String, f64, f64) = db.conn
+            .query_row(
+                "SELECT reason, metric_value, threshold FROM wallet_exclusions WHERE proxy_wallet = '0xbot'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_reason, "KNOWN_BOT");
+        assert!((metric - 1.0).abs() < f64::EPSILON);
+        assert!((threshold - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_stage1_too_young() {
         let result = stage1_filter(
             5,  // wallet_age_days
@@ -563,6 +614,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(
@@ -584,6 +636,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(
@@ -605,6 +658,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(
@@ -626,6 +680,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -642,6 +697,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -658,6 +714,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -674,6 +731,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -808,6 +866,7 @@ mod tests {
             .reason_str(),
             "SNIPER_INSIDER"
         );
+        assert_eq!(ExclusionReason::KnownBot.reason_str(), "KNOWN_BOT");
     }
 
     fn make_features(unique_markets: u32, win_count: u32, loss_count: u32) -> WalletFeatures {
