@@ -1,6 +1,6 @@
 # Strategy Enforcement Implementation Plan
 
-> **Workflow:** Follow `CLAUDE.md` (worktrees, TDD, verification). For multi-step implementation, use `superpowers:executing-plans` to execute tasks one-by-one with checkpoints.
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Bridge the gap between the Strategy Bible (`docs/STRATEGY_BIBLE.md`) and the actual codebase. Implement persona classification, wallet feature computation, paper trade settlement, copy fidelity tracking, two-level risk management, real MScore inputs, and anomaly detection — all with TDD and configurable thresholds.
 
@@ -8,9 +8,9 @@
 
 **Tech Stack:** Rust, Tokio, SQLite (tokio-rusqlite), rust_decimal, serde, tracing, metrics.
 
-**Current state:** `make test` passes (160+ tests). Phase 1 is complete and Phase 2 is partially complete: persona classification orchestrator + Stage 2 job is implemented and scheduled; paper trades are created and can be settled; conditional taker fee (quartic for crypto 15m, zero otherwise) is implemented; scheduler wiring exists for the core pipeline jobs. Schema includes `copy_fidelity_events` and `follower_slippage`, but they are not yet written by the evaluator.
+**Current state:** 141+ tests pass. Phase 1 complete: all persona classification detectors implemented (Informed Specialist, Consistent Generalist, Patient Accumulator + 4 exclusion personas), config sections for personas/risk/anomaly/copy fidelity loaded from TOML, wallet feature computation from trades_raw + paper_trades, Stage 1 fast filters (age/trade count/activity) with exclusion recording to DB. Schema extended with copy_fidelity_events and follower_slippage tables. **Durability & recovery:** startup recovery runs once before the scheduler (paper_tick for in-flight work after a kill); doc in `docs/REFERENCE.md` § Durability and recovery.
 
-**What's missing (highest impact):** additional persona/exclusion detectors from Strategy Bible §4 (News Sniper, Liquidity Provider, Jackpot Gambler, Bot Swarm/Micro-trader) + traits (Topic lane/Bonder/Whale), gating paper mirroring so only followable personas advance to paper trading (Strategy Bible §2 funnel), copy fidelity + follower slippage tracking, two-level risk enforcement (per-wallet + portfolio loss caps), anomaly detection + weekly re-evaluation, and real MScore inputs (density + whale concentration). WScore still needs the missing sub-components from Strategy Bible (beyond edge+consistency).
+**What's missing:** Classification orchestrator isn't wired to run automatically (Task 12), paper trades never settle (Task 13), WScore uses 2/5 factors (Task 18), MScore has 3 hardcoded inputs (Task 20), no copy fidelity tracking yet (Task 15), no anomaly detection yet (Task 19).
 
 **Strategy Bible:** `docs/STRATEGY_BIBLE.md` is the governing document. Every threshold and formula in this plan comes from there.
 
@@ -45,38 +45,31 @@
 - [x] Task 10: Noise Trader Detector
 - [x] Task 11: Sniper/Insider Detector
 
-### 🚧 Phase 2: Integration, Detectors & Funnel (Tasks 12-32) — IN PROGRESS
-*Deployment order: ship **E2E persona labeling** (wallets labeled + paper mirroring gated) before expanding the funnel UI/metrics.*
+### 🚧 Phase 2: Integration & Settlement (Tasks 12-21) — IN PROGRESS
+*Current focus: wiring classification logic and enabling paper trade settlement*
 
-**Deploy First: E2E Persona Labeling**
-- [x] Task 12: Persona Classification Orchestrator + Stage 2 Job
-- [x] Task 21: Wire New Jobs into Scheduler
 - [x] **Durability & recovery:** Startup recovery (run paper_tick once before scheduler); REFERENCE.md § Durability and recovery; metric `evaluator_recovery_paper_trades_total`.
-- [ ] **Paper tick gating:** Only mirror wallets that are currently followable (and stop mirroring immediately if they become excluded).
-- [ ] Task 25: Stage 1 — Known Bot Exclusion — **NEXT**
-- [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md` — **NEXT**
-  - Implement Stage 2 exclusion detectors: `NEWS_SNIPER`, `LIQUIDITY_PROVIDER`, `JACKPOT_GAMBLER`, `BOT_SWARM_MICRO`.
-  - Implement traits: `TOPIC_LANE=<category>`, `BONDER=1`, `WHALE=1`.
-- [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
-- [ ] Task 26: Stage 2 — Sybil Cluster Detection
-
-**Then: Paper Proof + Risk**
-- [x] Task 13: Paper Trade Settlement
-- [x] Task 14: Conditional Taker Fee (Quartic for Crypto, Zero for Everything Else)
+- [ ] Task 12: Persona Classification Orchestrator + Stage 2 Job — **NEXT**
+- [ ] Task 13: Paper Trade Settlement
+- [ ] Task 14: Conditional Taker Fee (Quartic for Crypto, Zero for Everything Else)
 - [ ] Task 15: Copy Fidelity Tracking
-- [ ] Task 17: Follower Slippage Tracking
 - [ ] Task 16: Two-Level Risk Management (Per-Wallet + Portfolio)
-- [ ] Task 19: Weekly Re-evaluation + Anomaly Detection
-
-**Then: Scoring Quality**
+- [ ] Task 17: Follower Slippage Tracking
 - [ ] Task 18: WScore — Missing 3 Sub-Components
+- [ ] Task 19: Weekly Re-evaluation + Anomaly Detection
 - [ ] Task 20: MScore — Real Inputs (density, whale concentration)
-- [ ] Task 30: Bagholding Risk Flag (win rate bias from open losing positions)
-- [ ] Task 31: Adjusted Win Rate (penalize open losing positions)
-
-**Then: Funnel UI + Surfaces**
+- [ ] Task 21: Wire New Jobs into Scheduler
+- [ ] Task 25: Stage 1 — Known Bot Exclusion
+- [ ] Task 26: Stage 2 — Sybil Cluster Detection
+- [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
 - [ ] Task 28: Funnel metrics in Grafana + UI views (Strategy Bible §2, §10)
 - [ ] Task 29: Wallet scorecard screen (per-wallet detail page)
+- [ ] Task 30: Bagholding Risk Flag (win rate bias from open losing positions)
+- [ ] Task 31: Adjusted Win Rate (penalize open losing positions)
+- [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
+  - Implement `TOPIC_LANE` trait computation + storage.
+  - Add per-topic ranking surfaces (at least “overall vs in-lane”), and support an optional “mirror in-lane only” follow mode for lane-specialists.
+  - Timing: do Task 32 **after Task 12** (classification job wired), and ideally after Task 18 (WScore components) so lane scoring has real inputs.
 
 ### 📌 Phase 2.5: Paper Runtime Robustness (Tasks 33-37) — PLANNED
 *Goal: make paper trading fast (near-real-time) and resilient (saga-like), without splitting into multiple processes yet.*
@@ -97,8 +90,6 @@
 **See also:** [Paper orderbook verification](paper-orderbook-verification.md) — design for verifying paper fills using a **mini orderbook snapshot** (10–120 s window) after detection, without real-time streaming. Complements Task 22–24 and Strategy Bible §6 fill probability.
 
 **Future (not in current task list):** Promote wallet criteria and Real money transition (Strategy Bible §9) are post–Phase 6 and tracked separately.
-
-**Note on ordering:** The detailed task write-ups below were added over time and are not strictly ordered by task id (e.g. Task 22–24 appear after Task 37). Use the checklist above or search for `## Task <n>:` when jumping to a specific task.
 
 ---
 
