@@ -61,6 +61,10 @@
 - [ ] Task 29: Wallet scorecard screen (per-wallet detail page)
 - [ ] Task 30: Bagholding Risk Flag (win rate bias from open losing positions)
 - [ ] Task 31: Adjusted Win Rate (penalize open losing positions)
+- [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
+  - Implement `TOPIC_LANE` trait computation + storage.
+  - Add per-topic ranking surfaces (at least “overall vs in-lane”), and support an optional “mirror in-lane only” follow mode for lane-specialists.
+  - Timing: do Task 32 **after Task 12** (classification job wired), and ideally after Task 18 (WScore components) so lane scoring has real inputs.
 
 ### 📋 Phase 3: Advanced Features (Tasks 22-24) — PENDING
 *Requires CLOB API access and WebSocket infrastructure*

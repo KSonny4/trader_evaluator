@@ -107,7 +107,23 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 | **Tail Risk Seller** | Loss distribution analysis | `tail_risk_min_win_rate`, `tail_risk_loss_multiplier` | win_rate > 0.80 AND max_single_loss > 5x avg_win |
 | **Noise Trader** | Churn rate + ROI | `noise_max_trades_per_week`, `noise_max_abs_roi` | trades/week > 50 AND abs(ROI) < 0.02 |
 | **Sniper/Insider** | Age + anomalous win rate | `sniper_max_age_days`, `sniper_min_win_rate`, `sniper_max_trades` | age < 30d AND win_rate > 0.85 on < 20 trades |
+| **News Sniper** | Ultra-short edge + bursty timing | (new) | burstiness spikes + edge collapses with 30-120s delay |
+| **Liquidity Provider / Market Maker** | Two-sided flow + mid-centric fills | (new) | buy/sell balance high AND trades cluster near mid |
+| **Jackpot Gambler** | PnL concentrated in few trades | (new) | top-1 trade share dominates PnL, low win-rate/huge variance |
+| **Bot Swarm / Micro-trader** | Extreme frequency + micro sizing | (new) | trades/day extreme AND size small/uniform |
 | **Sybil Cluster** | DBSCAN clustering on trade timing | `sybil_min_cluster_size`, `sybil_min_overlap` | cluster > 3 wallets AND > 80% trade overlap |
+
+### Persona Traits (Not Personas)
+
+We also store **traits** that refine how we follow a wallet without changing whether it is followable:
+
+| Trait | Meaning | How it is used |
+|------|---------|----------------|
+| **Topic lane** | Wallet has edge only in one category (sports/politics/crypto/weather/...) | Rank and optionally copy **only within that lane** |
+| **Bonder** | High-probability grinder: trades concentrated near price 0.0/1.0 with longer holds | More copyable at 30s-120s delays; prefer them |
+| **Whale** | Large sizing and/or slow accumulation | Tighten slippage/impact checks; avoid lying to ourselves about fills |
+
+**Important distinction:** **Sniper/Insider** is a *risk persona* (suspicious new wallet + anomalous wins). **News Sniper** is a *style persona* (edge is mainly speed-dependent). Either can be unfollowable.
 
 ### Trust Multipliers (applied to WScore)
 

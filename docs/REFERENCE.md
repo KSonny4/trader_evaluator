@@ -164,7 +164,16 @@ Every wallet is classified into a persona before paper-trading. This is the gate
 | **Tail Risk Seller** | NO | 80%+ win rate, occasional massive blowup | Will destroy you |
 | **Noise Trader** | NO | High churn, no statistical edge | No signal |
 | **Sniper/Insider** | AVOID | New wallet, suspicious timing, clustered entries | Adversarial |
+| **News Sniper** | AVOID | Ultra-short edge, bursty timing | Not copyable with delay |
+| **Liquidity Provider / Market Maker** | AVOID | Two-sided flow, execution edge | Fill/latency dependent |
+| **Jackpot Gambler** | AVOID | PnL concentrated in few trades | Not stable / not repeatable |
+| **Bot Swarm / Micro-trader** | AVOID | Extreme frequency, micro sizing | Infra-dependent |
 | **Sybil Cluster** | AVOID | Correlated trades, shared funding chain | Fake signal |
+
+**Persona traits (stored separately):**
+- `TOPIC_LANE=<category>`: domain specialist lane (copy only inside that lane).
+- `BONDER=1`: high-probability grinder (often copyable at longer delays).
+- `WHALE=1`: large sizing / slow accumulation (model impact carefully).
 
 **Obscurity bonus:** Wallets NOT on public leaderboards get 1.2x WScore multiplier (fewer copiers = less front-running = better fills).
 
