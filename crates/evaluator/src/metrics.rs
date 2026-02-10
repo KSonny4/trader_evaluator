@@ -1,6 +1,6 @@
 use anyhow::Result;
 use metrics::{describe_counter, describe_gauge, describe_histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
 
 pub fn describe() {
@@ -43,11 +43,19 @@ pub fn describe() {
     );
 }
 
-pub fn install_prometheus(port: u16) -> Result<PrometheusHandle> {
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    Ok(PrometheusBuilder::new()
+pub fn install_prometheus(port: u16) -> Result<()> {
+    // Bind to localhost by default. This keeps the metrics endpoint private on the host
+    // (Grafana/Alloy can scrape via localhost) and avoids accidentally exposing it publicly.
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+
+    // IMPORTANT: `install_recorder` only installs the recorder (no HTTP listener).
+    // Use `install` to spawn the exporter task so /metrics is actually served.
+    PrometheusBuilder::new()
         .with_http_listener(addr)
-        .install_recorder()?)
+        .install()
+        .map_err(anyhow::Error::msg)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -86,7 +94,7 @@ mod tests {
         let port = free_local_port();
 
         // This should start an HTTP listener serving /metrics.
-        let _handle = install_prometheus(port).unwrap();
+        install_prometheus(port).unwrap();
 
         // Wait briefly for the listener to come up.
         let addr = format!("127.0.0.1:{port}");
