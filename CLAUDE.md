@@ -33,6 +33,7 @@ WScore Ranking → "Who to Follow" with evidence
 | `docs/plans/2026-02-08-evaluator-frontend-dashboard.md` | Dashboard implementation plan |
 | `docs/inspiration.txt` | Reference projects and links |
 | `docs/REFERENCE.md` | Technical stack, project structure, DB tables, competitive analysis, data replay architecture, persona taxonomy, on-chain contracts |
+| `docs/ARCHITECTURE.md` | Runtime and orchestration: current vs target (scheduler, events, queue, Tempo, saga) |
 
 ## Polymarket APIs we use
 

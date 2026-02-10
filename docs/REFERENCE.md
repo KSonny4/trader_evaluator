@@ -96,6 +96,8 @@ trader_evaluator/
 
 ## Reference implementations
 
+See `docs/ARCHITECTURE.md` for runtime and orchestration (current and target).
+
 This project applies proven Polymarket patterns from production systems. Key architectural patterns include:
 - SQLite append-only storage with WAL mode for concurrent reads/writes
 - Tokio-based async jobs with configurable scheduling
