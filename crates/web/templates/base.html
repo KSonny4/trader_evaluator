@@ -13,6 +13,74 @@
     </script>
     <style>
         body { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace; }
+
+        /* Funnel help tooltip: avoids relying on native `title` tooltips (often suppressed in webviews). */
+        .help-tip {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        /* Horizontal scroll without clipping tooltip bubbles vertically. */
+        .funnel-scroll {
+            overflow-x: auto;
+            overflow-y: visible;
+        }
+
+        .help-tip::after {
+            content: attr(data-tip);
+            position: absolute;
+            left: 50%;
+            bottom: 140%;
+            transform: translateX(-50%);
+            max-width: min(28rem, 90vw);
+            width: max-content;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #374151; /* gray-700 */
+            border-radius: 0.5rem;
+            background: rgba(3, 7, 18, 0.98); /* near-gray-950 */
+            color: #e5e7eb; /* gray-200 */
+            font-size: 0.75rem;
+            line-height: 1.1rem;
+            white-space: normal;
+            text-align: left;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            z-index: 50;
+        }
+
+        .help-tip::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            bottom: 125%;
+            transform: translateX(-50%) rotate(45deg);
+            width: 0.6rem;
+            height: 0.6rem;
+            background: rgba(3, 7, 18, 0.98);
+            border-right: 1px solid #374151;
+            border-bottom: 1px solid #374151;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            z-index: 49;
+        }
+
+        .help-tip:hover::after,
+        .help-tip:focus::after,
+        .help-tip:hover::before,
+        .help-tip:focus::before {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .help-tip:focus {
+            outline: 2px solid #4b5563; /* gray-600 */
+            outline-offset: 2px;
+            border-radius: 0.25rem;
+        }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
