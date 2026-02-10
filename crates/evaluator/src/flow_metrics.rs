@@ -37,7 +37,8 @@ pub struct FunnelFlowCounts {
     pub markets_scored_today: i64,
     pub wallets_discovered: i64,
     pub wallets_tracked: i64,
-    pub paper_trades_total: i64,
+    /// Distinct wallets with ≥1 paper trade (matches dashboard funnel).
+    pub paper_wallets: i64,
     pub wallets_ranked_today: i64,
 }
 
@@ -74,8 +75,11 @@ pub fn compute_flow_counts(conn: &Connection) -> Result<FlowCounts> {
         [],
         |r| r.get(0),
     )?;
-    let paper_trades_total: i64 =
-        conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |r| r.get(0))?;
+    let paper_wallets: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
+        [],
+        |r| r.get(0),
+    )?;
     let wallets_ranked_today: i64 = conn.query_row(
         "SELECT COUNT(DISTINCT proxy_wallet) FROM wallet_scores_daily WHERE score_date = date('now')",
         [],
@@ -134,7 +138,7 @@ pub fn compute_flow_counts(conn: &Connection) -> Result<FlowCounts> {
             markets_scored_today,
             wallets_discovered,
             wallets_tracked,
-            paper_trades_total,
+            paper_wallets,
             wallets_ranked_today,
         },
         classification: ClassificationFlowCounts {
@@ -217,7 +221,7 @@ mod tests {
                 markets_scored_today: 1,
                 wallets_discovered: 3,
                 wallets_tracked: 2,
-                paper_trades_total: 5,
+                paper_wallets: 2,
                 wallets_ranked_today: 1,
             }
         );

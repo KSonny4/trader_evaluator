@@ -67,14 +67,14 @@
       "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
     },
     {
-      "title": "→ Paper trades",
-      "description": "Total paper trade rows.",
+      "title": "→ Paper wallets",
+      "description": "Distinct wallets with ≥1 paper trade (matches dashboard).",
       "type": "stat",
       "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
       "targets": [
         {
-          "expr": "evaluator_flow_funnel_paper_trades_total",
-          "legendFormat": "trades",
+          "expr": "evaluator_flow_funnel_paper_wallets",
+          "legendFormat": "wallets",
           "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
         }
       ],

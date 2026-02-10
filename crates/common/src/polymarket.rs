@@ -87,6 +87,9 @@ pub fn classify_anyhow_api_error(err: &anyhow::Error) -> ApiErrorKind {
     ApiErrorKind::Other
 }
 
+/// Data API /trades observed to return HTTP 400 at offset 3200; use a safety margin for classification.
+const TRADES_OFFSET_CAP_SAFETY: u32 = 3000;
+
 fn is_trades_offset_cap_url(url: &Url) -> bool {
     if !url.path().ends_with("/trades") {
         return false;
@@ -94,8 +97,7 @@ fn is_trades_offset_cap_url(url: &Url) -> bool {
     for (k, v) in url.query_pairs() {
         if k == "offset" {
             if let Ok(n) = v.parse::<u32>() {
-                // Observed: /trades?...&offset=3200 -> HTTP 400.
-                return n >= 3000;
+                return n >= TRADES_OFFSET_CAP_SAFETY;
             }
         }
     }
