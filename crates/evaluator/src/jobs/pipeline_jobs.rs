@@ -404,7 +404,10 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                     let trades_24h = count_trades_24h(conn, &cid, now_epoch)?;
                     let unique_traders_24h = count_unique_traders_24h(conn, &cid, now_epoch)?;
                     let top_holder_concentration = compute_whale_concentration(conn, &cid)?;
-                    out.insert(cid, (trades_24h, unique_traders_24h, top_holder_concentration));
+                    out.insert(
+                        cid,
+                        (trades_24h, unique_traders_24h, top_holder_concentration),
+                    );
                 }
                 Ok(out)
             })
@@ -837,7 +840,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_market_scoring_uses_db_density_and_whale_concentration() {
-        let mut cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         cfg.market_scoring.top_n_markets = 2;
         // Keep the test focused on DB-derived density/whale factors.
         cfg.market_scoring.min_liquidity_usdc = 0.0;
@@ -945,7 +949,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(m1 > m2, "expected mscore(0x1) > mscore(0x2), got {m1} vs {m2}");
+        assert!(
+            m1 > m2,
+            "expected mscore(0x1) > mscore(0x2), got {m1} vs {m2}"
+        );
     }
 
     #[tokio::test]
