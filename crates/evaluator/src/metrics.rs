@@ -84,8 +84,8 @@ pub fn describe() {
         "Funnel: active wallets on watchlist."
     );
     describe_gauge!(
-        "evaluator_flow_funnel_paper_trades_total",
-        "Funnel: total paper trade rows."
+        "evaluator_flow_funnel_paper_wallets",
+        "Funnel: distinct wallets with >=1 paper trade (matches dashboard)."
     );
     describe_gauge!(
         "evaluator_flow_funnel_wallets_ranked_today",
@@ -174,7 +174,7 @@ mod tests {
                 markets_scored_today: 5,
                 wallets_discovered: 100,
                 wallets_tracked: 80,
-                paper_trades_total: 200,
+                paper_wallets: 50,
                 wallets_ranked_today: 3,
             },
             classification: crate::flow_metrics::ClassificationFlowCounts {
