@@ -12,6 +12,7 @@ mod persona_classification;
 mod scheduler;
 mod wallet_discovery;
 mod wallet_features;
+mod wallet_rules_engine;
 mod wallet_scoring;
 
 #[allow(clippy::too_many_lines)] // job wiring and worker loops
@@ -67,6 +68,11 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
     }
 
+    match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
+        Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
+    }
+
     // Recovery: process any work that was in progress when the process was last killed.
     // Paper tick is idempotent (keyed by triggered_by_trade_id); ingestion jobs use
     // INSERT OR IGNORE so the next scheduled run will catch up.
@@ -85,6 +91,7 @@ async fn main() -> Result<()> {
     let (activity_ingestion_tx, mut activity_ingestion_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (positions_snapshot_tx, mut positions_snapshot_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (holders_snapshot_tx, mut holders_snapshot_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (wallet_rules_tx, mut wallet_rules_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (paper_tick_tx, mut paper_tick_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (wallet_scoring_tx, mut wallet_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (persona_classification_tx, mut persona_classification_rx) =
@@ -127,6 +134,12 @@ async fn main() -> Result<()> {
             name: "holders_snapshot".to_string(),
             interval: std::time::Duration::from_secs(cfg.ingestion.holders_poll_interval_secs),
             tick: holders_snapshot_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "wallet_rules".to_string(),
+            interval: std::time::Duration::from_secs(300),
+            tick: wallet_rules_tx,
             run_immediately: true,
         },
         scheduler::JobSpec {
@@ -259,6 +272,21 @@ async fn main() -> Result<()> {
                 {
                     Ok(inserted) => tracing::info!(inserted, "holders_snapshot done"),
                     Err(e) => tracing::error!(error = %e, "holders_snapshot failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let cfg = cfg.clone();
+        let db = db.clone();
+        async move {
+            while wallet_rules_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "wallet_rules");
+                let _g = span.enter();
+                match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
+                    Ok(changed) => tracing::info!(changed, "wallet_rules done"),
+                    Err(e) => tracing::error!(error = %e, "wallet_rules failed"),
                 }
             }
         }

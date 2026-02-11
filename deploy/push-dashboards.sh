@@ -43,7 +43,6 @@ if [ -n "${DASHBOARDS_DIR:-}" ] && [ "${ALLOW_DASHBOARDS_DIR_OVERRIDE:-}" != "1"
 fi
 
 DASHBOARDS_DIR="${DASHBOARDS_DIR:-$DEFAULT_DASHBOARDS_DIR}"
-
 if [ -z "${GRAFANA_URL:-}" ]; then
   echo "ERROR: GRAFANA_URL is not set (e.g. https://your-slug.grafana.net)" >&2
   echo "Tip: cp .env.agent.example .env.agent && edit it, then run: source .env.agent && ./deploy/push-dashboards.sh" >&2

@@ -54,9 +54,11 @@
 - [x] **Durability & recovery:** Startup recovery (run paper_tick once before scheduler); REFERENCE.md § Durability and recovery; metric `evaluator_recovery_paper_trades_total`.
 - [x] **Paper tick gating:** Only mirror wallets that are currently followable (and stop mirroring immediately if they become excluded).
 - [ ] Task 25: Stage 1 — Known Bot Exclusion — **NEXT**
-- [ ] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md` — **NEXT**
+- [x] Task 32: Persona taxonomy enrichment (A–G styles + traits) — see `docs/plans/2026-02-10-persona-taxonomy-enrichment.md`
   - Implement Stage 2 exclusion detectors: `NEWS_SNIPER`, `LIQUIDITY_PROVIDER`, `JACKPOT_GAMBLER`, `BOT_SWARM_MICRO`.
   - Implement traits: `TOPIC_LANE=<category>`, `BONDER=1`, `WHALE=1`.
+  - Added DB-backed wallet rules lifecycle (`CANDIDATE -> PAPER_TRADING -> APPROVED -> STOPPED`) with `wallet_rules_state` and `wallet_rules_events`.
+  - Live circuit-breakers are implemented and configured off by default (`wallet_rules.live_breakers_enabled=false`).
 - [ ] Task 27: Patient Accumulator — position size percentile (Strategy Bible §3)
 - [ ] Task 26: Stage 2 — Sybil Cluster Detection
 

@@ -15,6 +15,7 @@ pub struct Config {
     pub observability: Observability,
     pub polymarket: Polymarket,
     pub personas: Personas,
+    pub wallet_rules: WalletRules,
     pub anomaly: Anomaly,
     pub web: Option<Web>,
 }
@@ -166,6 +167,49 @@ pub struct Personas {
     // Trust multipliers
     pub trust_30_90_multiplier: f64,
     pub obscurity_bonus_multiplier: f64,
+    // A/B/F/G exclusions + D/C/E trait thresholds
+    pub news_sniper_max_burstiness_top_1h_ratio: f64,
+    pub liquidity_provider_min_buy_sell_balance: f64,
+    pub liquidity_provider_min_mid_fill_ratio: f64,
+    pub bot_swarm_min_trades_per_day: f64,
+    pub bot_swarm_max_avg_trade_size_usdc: f64,
+    pub jackpot_min_pnl_top1_share: f64,
+    pub jackpot_max_win_rate: f64,
+    pub topic_lane_min_top_category_ratio: f64,
+    pub bonder_min_extreme_price_ratio: f64,
+    pub whale_min_avg_trade_size_usdc: f64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WalletRules {
+    // Discovery
+    pub min_trades_for_discovery: usize,
+    pub max_trades_per_day: f64,
+    pub max_distinct_markets_30d: usize,
+    pub min_median_hold_minutes: f64,
+    pub max_flip_rate: f64,
+    pub max_size_gini: f64,
+    pub min_liquidity_score: f64,
+    pub max_median_seconds_between_trades: f64,
+    pub max_fraction_trades_at_spread_edge: f64,
+    // Paper
+    pub paper_window_days: u32,
+    pub required_paper_trades: usize,
+    pub min_paper_profit_per_trade: f64,
+    pub max_paper_drawdown: f64,
+    pub max_paper_slippage_bps: f64,
+    // Live
+    pub live_breakers_enabled: bool,
+    pub live_max_drawdown: f64,
+    pub live_slippage_bps_spike: f64,
+    pub live_style_drift_score: f64,
+    pub live_inactivity_days: u32,
+    pub live_max_theme_concentration: f64,
+    pub live_max_correlation_cluster_exposure: f64,
+    // Risk caps
+    pub per_trade_risk_cap: f64,
+    pub per_market_risk_cap: f64,
+    pub per_wallet_risk_cap: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +270,25 @@ mod tests {
         assert!(config.personas.execution_master_pnl_ratio > 0.0);
         assert!(config.personas.trust_30_90_multiplier > 0.0);
         assert!(config.personas.obscurity_bonus_multiplier > 1.0);
+        assert!(config.personas.news_sniper_max_burstiness_top_1h_ratio > 0.0);
+        assert!(config.personas.liquidity_provider_min_mid_fill_ratio > 0.0);
+        assert!(config.personas.bot_swarm_min_trades_per_day > 0.0);
+        assert!(config.personas.jackpot_min_pnl_top1_share > 0.0);
+        assert!(config.personas.topic_lane_min_top_category_ratio > 0.0);
+        assert!(config.personas.bonder_min_extreme_price_ratio > 0.0);
+        assert!(config.personas.whale_min_avg_trade_size_usdc > 0.0);
+    }
+
+    #[test]
+    fn test_wallet_rules_config_loads() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        assert!(config.wallet_rules.min_trades_for_discovery > 0);
+        assert!(config.wallet_rules.max_trades_per_day > 0.0);
+        assert!(config.wallet_rules.paper_window_days > 0);
+        assert!(config.wallet_rules.required_paper_trades > 0);
+        assert!(config.wallet_rules.live_max_drawdown > 0.0);
+        assert!(config.wallet_rules.live_inactivity_days > 0);
+        assert!(!config.wallet_rules.live_breakers_enabled);
     }
 
     #[test]
@@ -365,6 +428,42 @@ sniper_min_win_rate = 0.85
 sniper_max_trades = 20
 trust_30_90_multiplier = 0.8
 obscurity_bonus_multiplier = 1.2
+news_sniper_max_burstiness_top_1h_ratio = 0.70
+liquidity_provider_min_buy_sell_balance = 0.45
+liquidity_provider_min_mid_fill_ratio = 0.60
+bot_swarm_min_trades_per_day = 200.0
+bot_swarm_max_avg_trade_size_usdc = 5.0
+jackpot_min_pnl_top1_share = 0.60
+jackpot_max_win_rate = 0.45
+topic_lane_min_top_category_ratio = 0.65
+bonder_min_extreme_price_ratio = 0.60
+whale_min_avg_trade_size_usdc = 100.0
+
+[wallet_rules]
+min_trades_for_discovery = 50
+max_trades_per_day = 120.0
+max_distinct_markets_30d = 60
+min_median_hold_minutes = 180.0
+max_flip_rate = 0.20
+max_size_gini = 0.75
+min_liquidity_score = 0.35
+max_median_seconds_between_trades = 45.0
+max_fraction_trades_at_spread_edge = 0.70
+paper_window_days = 14
+required_paper_trades = 30
+min_paper_profit_per_trade = 0.0
+max_paper_drawdown = 0.08
+max_paper_slippage_bps = 35.0
+live_breakers_enabled = false
+live_max_drawdown = 0.12
+live_slippage_bps_spike = 80.0
+live_style_drift_score = 0.65
+live_inactivity_days = 10
+live_max_theme_concentration = 0.55
+live_max_correlation_cluster_exposure = 0.65
+per_trade_risk_cap = 0.01
+per_market_risk_cap = 0.03
+per_wallet_risk_cap = 0.06
 
 [anomaly]
 win_rate_drop_pct = 15.0

@@ -86,11 +86,14 @@ trader_evaluator/
 | `positions_snapshots` | Periodic position state | proxy_wallet, condition_id, size, cash_pnl |
 | `holders_snapshots` | Periodic holder rankings | condition_id, proxy_wallet, amount |
 | `market_scores_daily` | MScore + factor breakdown | condition_id, mscore, rank |
-| `wallet_features_daily` | Derived features per window | proxy_wallet, window_days, trade_count, total_pnl |
+| `wallet_features_daily` | Derived features per window (including A–G style signals) | proxy_wallet, window_days, trade_count, total_pnl, trades_per_day, mid_fill_ratio, burstiness_top_1h_ratio |
 | `paper_trades` | Simulated copy trades | proxy_wallet, strategy, entry_price, pnl, status |
 | `paper_positions` | Current paper portfolio state | proxy_wallet, strategy, total_size_usdc |
 | `wallet_personas` | Persona classification per wallet | proxy_wallet, persona, confidence, feature_values_json, classified_at |
 | `wallet_exclusions` | Why a wallet was excluded | proxy_wallet, reason, metric_value, threshold, excluded_at |
+| `wallet_persona_traits` | Trait labels for follow/execution refinement | proxy_wallet, trait_key, trait_value, computed_at |
+| `wallet_rules_state` | Wallet copyability lifecycle state | proxy_wallet, state, baseline_style_json, last_seen_ts |
+| `wallet_rules_events` | Append-only rules decisions (discovery/paper/live) | proxy_wallet, phase, allow, reason, metrics_json |
 | `wallet_scores_daily` | WScore + factor breakdown | proxy_wallet, wscore, recommended_follow_mode |
 | `raw_api_responses` | **DEPRECATED** — schema exists but no code writes to it. Was removed to fix storage crisis (3.7GB in 28h). Parsed data in per-row `raw_json` columns in trades_raw, activity_raw, etc. is sufficient. |
 
@@ -188,6 +191,17 @@ Every wallet is classified into a persona before paper-trading. This is the gate
 Detection: rule-based SQL on `wallet_features_daily` first, ML classifier later once we have labeled outcomes.
 
 Full taxonomy with thresholds in `docs/EVALUATION_STRATEGY.md` Phase 2.
+
+## Wallet Rules Lifecycle
+
+Wallet copyability is persisted in `wallet_rules_state` with transitions:
+
+`CANDIDATE -> PAPER_TRADING -> APPROVED -> STOPPED`
+
+- Discovery checks move wallets from `CANDIDATE`/`STOPPED` to `PAPER_TRADING`.
+- Paper validation moves wallets from `PAPER_TRADING` to `APPROVED`.
+- Live circuit-breaker checks can move `APPROVED` to `STOPPED`.
+- Live breakers are implemented but disabled by default (`wallet_rules.live_breakers_enabled = false`) until live execution is enabled.
 
 ## Environment variables
 
