@@ -10,6 +10,10 @@ use crate::paper_trading::{is_crypto_15m_market, mirror_trade_to_paper, Side};
 use crate::persona_classification::{classify_wallet, stage1_filter, PersonaConfig, Stage1Config};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_features::compute_wallet_features;
+use crate::wallet_rules_engine::{
+    evaluate_discovery, evaluate_live, evaluate_paper, read_state, record_event,
+    style_snapshot_from_features, write_state, WalletRuleState,
+};
 use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
 
 use super::fetcher_traits::*;
@@ -29,10 +33,25 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         .call_named("paper_tick.select_unprocessed_trades", |conn| {
             let mut stmt = conn.prepare(
                 "
+                WITH latest_persona AS (
+                    SELECT proxy_wallet, MAX(classified_at) AS classified_at
+                    FROM wallet_personas
+                    GROUP BY proxy_wallet
+                ),
+                latest_exclusion AS (
+                    SELECT proxy_wallet, MAX(excluded_at) AS excluded_at
+                    FROM wallet_exclusions
+                    GROUP BY proxy_wallet
+                )
                 SELECT tr.id, tr.proxy_wallet, tr.condition_id, tr.side, tr.price, tr.outcome, tr.outcome_index
                 FROM trades_raw tr
                 LEFT JOIN paper_trades pt ON pt.triggered_by_trade_id = tr.id
+                JOIN wallet_rules_state wr ON wr.proxy_wallet = tr.proxy_wallet
+                JOIN latest_persona lp ON lp.proxy_wallet = tr.proxy_wallet
+                LEFT JOIN latest_exclusion le ON le.proxy_wallet = tr.proxy_wallet
                 WHERE pt.id IS NULL
+                  AND wr.state IN ('PAPER_TRADING', 'APPROVED')
+                  AND (le.excluded_at IS NULL OR le.excluded_at < lp.classified_at)
                 ORDER BY tr.id ASC
                 LIMIT 500
                 ",
@@ -112,6 +131,149 @@ pub async fn run_recovery_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         metrics::counter!("evaluator_recovery_paper_trades_total").increment(n);
     }
     Ok(n)
+}
+
+pub async fn run_wallet_rules_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    let now_epoch = chrono::Utc::now().timestamp();
+    let rules_cfg = cfg.wallet_rules.clone();
+    let changed: u64 = db
+        .call_named("wallet_rules.evaluate_batch", move |conn| {
+            let wallets: Vec<String> = conn
+                .prepare(
+                    "
+                    SELECT proxy_wallet
+                    FROM wallets
+                    WHERE is_active = 1
+                    ORDER BY discovered_at DESC
+                    ",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            let mut updates = 0_u64;
+            for proxy_wallet in wallets {
+                let features = match compute_wallet_features(conn, &proxy_wallet, 30, now_epoch) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(
+                            proxy_wallet = %proxy_wallet,
+                            error = %e,
+                            "wallet rules skipped: compute_wallet_features failed"
+                        );
+                        continue;
+                    }
+                };
+                let is_followable: Option<bool> = conn.query_row(
+                    "
+                    SELECT
+                      CASE
+                        WHEN (
+                          SELECT MAX(classified_at)
+                          FROM wallet_personas
+                          WHERE proxy_wallet = ?1
+                        ) IS NULL THEN NULL
+                        WHEN (
+                          SELECT MAX(excluded_at)
+                          FROM wallet_exclusions
+                          WHERE proxy_wallet = ?1
+                        ) IS NULL THEN 1
+                        WHEN (
+                          SELECT MAX(excluded_at)
+                          FROM wallet_exclusions
+                          WHERE proxy_wallet = ?1
+                        ) < (
+                          SELECT MAX(classified_at)
+                          FROM wallet_personas
+                          WHERE proxy_wallet = ?1
+                        ) THEN 1
+                        ELSE 0
+                      END
+                    ",
+                    rusqlite::params![proxy_wallet],
+                    |row| {
+                        let v: Option<i64> = row.get(0)?;
+                        Ok(v.map(|x| x == 1))
+                    },
+                )?;
+                let state = read_state(conn, &proxy_wallet)?;
+
+                if matches!(is_followable, Some(false)) {
+                    let decision = crate::wallet_rules_engine::WalletRuleDecision {
+                        allow: false,
+                        reason: "not_followable_persona_gate".to_string(),
+                    };
+                    write_state(
+                        conn,
+                        &proxy_wallet,
+                        WalletRuleState::Stopped,
+                        None,
+                        Some(now_epoch),
+                    )?;
+                    record_event(conn, &proxy_wallet, "discovery", &decision, None)?;
+                    if state != WalletRuleState::Stopped {
+                        updates += 1;
+                    }
+                    continue;
+                }
+
+                let (phase, decision, next_state) = match state {
+                    WalletRuleState::Candidate | WalletRuleState::Stopped => {
+                        let decision = evaluate_discovery(&features, &rules_cfg);
+                        let next = if decision.allow {
+                            WalletRuleState::PaperTrading
+                        } else {
+                            state
+                        };
+                        ("discovery", decision, next)
+                    }
+                    WalletRuleState::PaperTrading => {
+                        let decision = evaluate_paper(conn, &proxy_wallet, &rules_cfg)?;
+                        let next = if decision.allow {
+                            WalletRuleState::Approved
+                        } else {
+                            WalletRuleState::PaperTrading
+                        };
+                        ("paper", decision, next)
+                    }
+                    WalletRuleState::Approved => {
+                        let decision = evaluate_live(conn, &proxy_wallet, now_epoch, &rules_cfg)?;
+                        let next = if decision.allow {
+                            WalletRuleState::Approved
+                        } else {
+                            WalletRuleState::Stopped
+                        };
+                        ("live", decision, next)
+                    }
+                };
+
+                let baseline_json = if next_state == WalletRuleState::Approved
+                    && state != WalletRuleState::Approved
+                {
+                    Some(serde_json::to_string(&style_snapshot_from_features(
+                        &features,
+                    ))?)
+                } else {
+                    None
+                };
+                write_state(
+                    conn,
+                    &proxy_wallet,
+                    next_state,
+                    baseline_json.as_deref(),
+                    Some(now_epoch),
+                )?;
+                record_event(conn, &proxy_wallet, phase, &decision, None)?;
+
+                if next_state != state {
+                    updates += 1;
+                }
+            }
+
+            Ok(updates)
+        })
+        .await?;
+    metrics::gauge!("evaluator_wallet_rules_transitions_run").set(changed as f64);
+    Ok(changed)
 }
 
 pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
@@ -1068,6 +1230,15 @@ mod tests {
                 rusqlite::params!["0xw"],
             )?;
             conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES (?1, 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
+                rusqlite::params!["0xw"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state) VALUES (?1, 'APPROVED')",
+                rusqlite::params!["0xw"],
+            )?;
+            conn.execute(
                 "
                 INSERT INTO trades_raw
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
@@ -1139,5 +1310,145 @@ mod tests {
         let db = AsyncDb::open(":memory:").await.unwrap();
         let n = run_recovery_once(&db, &cfg).await.unwrap();
         assert_eq!(n, 0, "recovery with no unprocessed trades should process 0");
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_rules_once_candidate_to_paper_trading() {
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.wallet_rules.min_median_hold_minutes = 0.0;
+        cfg.wallet_rules.min_trades_for_discovery = 50;
+        cfg.wallet_rules.max_fraction_trades_at_spread_edge = 1.0;
+
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        db.call(|conn| {
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw', 'HOLDER', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES ('0xw', 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
+                [],
+            )?;
+            for i in 0..60 {
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES ('0xw', 'm1', 'BUY', 1.0, 0.5, ?1, ?2, '{}')",
+                    rusqlite::params![now - i, format!("0xtx{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let changed = run_wallet_rules_once(&db, &cfg).await.unwrap();
+        assert_eq!(changed, 1);
+
+        let state: String = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT state FROM wallet_rules_state WHERE proxy_wallet='0xw'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(state, "PAPER_TRADING");
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_only_mirrors_eligible_rule_states() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xcandidate', 'HOLDER', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xapproved', 'HOLDER', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state) VALUES ('0xcandidate', 'CANDIDATE')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state) VALUES ('0xapproved', 'APPROVED')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES ('0xcandidate', 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES ('0xapproved', 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES ('0xcandidate', 'm1', 'BUY', 1.0, 0.5, 1, '0xtx-candidate', '{}')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES ('0xapproved', 'm1', 'BUY', 1.0, 0.5, 2, '0xtx-approved', '{}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(
+            inserted, 1,
+            "only APPROVED/PAPER_TRADING wallets should be mirrored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_skips_persona_excluded_even_if_rules_approved() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xex', 'HOLDER', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state) VALUES ('0xex', 'APPROVED')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES ('0xex', 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                 VALUES ('0xex', 'NOISE_TRADER', 75.0, 50.0, '2026-02-11 00:00:00')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES ('0xex', 'm1', 'BUY', 1.0, 0.5, 1, '0xtx-ex', '{}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0, "excluded wallets must not be mirrored");
     }
 }

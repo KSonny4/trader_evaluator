@@ -563,6 +563,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

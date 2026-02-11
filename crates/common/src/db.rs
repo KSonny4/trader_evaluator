@@ -39,6 +39,7 @@ impl AsyncDb {
                     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
                     conn.execute_batch(SCHEMA)?;
                     migrate_markets_is_crypto_15m(conn)?;
+                    migrate_wallet_features_ag_columns(conn)?;
                     // For normal runtime operations we still want a longer busy_timeout.
                     conn.busy_timeout(std::time::Duration::from_secs(30))?;
                     Ok(())
@@ -159,6 +160,7 @@ impl Database {
     pub fn run_migrations(&self) -> Result<()> {
         self.conn.execute_batch(SCHEMA)?;
         migrate_markets_is_crypto_15m(&self.conn).map_err(anyhow::Error::from)?;
+        migrate_wallet_features_ag_columns(&self.conn).map_err(anyhow::Error::from)?;
         Ok(())
     }
 }
@@ -175,6 +177,36 @@ fn migrate_markets_is_crypto_15m(conn: &Connection) -> std::result::Result<(), r
             "ALTER TABLE markets ADD COLUMN is_crypto_15m INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+    }
+    Ok(())
+}
+
+fn migrate_wallet_features_ag_columns(
+    conn: &Connection,
+) -> std::result::Result<(), rusqlite::Error> {
+    let required: [(&str, &str); 9] = [
+        ("trades_per_day", "REAL NOT NULL DEFAULT 0.0"),
+        ("avg_trade_size_usdc", "REAL NOT NULL DEFAULT 0.0"),
+        ("size_cv", "REAL NOT NULL DEFAULT 0.0"),
+        ("buy_sell_balance", "REAL NOT NULL DEFAULT 0.0"),
+        ("mid_fill_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("extreme_price_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("burstiness_top_1h_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("top_category", "TEXT"),
+        ("top_category_ratio", "REAL NOT NULL DEFAULT 0.0"),
+    ];
+    for (name, ty) in required {
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('wallet_features_daily') WHERE name=?1",
+            rusqlite::params![name],
+            |row| row.get(0),
+        )?;
+        if has == 0 {
+            conn.execute(
+                &format!("ALTER TABLE wallet_features_daily ADD COLUMN {name} {ty}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -323,6 +355,15 @@ CREATE TABLE IF NOT EXISTS wallet_features_daily (
     sharpe_ratio REAL,
     active_positions INTEGER,
     concentration_ratio REAL,
+    trades_per_day REAL NOT NULL DEFAULT 0.0,
+    avg_trade_size_usdc REAL NOT NULL DEFAULT 0.0,
+    size_cv REAL NOT NULL DEFAULT 0.0,
+    buy_sell_balance REAL NOT NULL DEFAULT 0.0,
+    mid_fill_ratio REAL NOT NULL DEFAULT 0.0,
+    extreme_price_ratio REAL NOT NULL DEFAULT 0.0,
+    burstiness_top_1h_ratio REAL NOT NULL DEFAULT 0.0,
+    top_category TEXT,
+    top_category_ratio REAL NOT NULL DEFAULT 0.0,
     UNIQUE(proxy_wallet, feature_date, window_days)
 );
 
@@ -398,6 +439,33 @@ CREATE TABLE IF NOT EXISTS wallet_exclusions (
     UNIQUE(proxy_wallet, reason)
 );
 
+CREATE TABLE IF NOT EXISTS wallet_persona_traits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_wallet TEXT NOT NULL,
+    trait_key TEXT NOT NULL,
+    trait_value TEXT NOT NULL,
+    computed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+    UNIQUE(proxy_wallet, trait_key)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_rules_state (
+    proxy_wallet TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    baseline_style_json TEXT,
+    last_seen_ts INTEGER,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS wallet_rules_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_wallet TEXT NOT NULL,
+    phase TEXT NOT NULL,              -- discovery|paper|live
+    allow INTEGER NOT NULL,           -- 1|0
+    reason TEXT NOT NULL,
+    metrics_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_timestamp ON trades_raw(timestamp);
@@ -419,6 +487,9 @@ CREATE INDEX IF NOT EXISTS idx_wallet_scores_date ON wallet_scores_daily(score_d
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date_window_wscore ON wallet_scores_daily(score_date, window_days, wscore DESC);
 CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_exclusions_wallet ON wallet_exclusions(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_wallet_persona_traits_wallet ON wallet_persona_traits(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_wallet_rules_events_wallet ON wallet_rules_events(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_wallet_rules_events_phase_created_at ON wallet_rules_events(phase, created_at);
 
 CREATE TABLE IF NOT EXISTS copy_fidelity_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -479,6 +550,9 @@ mod tests {
         assert!(tables.contains(&"wallet_scores_daily".to_string()));
         assert!(tables.contains(&"wallet_personas".to_string()));
         assert!(tables.contains(&"wallet_exclusions".to_string()));
+        assert!(tables.contains(&"wallet_persona_traits".to_string()));
+        assert!(tables.contains(&"wallet_rules_state".to_string()));
+        assert!(tables.contains(&"wallet_rules_events".to_string()));
     }
 
     #[test]
@@ -519,6 +593,38 @@ mod tests {
             assert!(
                 indexes.contains(&name.to_string()),
                 "missing index {name}; existing indexes: {indexes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wallet_features_daily_has_ag_columns() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let cols: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('wallet_features_daily') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        for col in [
+            "trades_per_day",
+            "avg_trade_size_usdc",
+            "size_cv",
+            "buy_sell_balance",
+            "mid_fill_ratio",
+            "extreme_price_ratio",
+            "burstiness_top_1h_ratio",
+            "top_category",
+            "top_category_ratio",
+        ] {
+            assert!(
+                cols.contains(&col.to_string()),
+                "missing column {col}; got {cols:?}"
             );
         }
     }

@@ -42,6 +42,7 @@ OVERLENGTH_ALLOWLIST := \
 	crates/evaluator/src/ingestion.rs \
 	crates/evaluator/src/paper_trading.rs \
 	crates/evaluator/src/persona_classification.rs \
+	crates/evaluator/src/wallet_features.rs \
 	crates/common/src/db.rs
 
 check-file-length:

@@ -33,6 +33,16 @@ pub struct PersonaConfig {
     pub sniper_max_age_days: u32,
     pub sniper_min_win_rate: f64,
     pub sniper_max_trades: u32,
+    pub news_sniper_max_burstiness_top_1h_ratio: f64,
+    pub liquidity_provider_min_buy_sell_balance: f64,
+    pub liquidity_provider_min_mid_fill_ratio: f64,
+    pub bot_swarm_min_trades_per_day: f64,
+    pub bot_swarm_max_avg_trade_size_usdc: f64,
+    pub jackpot_min_pnl_top1_share: f64,
+    pub jackpot_max_win_rate: f64,
+    pub topic_lane_min_top_category_ratio: f64,
+    pub bonder_min_extreme_price_ratio: f64,
+    pub whale_min_avg_trade_size_usdc: f64,
 }
 
 impl PersonaConfig {
@@ -57,6 +67,16 @@ impl PersonaConfig {
             sniper_max_age_days: 30,
             sniper_min_win_rate: 0.85,
             sniper_max_trades: 20,
+            news_sniper_max_burstiness_top_1h_ratio: 0.70,
+            liquidity_provider_min_buy_sell_balance: 0.45,
+            liquidity_provider_min_mid_fill_ratio: 0.60,
+            bot_swarm_min_trades_per_day: 200.0,
+            bot_swarm_max_avg_trade_size_usdc: 5.0,
+            jackpot_min_pnl_top1_share: 0.60,
+            jackpot_max_win_rate: 0.45,
+            topic_lane_min_top_category_ratio: 0.65,
+            bonder_min_extreme_price_ratio: 0.60,
+            whale_min_avg_trade_size_usdc: 100.0,
         }
     }
 
@@ -81,6 +101,16 @@ impl PersonaConfig {
             sniper_max_age_days: p.sniper_max_age_days,
             sniper_min_win_rate: p.sniper_min_win_rate,
             sniper_max_trades: p.sniper_max_trades,
+            news_sniper_max_burstiness_top_1h_ratio: p.news_sniper_max_burstiness_top_1h_ratio,
+            liquidity_provider_min_buy_sell_balance: p.liquidity_provider_min_buy_sell_balance,
+            liquidity_provider_min_mid_fill_ratio: p.liquidity_provider_min_mid_fill_ratio,
+            bot_swarm_min_trades_per_day: p.bot_swarm_min_trades_per_day,
+            bot_swarm_max_avg_trade_size_usdc: p.bot_swarm_max_avg_trade_size_usdc,
+            jackpot_min_pnl_top1_share: p.jackpot_min_pnl_top1_share,
+            jackpot_max_win_rate: p.jackpot_max_win_rate,
+            topic_lane_min_top_category_ratio: p.topic_lane_min_top_category_ratio,
+            bonder_min_extreme_price_ratio: p.bonder_min_extreme_price_ratio,
+            whale_min_avg_trade_size_usdc: p.whale_min_avg_trade_size_usdc,
         }
     }
 }
@@ -124,6 +154,22 @@ pub enum ExclusionReason {
         min_win_rate_threshold: f64,
         max_trades_threshold: u32,
     },
+    NewsSniper {
+        burstiness: f64,
+        max_burstiness: f64,
+    },
+    LiquidityProvider {
+        side_balance: f64,
+        mid_fill_ratio: f64,
+    },
+    JackpotGambler {
+        pnl_top1_share: f64,
+        win_rate: f64,
+    },
+    BotSwarmMicro {
+        trades_per_day: f64,
+        avg_size_usdc: f64,
+    },
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -137,6 +183,10 @@ impl ExclusionReason {
             Self::TailRiskSeller { .. } => "TAIL_RISK_SELLER",
             Self::NoiseTrader { .. } => "NOISE_TRADER",
             Self::SniperInsider { .. } => "SNIPER_INSIDER",
+            Self::NewsSniper { .. } => "NEWS_SNIPER",
+            Self::LiquidityProvider { .. } => "LIQUIDITY_PROVIDER",
+            Self::JackpotGambler { .. } => "JACKPOT_GAMBLER",
+            Self::BotSwarmMicro { .. } => "BOT_SWARM_MICRO",
         }
     }
 
@@ -156,6 +206,10 @@ impl ExclusionReason {
                 trades_per_week, ..
             } => *trades_per_week,
             Self::SniperInsider { win_rate, .. } => *win_rate,
+            Self::NewsSniper { burstiness, .. } => *burstiness,
+            Self::LiquidityProvider { mid_fill_ratio, .. } => *mid_fill_ratio,
+            Self::JackpotGambler { pnl_top1_share, .. } => *pnl_top1_share,
+            Self::BotSwarmMicro { trades_per_day, .. } => *trades_per_day,
         }
     }
 
@@ -177,6 +231,10 @@ impl ExclusionReason {
                 min_win_rate_threshold,
                 ..
             } => *min_win_rate_threshold,
+            Self::NewsSniper { max_burstiness, .. } => *max_burstiness,
+            Self::LiquidityProvider { .. } => 0.0,
+            Self::JackpotGambler { .. } => 0.0,
+            Self::BotSwarmMicro { .. } => 0.0,
         }
     }
 }
@@ -235,6 +293,54 @@ pub fn record_exclusion(
             reason.threshold(),
         ],
     )?;
+    Ok(())
+}
+
+fn upsert_trait(conn: &Connection, proxy_wallet: &str, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO wallet_persona_traits (proxy_wallet, trait_key, trait_value, computed_at)
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+         ON CONFLICT(proxy_wallet, trait_key) DO UPDATE SET
+           trait_value = excluded.trait_value,
+           computed_at = strftime('%Y-%m-%d %H:%M:%f', 'now')",
+        rusqlite::params![proxy_wallet, key, value],
+    )?;
+    Ok(())
+}
+
+fn delete_trait(conn: &Connection, proxy_wallet: &str, key: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM wallet_persona_traits WHERE proxy_wallet = ?1 AND trait_key = ?2",
+        rusqlite::params![proxy_wallet, key],
+    )?;
+    Ok(())
+}
+
+fn record_persona_traits(
+    conn: &Connection,
+    features: &WalletFeatures,
+    config: &PersonaConfig,
+) -> Result<()> {
+    if features.top_category_ratio >= config.topic_lane_min_top_category_ratio {
+        if let Some(category) = features.top_category.as_deref() {
+            upsert_trait(conn, &features.proxy_wallet, "TOPIC_LANE", category)?;
+        }
+    } else {
+        delete_trait(conn, &features.proxy_wallet, "TOPIC_LANE")?;
+    }
+
+    if features.extreme_price_ratio >= config.bonder_min_extreme_price_ratio {
+        upsert_trait(conn, &features.proxy_wallet, "BONDER", "1")?;
+    } else {
+        delete_trait(conn, &features.proxy_wallet, "BONDER")?;
+    }
+
+    if features.avg_trade_size_usdc >= config.whale_min_avg_trade_size_usdc {
+        upsert_trait(conn, &features.proxy_wallet, "WHALE", "1")?;
+    } else {
+        delete_trait(conn, &features.proxy_wallet, "WHALE")?;
+    }
+
     Ok(())
 }
 
@@ -381,6 +487,72 @@ pub fn detect_sniper_insider(
     }
 }
 
+#[allow(dead_code)] // Wired into scheduler in Task 32
+pub fn detect_news_sniper(
+    burstiness_top_1h_ratio: f64,
+    max_burstiness: f64,
+) -> Option<ExclusionReason> {
+    if burstiness_top_1h_ratio > max_burstiness {
+        Some(ExclusionReason::NewsSniper {
+            burstiness: burstiness_top_1h_ratio,
+            max_burstiness,
+        })
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)] // Wired into scheduler in Task 32
+pub fn detect_liquidity_provider(
+    buy_sell_balance: f64,
+    mid_fill_ratio: f64,
+    min_buy_sell_balance: f64,
+    min_mid_fill_ratio: f64,
+) -> Option<ExclusionReason> {
+    if buy_sell_balance >= min_buy_sell_balance && mid_fill_ratio >= min_mid_fill_ratio {
+        Some(ExclusionReason::LiquidityProvider {
+            side_balance: buy_sell_balance,
+            mid_fill_ratio,
+        })
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)] // Wired into scheduler in Task 32
+pub fn detect_jackpot_gambler(
+    pnl_top1_share: f64,
+    win_rate: f64,
+    min_pnl_top1_share: f64,
+    max_win_rate: f64,
+) -> Option<ExclusionReason> {
+    if pnl_top1_share >= min_pnl_top1_share && win_rate <= max_win_rate {
+        Some(ExclusionReason::JackpotGambler {
+            pnl_top1_share,
+            win_rate,
+        })
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)] // Wired into scheduler in Task 32
+pub fn detect_bot_swarm_micro(
+    trades_per_day: f64,
+    avg_size_usdc: f64,
+    min_trades_per_day: f64,
+    max_avg_size_usdc: f64,
+) -> Option<ExclusionReason> {
+    if trades_per_day >= min_trades_per_day && avg_size_usdc <= max_avg_size_usdc {
+        Some(ExclusionReason::BotSwarmMicro {
+            trades_per_day,
+            avg_size_usdc,
+        })
+    } else {
+        None
+    }
+}
+
 /// Detect the Patient Accumulator persona: long holds, low trading frequency.
 /// Returns Some(PatientAccumulator) if criteria are met, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -450,6 +622,9 @@ pub fn classify_wallet(
         0.0
     };
 
+    // Traits are computed for all wallets (followable and excluded).
+    record_persona_traits(conn, features, config)?;
+
     // --- Exclusion checks (Stage 2) ---
 
     if let Some(reason) = detect_sniper_insider(
@@ -474,6 +649,34 @@ pub fn classify_wallet(
         return Ok(ClassificationResult::Excluded(reason));
     }
 
+    if let Some(reason) = detect_news_sniper(
+        features.burstiness_top_1h_ratio,
+        config.news_sniper_max_burstiness_top_1h_ratio,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
+    if let Some(reason) = detect_liquidity_provider(
+        features.buy_sell_balance,
+        features.mid_fill_ratio,
+        config.liquidity_provider_min_buy_sell_balance,
+        config.liquidity_provider_min_mid_fill_ratio,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
+    if let Some(reason) = detect_bot_swarm_micro(
+        features.trades_per_day,
+        features.avg_trade_size_usdc,
+        config.bot_swarm_min_trades_per_day,
+        config.bot_swarm_max_avg_trade_size_usdc,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
     let avg_win_pnl = if features.win_count > 0 {
         features.total_pnl.max(1.0) / f64::from(features.win_count)
     } else {
@@ -491,6 +694,16 @@ pub fn classify_wallet(
         loss_ratio,
         config.tail_risk_min_win_rate,
         config.tail_risk_loss_multiplier,
+    ) {
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
+    if let Some(reason) = detect_jackpot_gambler(
+        features.concentration_ratio,
+        win_rate,
+        config.jackpot_min_pnl_top1_share,
+        config.jackpot_max_win_rate,
     ) {
         record_exclusion(conn, &features.proxy_wallet, &reason)?;
         return Ok(ClassificationResult::Excluded(reason));
@@ -810,6 +1023,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_exclusion_reason_strings_include_ag_personas() {
+        assert_eq!(
+            ExclusionReason::NewsSniper {
+                burstiness: 1.0,
+                max_burstiness: 0.9
+            }
+            .reason_str(),
+            "NEWS_SNIPER"
+        );
+        assert_eq!(
+            ExclusionReason::LiquidityProvider {
+                side_balance: 0.5,
+                mid_fill_ratio: 0.8
+            }
+            .reason_str(),
+            "LIQUIDITY_PROVIDER"
+        );
+        assert_eq!(
+            ExclusionReason::JackpotGambler {
+                pnl_top1_share: 0.9,
+                win_rate: 0.3
+            }
+            .reason_str(),
+            "JACKPOT_GAMBLER"
+        );
+        assert_eq!(
+            ExclusionReason::BotSwarmMicro {
+                trades_per_day: 500.0,
+                avg_size_usdc: 1.0
+            }
+            .reason_str(),
+            "BOT_SWARM_MICRO"
+        );
+    }
+
     fn make_features(unique_markets: u32, win_count: u32, loss_count: u32) -> WalletFeatures {
         WalletFeatures {
             proxy_wallet: "0xabc".to_string(),
@@ -823,9 +1072,18 @@ mod tests {
             avg_hold_time_hours: 24.0,
             max_drawdown_pct: 8.0,
             trades_per_week: 10.0,
+            trades_per_day: 10.0 / 7.0,
             sharpe_ratio: 1.5,
             active_positions: 3,
             concentration_ratio: 0.75,
+            avg_trade_size_usdc: 200.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
         }
     }
 
@@ -921,9 +1179,18 @@ mod tests {
             avg_hold_time_hours: 12.0,
             max_drawdown_pct,
             trades_per_week: 25.0,
+            trades_per_day: 25.0 / 7.0,
             sharpe_ratio,
             active_positions: 8,
             concentration_ratio: 0.50,
+            avg_trade_size_usdc: 25.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
         }
     }
 
@@ -1010,9 +1277,18 @@ mod tests {
             avg_hold_time_hours,
             max_drawdown_pct: 5.0,
             trades_per_week,
+            trades_per_day: trades_per_week / 7.0,
             sharpe_ratio: 0.8,
             active_positions: 2,
             concentration_ratio: 0.80,
+            avg_trade_size_usdc: 2000.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
         }
     }
 
@@ -1198,6 +1474,39 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    #[test]
+    fn test_detect_news_sniper_bursty_short_horizon_proxy_excludes() {
+        let reason = detect_news_sniper(0.95, 0.90);
+        assert!(matches!(reason, Some(ExclusionReason::NewsSniper { .. })));
+    }
+
+    #[test]
+    fn test_detect_liquidity_provider_two_sided_mid_fills_excludes() {
+        let reason = detect_liquidity_provider(0.50, 0.80, 0.45, 0.60);
+        assert!(matches!(
+            reason,
+            Some(ExclusionReason::LiquidityProvider { .. })
+        ));
+    }
+
+    #[test]
+    fn test_detect_jackpot_gambler_pnl_concentration_excludes() {
+        let reason = detect_jackpot_gambler(0.80, 0.30, 0.60, 0.45);
+        assert!(matches!(
+            reason,
+            Some(ExclusionReason::JackpotGambler { .. })
+        ));
+    }
+
+    #[test]
+    fn test_detect_bot_swarm_micro_extreme_frequency_excludes() {
+        let reason = detect_bot_swarm_micro(300.0, 2.0, 200.0, 5.0);
+        assert!(matches!(
+            reason,
+            Some(ExclusionReason::BotSwarmMicro { .. })
+        ));
+    }
+
     // --- Task 12: Classification orchestrator ---
 
     #[test]
@@ -1217,9 +1526,18 @@ mod tests {
             avg_hold_time_hours: 24.0,
             max_drawdown_pct: 8.0,
             trades_per_week: 10.0,
+            trades_per_day: 10.0 / 7.0,
             sharpe_ratio: 1.5,
             active_positions: 3,
             concentration_ratio: 0.75,
+            avg_trade_size_usdc: 200.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1258,9 +1576,18 @@ mod tests {
             avg_hold_time_hours: 0.5,
             max_drawdown_pct: 3.0,
             trades_per_week: 75.0,
+            trades_per_day: 75.0 / 7.0,
             sharpe_ratio: 0.1,
             active_positions: 15,
             concentration_ratio: 0.3,
+            avg_trade_size_usdc: 10.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1301,14 +1628,73 @@ mod tests {
             avg_hold_time_hours: 12.0,
             max_drawdown_pct: 8.0,
             trades_per_week: 12.0,
+            trades_per_day: 12.0 / 7.0,
             sharpe_ratio: 0.7,
             active_positions: 8,
             concentration_ratio: 0.50,
+            avg_trade_size_usdc: 100.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
         };
 
         let config = PersonaConfig::default_for_test();
         let result = classify_wallet(&db.conn, &features, 180, &config).unwrap();
 
         assert_eq!(result, ClassificationResult::Unclassified);
+    }
+
+    #[test]
+    fn test_classify_wallet_records_traits() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let features = WalletFeatures {
+            proxy_wallet: "0xtrait".to_string(),
+            window_days: 30,
+            trade_count: 60,
+            win_count: 42,
+            loss_count: 18,
+            total_pnl: 900.0,
+            avg_position_size: 300.0,
+            unique_markets: 6,
+            avg_hold_time_hours: 72.0,
+            max_drawdown_pct: 5.0,
+            trades_per_week: 3.0,
+            trades_per_day: 0.4,
+            sharpe_ratio: 1.2,
+            active_positions: 3,
+            concentration_ratio: 0.7,
+            avg_trade_size_usdc: 300.0,
+            size_cv: 0.2,
+            buy_sell_balance: 0.5,
+            mid_fill_ratio: 0.3,
+            extreme_price_ratio: 0.8,
+            burstiness_top_1h_ratio: 0.1,
+            top_category: Some("sports".to_string()),
+            top_category_ratio: 0.9,
+        };
+
+        let config = PersonaConfig::default_for_test();
+        let _ = classify_wallet(&db.conn, &features, 180, &config).unwrap();
+
+        let traits: Vec<(String, String)> = db
+            .conn
+            .prepare(
+                "SELECT trait_key, trait_value FROM wallet_persona_traits WHERE proxy_wallet = '0xtrait'",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        assert!(traits.contains(&("TOPIC_LANE".to_string(), "sports".to_string())));
+        assert!(traits.contains(&("BONDER".to_string(), "1".to_string())));
+        assert!(traits.contains(&("WHALE".to_string(), "1".to_string())));
     }
 }
