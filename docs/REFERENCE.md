@@ -98,7 +98,7 @@ trader_evaluator/
 
 ### Followable now (canonical rule)
 
-`followable_now` means wallets we can actively paper-follow right now:
+`followable_now` remains the runtime gating rule for active mirroring:
 - `wallets.is_active = 1`
 - wallet has latest persona row in `wallet_personas`
 - latest exclusion is missing, or strictly older than latest persona timestamp
@@ -107,20 +107,20 @@ trader_evaluator/
 
 Dashboard funnel uses one canonical sequence:
 1. `Markets fetched`
-2. `Markets scored today`
+2. `Markets scored (ever)`
 3. `Wallets discovered`
-4. `Stage 1 passed`
-5. `Stage 2 classified`
-6. `Paper active (followable now)`
-7. `Follow-worthy`
+4. `Stage 1 passed (ever)`
+5. `Stage 2 classified (ever)`
+6. `Paper traded (ever)`
+7. `Follow-worthy (ever)`
 8. `Human approval` (placeholder `0`)
 9. `Live` (placeholder `0`)
 
 Each stage shows `processed/total`. For market→wallet transitions, the UI shows a `unit change` marker to make denominator changes explicit.
 
-### Paper stage meaning
+### Ever/to-date semantics
 
-`Paper active` is **not** the historical count of wallets with paper trades. It is the current `followable_now` set.
+Unified funnel stages are rendered as cumulative `ever/to-date` counts (historical context), not only current-day snapshots.
 
 ## Paper sizing behavior
 

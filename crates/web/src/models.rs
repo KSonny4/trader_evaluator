@@ -317,10 +317,10 @@ impl UnifiedFunnelCounts {
                 "All markets currently stored in the DB.",
             ),
             (
-                "Markets scored today",
+                "Markets scored (ever)",
                 self.markets_scored_today,
                 FunnelUnitKind::Markets,
-                "Markets with a score row for today.",
+                "Markets with at least one score row (historical to date).",
             ),
             (
                 "Wallets discovered",
@@ -329,28 +329,28 @@ impl UnifiedFunnelCounts {
                 "All discovered wallets in the watchlist table.",
             ),
             (
-                "Stage 1 passed",
+                "Stage 1 passed (ever)",
                 self.stage1_passed,
                 FunnelUnitKind::Wallets,
-                "Active wallets that passed Stage 1 filters.",
+                "Wallets that ever passed Stage 1 (to date).",
             ),
             (
-                "Stage 2 classified",
+                "Stage 2 classified (ever)",
                 self.stage2_classified,
                 FunnelUnitKind::Wallets,
-                "Stage 1-passed wallets with either a persona or a non-Stage-1 exclusion.",
+                "Wallets that ever reached Stage 2 classification (persona or Stage 2 exclusion).",
             ),
             (
-                "Paper active (followable now)",
+                "Paper traded (ever)",
                 self.paper_active_followable,
                 FunnelUnitKind::Wallets,
-                "Wallets currently followable now (active + latest persona newer than latest exclusion).",
+                "Wallets with at least one historical paper trade (to date).",
             ),
             (
-                "Follow-worthy",
+                "Follow-worthy (ever)",
                 self.follow_worthy_wallets,
                 FunnelUnitKind::Wallets,
-                "Wallets meeting current follow-worthy ROI thresholds.",
+                "Wallets that ever met follow-worthy ROI thresholds on any scoring date.",
             ),
             (
                 "Human approval",
@@ -578,7 +578,7 @@ mod tests {
         let stages = counts.to_stages();
         assert_eq!(stages.len(), 9);
         assert_eq!(stages[0].label, "Markets fetched");
-        assert_eq!(stages[1].label, "Markets scored today");
+        assert_eq!(stages[1].label, "Markets scored (ever)");
         assert_eq!(stages[2].label, "Wallets discovered");
         assert_eq!(stages[2].unit_kind, "wallets");
         assert!(stages[2].unit_change_from_prev);

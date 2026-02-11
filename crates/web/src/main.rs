@@ -755,9 +755,7 @@ async fn main() -> Result<()> {
         max_daily_loss_pct: config.paper_trading.max_daily_loss_pct,
         max_concurrent_positions: i64::from(config.risk.max_concurrent_positions),
         mirror_use_proportional_sizing: config.paper_trading.mirror_use_proportional_sizing,
-        mirror_default_their_bankroll_usd: config
-            .paper_trading
-            .mirror_default_their_bankroll_usd,
+        mirror_default_their_bankroll_usd: config.paper_trading.mirror_default_their_bankroll_usd,
     });
 
     tokio::spawn(spawn_derived_gauges_updater(state.clone()));
@@ -857,9 +855,7 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
-            mirror_default_their_bankroll_usd: cfg
-                .paper_trading
-                .mirror_default_their_bankroll_usd,
+            mirror_default_their_bankroll_usd: cfg.paper_trading.mirror_default_their_bankroll_usd,
         });
         create_router_with_state(state)
     }
@@ -888,9 +884,7 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
-            mirror_default_their_bankroll_usd: cfg
-                .paper_trading
-                .mirror_default_their_bankroll_usd,
+            mirror_default_their_bankroll_usd: cfg.paper_trading.mirror_default_their_bankroll_usd,
         });
         create_router_with_state(state)
     }
@@ -919,9 +913,7 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
-            mirror_default_their_bankroll_usd: cfg
-                .paper_trading
-                .mirror_default_their_bankroll_usd,
+            mirror_default_their_bankroll_usd: cfg.paper_trading.mirror_default_their_bankroll_usd,
         });
         create_router_with_state(state)
     }
@@ -1559,10 +1551,10 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("Markets fetched"));
-        assert!(html.contains("Markets scored today"));
+        assert!(html.contains("Markets scored (ever)"));
         assert!(html.contains("Wallets discovered"));
-        assert!(html.contains("Paper active"));
-        assert!(html.contains("Follow-worthy"));
+        assert!(html.contains("Paper traded (ever)"));
+        assert!(html.contains("Follow-worthy (ever)"));
         assert!(html.contains("Human approval"));
         assert!(html.contains("Live"));
         assert!(html.contains("0/0"));
@@ -1645,9 +1637,7 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
-            mirror_default_their_bankroll_usd: cfg
-                .paper_trading
-                .mirror_default_their_bankroll_usd,
+            mirror_default_their_bankroll_usd: cfg.paper_trading.mirror_default_their_bankroll_usd,
         });
         let app = create_router_with_state(state);
 
@@ -1750,9 +1740,7 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
-            mirror_default_their_bankroll_usd: cfg
-                .paper_trading
-                .mirror_default_their_bankroll_usd,
+            mirror_default_their_bankroll_usd: cfg.paper_trading.mirror_default_their_bankroll_usd,
         });
         let app = create_router_with_state(state);
 
@@ -2021,9 +2009,7 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
-            mirror_default_their_bankroll_usd: cfg
-                .paper_trading
-                .mirror_default_their_bankroll_usd,
+            mirror_default_their_bankroll_usd: cfg.paper_trading.mirror_default_their_bankroll_usd,
         });
         let app = create_router_with_state(state);
 

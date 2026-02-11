@@ -52,16 +52,16 @@ Each stage has measurable drop-off rates visible in the UI and Grafana.
 
 For `sniper.pkubelka.cz`, funnel rendering is unified into one bar and uses explicit `processed/total` values on every step:
 1. `Markets fetched`
-2. `Markets scored today`
+2. `Markets scored (ever)`
 3. `Wallets discovered`
-4. `Stage 1 passed`
-5. `Stage 2 classified`
-6. `Paper active (followable now)`
-7. `Follow-worthy`
+4. `Stage 1 passed (ever)`
+5. `Stage 2 classified (ever)`
+6. `Paper traded (ever)`
+7. `Follow-worthy (ever)`
 8. `Human approval` (placeholder `0`)
 9. `Live` (placeholder `0`)
 
-`Paper active` means the current **followable now** wallet set (active wallets with latest persona and no newer exclusion), not historical paper trade count.
+These dashboard funnel counts are cumulative `ever/to-date` values (historical context), not "today-only" counters.
 
 ---
 

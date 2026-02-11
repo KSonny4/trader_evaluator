@@ -4,13 +4,13 @@
 
 This change set unifies dashboard semantics and paper sizing behavior:
 - one combined funnel across market + wallet lifecycle
-- one canonical meaning of followable wallets (`followable_now`)
-- paper stage reflects currently active followable wallets
+- funnel counts rendered as cumulative `ever/to-date`
+- paper stage reflects historical paper-traded wallets
 - paper sizing defaults to proportional mode with deterministic fallback
 
 ## Canonical definitions
 
-### `followable_now`
+### `followable_now` (runtime rule)
 
 A wallet is followable now when:
 1. `wallets.is_active = 1`
@@ -20,12 +20,12 @@ A wallet is followable now when:
 ### Unified funnel stages
 
 1. Markets fetched
-2. Markets scored today
+2. Markets scored (ever)
 3. Wallets discovered
-4. Stage 1 passed
-5. Stage 2 classified
-6. Paper active (followable now)
-7. Follow-worthy
+4. Stage 1 passed (ever)
+5. Stage 2 classified (ever)
+6. Paper traded (ever)
+7. Follow-worthy (ever)
 8. Human approval (placeholder 0)
 9. Live (placeholder 0)
 
