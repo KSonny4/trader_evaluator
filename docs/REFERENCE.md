@@ -94,6 +94,45 @@ trader_evaluator/
 | `wallet_scores_daily` | WScore + factor breakdown | proxy_wallet, wscore, recommended_follow_mode |
 | `raw_api_responses` | **DEPRECATED** — schema exists but no code writes to it. Was removed to fix storage crisis (3.7GB in 28h). Parsed data in per-row `raw_json` columns in trades_raw, activity_raw, etc. is sufficient. |
 
+## Canonical dashboard semantics
+
+### Followable now (canonical rule)
+
+`followable_now` means wallets we can actively paper-follow right now:
+- `wallets.is_active = 1`
+- wallet has latest persona row in `wallet_personas`
+- latest exclusion is missing, or strictly older than latest persona timestamp
+
+### Unified funnel stages
+
+Dashboard funnel uses one canonical sequence:
+1. `Markets fetched`
+2. `Markets scored today`
+3. `Wallets discovered`
+4. `Stage 1 passed`
+5. `Stage 2 classified`
+6. `Paper active (followable now)`
+7. `Follow-worthy`
+8. `Human approval` (placeholder `0`)
+9. `Live` (placeholder `0`)
+
+Each stage shows `processed/total`. For market→wallet transitions, the UI shows a `unit change` marker to make denominator changes explicit.
+
+### Paper stage meaning
+
+`Paper active` is **not** the historical count of wallets with paper trades. It is the current `followable_now` set.
+
+## Paper sizing behavior
+
+Paper mirror sizing defaults to proportional mode:
+- `their_size_usd = trades_raw.size * trades_raw.price`
+- `our_size_usd = their_size_usd * (paper_trading.bankroll_usd / paper_trading.mirror_default_their_bankroll_usd)`
+
+Fallback behavior:
+- if proportional mode is disabled, use flat `paper_trading.per_trade_size_usd`
+- if source size/price is missing or invalid, use flat `paper_trading.per_trade_size_usd`
+- if `per_trade_size_usd <= 0`, fallback to legacy `position_size_usdc`
+
 ## Reference implementations
 
 See `docs/ARCHITECTURE.md` for runtime and orchestration (current and target).

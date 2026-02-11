@@ -16,6 +16,37 @@ use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
 
 use super::fetcher_traits::*;
 
+fn compute_paper_mirror_size_usd(cfg: &Config, trade_size: f64, trade_price: f64) -> f64 {
+    let flat_fallback = if cfg.paper_trading.per_trade_size_usd > 0.0 {
+        cfg.paper_trading.per_trade_size_usd
+    } else {
+        cfg.paper_trading.position_size_usdc
+    };
+
+    if !cfg.paper_trading.mirror_use_proportional_sizing {
+        return flat_fallback;
+    }
+
+    if !trade_size.is_finite()
+        || !trade_price.is_finite()
+        || trade_size <= 0.0
+        || trade_price <= 0.0
+        || cfg.paper_trading.bankroll_usd <= 0.0
+        || cfg.paper_trading.mirror_default_their_bankroll_usd <= 0.0
+    {
+        return flat_fallback;
+    }
+
+    let their_size_usd = trade_size * trade_price;
+    let scale = cfg.paper_trading.bankroll_usd / cfg.paper_trading.mirror_default_their_bankroll_usd;
+    let our_size_usd = their_size_usd * scale;
+    if our_size_usd.is_finite() && our_size_usd > 0.0 {
+        our_size_usd
+    } else {
+        flat_fallback
+    }
+}
+
 pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     // Read unprocessed trades from DB.
     type TradeRow = (
@@ -23,6 +54,7 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         String,
         String,
         Option<String>,
+        f64,
         f64,
         Option<String>,
         Option<i32>,
@@ -45,7 +77,7 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
                     FROM wallet_exclusions
                     GROUP BY proxy_wallet
                 )
-                SELECT tr.id, tr.proxy_wallet, tr.condition_id, tr.side, tr.price, tr.outcome, tr.outcome_index
+                SELECT tr.id, tr.proxy_wallet, tr.condition_id, tr.side, tr.size, tr.price, tr.outcome, tr.outcome_index
                 FROM trades_raw tr
                 LEFT JOIN paper_trades pt ON pt.triggered_by_trade_id = tr.id
                 JOIN latest_persona lp ON lp.proxy_wallet = tr.proxy_wallet
@@ -64,8 +96,9 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, f64>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<i32>>(6)?,
+                        row.get::<_, f64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i32>>(7)?,
                     ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -74,7 +107,8 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         .await?;
 
     let mut inserted = 0_u64;
-    for (trade_id, proxy_wallet, condition_id, side_s, price, outcome, outcome_index) in rows {
+    for (trade_id, proxy_wallet, condition_id, side_s, size, price, outcome, outcome_index) in rows
+    {
         // Stop mirroring immediately if a wallet becomes non-followable while we're mid-batch.
         // (The batch query above filters at selection time, but persona/exclusion state can
         // change concurrently via the persona classification job.)
@@ -122,6 +156,8 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
             _ => Side::Buy,
         };
 
+        let our_size_usd = compute_paper_mirror_size_usd(cfg, size, price);
+
         let decision = mirror_trade_to_paper(
             db,
             &proxy_wallet,
@@ -131,7 +167,7 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
             outcome_index,
             price,
             Some(trade_id),
-            cfg.paper_trading.position_size_usdc,
+            our_size_usd,
             cfg.risk.slippage_pct,
             cfg.risk.paper_bankroll_usdc,
             cfg.risk.max_exposure_per_market_pct,
@@ -892,6 +928,29 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_paper_mirror_size_usd_proportional_mode() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let size = compute_paper_mirror_size_usd(&cfg, 100.0, 0.5);
+        assert!((size - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compute_paper_mirror_size_usd_flat_fallback_mode() {
+        let mut cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.paper_trading.mirror_use_proportional_sizing = false;
+        cfg.paper_trading.per_trade_size_usd = 33.0;
+        let size = compute_paper_mirror_size_usd(&cfg, 100.0, 0.5);
+        assert!((size - 33.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compute_paper_mirror_size_usd_invalid_source_falls_back() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let size = compute_paper_mirror_size_usd(&cfg, 0.0, 0.5);
+        assert!((size - cfg.paper_trading.per_trade_size_usd).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_compute_trades_24h_from_db() {
         let db = Database::open(":memory:").unwrap();
         db.run_migrations().unwrap();
@@ -1493,6 +1552,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cnt, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_uses_proportional_size_from_source_notional() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xprop"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at) VALUES (?1, 'Consistent Generalist', 1.0, datetime('now'))",
+                rusqlite::params!["0xprop"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 100.0, 0.5, 1, '0xtx_prop', '{}')
+                ",
+                rusqlite::params!["0xprop", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 1);
+
+        let size_usdc: f64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT size_usdc FROM paper_trades WHERE triggered_by_trade_id IS NOT NULL LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        // source notional=50, scaling=1000/5000 -> 10
+        assert!((size_usdc - 10.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_uses_flat_fallback_when_source_size_invalid() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xfallback"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at) VALUES (?1, 'Consistent Generalist', 1.0, datetime('now'))",
+                rusqlite::params!["0xfallback"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 0.0, 0.5, 1, '0xtx_fallback', '{}')
+                ",
+                rusqlite::params!["0xfallback", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 1);
+
+        let size_usdc: f64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT size_usdc FROM paper_trades WHERE triggered_by_trade_id IS NOT NULL LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!((size_usdc - cfg.paper_trading.per_trade_size_usd).abs() < 1e-9);
     }
 
     #[tokio::test]

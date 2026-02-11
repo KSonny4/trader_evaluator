@@ -91,6 +91,8 @@ pub struct PaperTrading {
     pub strategies: Vec<String>,
     pub mirror_delay_secs: u64,
     pub position_size_usdc: f64,
+    pub mirror_use_proportional_sizing: bool,
+    pub mirror_default_their_bankroll_usd: f64,
     // Copy fidelity and risk
     pub bankroll_usd: f64,
     pub max_total_exposure_pct: f64,
@@ -318,6 +320,8 @@ backoff_base_ms = 1000
 strategies = ["mirror"]
 mirror_delay_secs = 0
 position_size_usdc = 25.0
+mirror_use_proportional_sizing = true
+mirror_default_their_bankroll_usd = 5000.0
 bankroll_usd = 1000.0
 max_total_exposure_pct = 15.0
 max_daily_loss_pct = 3.0

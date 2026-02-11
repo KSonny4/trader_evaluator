@@ -39,6 +39,16 @@ pub struct PersonaFunnelStage {
 pub struct FunnelStage {
     pub label: String,
     pub count: i64,
+    /// Current stage processed value.
+    pub processed: i64,
+    /// Previous stage total value used for processed/total.
+    pub total: i64,
+    /// Processed/total as percentage when total > 0.
+    pub pct: Option<f64>,
+    /// "markets" or "wallets"
+    pub unit_kind: String,
+    /// True when previous and current stage units differ.
+    pub unit_change_from_prev: bool,
     /// Drop-off percentage to next stage (None for last stage)
     pub drop_pct: Option<String>,
     /// Tailwind bg color class
@@ -47,6 +57,19 @@ pub struct FunnelStage {
     pub drop_color: String,
     /// Tooltip text: code-derived criteria and what this stage represents
     pub info: String,
+}
+
+/// Canonical combined funnel counts used for the unified pipeline bar.
+pub struct UnifiedFunnelCounts {
+    pub markets_fetched: i64,
+    pub markets_scored_today: i64,
+    pub wallets_discovered: i64,
+    pub stage1_passed: i64,
+    pub stage2_classified: i64,
+    pub paper_active_followable: i64,
+    pub follow_worthy_wallets: i64,
+    pub human_approval_wallets: i64,
+    pub live_wallets: i64,
 }
 
 /// A job heartbeat for the status strip
@@ -113,6 +136,7 @@ pub struct PaperTradeRow {
     pub proxy_wallet: String,
     pub wallet_short: String,
     pub market_title: String,
+    pub source_notional_display: String,
     pub side: String,
     pub side_color: String,
     pub size_display: String,
@@ -141,6 +165,8 @@ pub struct PaperSummary {
     pub exposure_pct_display: String,
     pub copy_fidelity_display: String,
     pub follower_slippage_display: String,
+    pub sizing_mode_display: String,
+    pub sizing_estimator_bankroll_display: String,
     pub risk_status: String,
     pub risk_status_color: String,
 }
@@ -185,6 +211,8 @@ pub struct JourneyEvent {
 pub struct WalletJourney {
     pub proxy_wallet: String,
     pub wallet_short: String,
+    pub discovered_from: String,
+    pub discovered_market_title: Option<String>,
     pub discovered_at: String,
     pub persona: Option<String>,
     pub confidence_display: Option<String>,
@@ -249,10 +277,145 @@ impl FunnelCounts {
                 FunnelStage {
                     label: label.to_string(),
                     count: *count,
+                    processed: *count,
+                    total: *count,
+                    pct: if *count > 0 { Some(100.0) } else { None },
+                    unit_kind: "legacy".to_string(),
+                    unit_change_from_prev: false,
                     drop_pct,
                     bg_color: bg.to_string(),
                     drop_color,
                     info: infos[i].clone(),
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FunnelUnitKind {
+    Markets,
+    Wallets,
+}
+
+impl FunnelUnitKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Markets => "markets",
+            Self::Wallets => "wallets",
+        }
+    }
+}
+
+impl UnifiedFunnelCounts {
+    pub fn to_stages(&self) -> Vec<FunnelStage> {
+        let stages: [(&str, i64, FunnelUnitKind, &str); 9] = [
+            (
+                "Markets fetched",
+                self.markets_fetched,
+                FunnelUnitKind::Markets,
+                "All markets currently stored in the DB.",
+            ),
+            (
+                "Markets scored today",
+                self.markets_scored_today,
+                FunnelUnitKind::Markets,
+                "Markets with a score row for today.",
+            ),
+            (
+                "Wallets discovered",
+                self.wallets_discovered,
+                FunnelUnitKind::Wallets,
+                "All discovered wallets in the watchlist table.",
+            ),
+            (
+                "Stage 1 passed",
+                self.stage1_passed,
+                FunnelUnitKind::Wallets,
+                "Active wallets that passed Stage 1 filters.",
+            ),
+            (
+                "Stage 2 classified",
+                self.stage2_classified,
+                FunnelUnitKind::Wallets,
+                "Stage 1-passed wallets with either a persona or a non-Stage-1 exclusion.",
+            ),
+            (
+                "Paper active (followable now)",
+                self.paper_active_followable,
+                FunnelUnitKind::Wallets,
+                "Wallets currently followable now (active + latest persona newer than latest exclusion).",
+            ),
+            (
+                "Follow-worthy",
+                self.follow_worthy_wallets,
+                FunnelUnitKind::Wallets,
+                "Wallets meeting current follow-worthy ROI thresholds.",
+            ),
+            (
+                "Human approval",
+                self.human_approval_wallets,
+                FunnelUnitKind::Wallets,
+                "Placeholder: approvals are not implemented yet.",
+            ),
+            (
+                "Live",
+                self.live_wallets,
+                FunnelUnitKind::Wallets,
+                "Placeholder: live-follow table is not implemented yet.",
+            ),
+        ];
+
+        stages
+            .iter()
+            .enumerate()
+            .map(|(i, (label, count, unit_kind, info))| {
+                let prev = i
+                    .checked_sub(1)
+                    .map_or((*count, *unit_kind), |p| (stages[p].1, stages[p].2));
+                let total = prev.0;
+                let pct = if total > 0 {
+                    Some(100.0 * *count as f64 / total as f64)
+                } else {
+                    None
+                };
+                let unit_change_from_prev = i > 0 && prev.1 != *unit_kind;
+
+                let drop_pct = stages.get(i + 1).and_then(|next| {
+                    if *count > 0 {
+                        Some(format!("{:.1}%", 100.0 * next.1 as f64 / *count as f64))
+                    } else {
+                        None
+                    }
+                });
+
+                let drop_color = match drop_pct
+                    .as_deref()
+                    .and_then(|s| s.strip_suffix('%'))
+                    .and_then(|n| n.parse::<f64>().ok())
+                {
+                    Some(p) if p > 50.0 => "text-green-400".to_string(),
+                    Some(p) if p > 10.0 => "text-yellow-400".to_string(),
+                    Some(_) => "text-red-400".to_string(),
+                    None => String::new(),
+                };
+
+                FunnelStage {
+                    label: (*label).to_string(),
+                    count: *count,
+                    processed: *count,
+                    total,
+                    pct,
+                    unit_kind: unit_kind.as_str().to_string(),
+                    unit_change_from_prev,
+                    drop_pct,
+                    bg_color: if *count > 0 {
+                        "bg-gray-800".to_string()
+                    } else {
+                        "bg-gray-900".to_string()
+                    },
+                    drop_color,
+                    info: (*info).to_string(),
                 }
             })
             .collect()
@@ -335,6 +498,10 @@ mod tests {
         assert_eq!(stages.len(), 6);
         assert_eq!(stages[0].label, "Markets");
         assert_eq!(stages[0].count, 100);
+        assert_eq!(stages[0].processed, 100);
+        assert_eq!(stages[0].total, 100);
+        assert_eq!(stages[0].unit_kind, "legacy");
+        assert!(!stages[0].unit_change_from_prev);
         // 20/100 = 20%
         assert_eq!(stages[0].drop_pct.as_deref(), Some("20.0%"));
         assert_eq!(stages[0].drop_color, "text-yellow-400");
@@ -393,5 +560,50 @@ mod tests {
         let infos = vec!["x".to_string(); 6];
         let stages = counts.to_stages(&infos);
         assert!(stages.last().unwrap().drop_pct.is_none());
+    }
+
+    #[test]
+    fn test_unified_funnel_stages_have_expected_shape() {
+        let counts = UnifiedFunnelCounts {
+            markets_fetched: 100,
+            markets_scored_today: 20,
+            wallets_discovered: 80,
+            stage1_passed: 50,
+            stage2_classified: 40,
+            paper_active_followable: 10,
+            follow_worthy_wallets: 5,
+            human_approval_wallets: 0,
+            live_wallets: 0,
+        };
+        let stages = counts.to_stages();
+        assert_eq!(stages.len(), 9);
+        assert_eq!(stages[0].label, "Markets fetched");
+        assert_eq!(stages[1].label, "Markets scored today");
+        assert_eq!(stages[2].label, "Wallets discovered");
+        assert_eq!(stages[2].unit_kind, "wallets");
+        assert!(stages[2].unit_change_from_prev);
+        assert_eq!(stages[2].processed, 80);
+        assert_eq!(stages[2].total, 20);
+        assert!(stages[2].pct.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_unified_funnel_placeholder_stages_are_last_two() {
+        let counts = UnifiedFunnelCounts {
+            markets_fetched: 1,
+            markets_scored_today: 1,
+            wallets_discovered: 1,
+            stage1_passed: 1,
+            stage2_classified: 1,
+            paper_active_followable: 1,
+            follow_worthy_wallets: 1,
+            human_approval_wallets: 0,
+            live_wallets: 0,
+        };
+        let stages = counts.to_stages();
+        assert_eq!(stages[7].label, "Human approval");
+        assert_eq!(stages[7].count, 0);
+        assert_eq!(stages[8].label, "Live");
+        assert_eq!(stages[8].count, 0);
     }
 }

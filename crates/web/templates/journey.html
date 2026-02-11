@@ -6,11 +6,22 @@
         <div>
             <h2 class="text-xl font-semibold text-gray-100">Journey</h2>
             <div class="text-sm text-gray-500 font-mono">{{ journey.proxy_wallet }}</div>
+            <div class="text-xs text-gray-500">
+                Discovered from {{ journey.discovered_from }}
+                {% match journey.discovered_market_title %}
+                {% when Some with (m) %}on {{ m }}
+                {% when None %}{% endmatch %}
+                at {{ journey.discovered_at }}
+            </div>
         </div>
         <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
     </div>
 
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">Discovered at</div>
+            <div class="text-sm text-gray-200">{{ journey.discovered_at }}</div>
+        </div>
         <div class="bg-gray-800/50 rounded-lg p-3">
             <div class="text-xs text-gray-500">Persona</div>
             <div class="text-sm text-gray-200">
@@ -63,4 +74,3 @@
     </div>
 </div>
 {% endblock %}
-

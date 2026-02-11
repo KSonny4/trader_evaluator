@@ -14,8 +14,8 @@ use axum::routing::get;
 use axum::{Form, Router};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use models::{
-    ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow, PersonaFunnelStage,
-    RankingRow, SystemStatus, TrackingHealth, WalletJourney, WalletOverview, WalletRow,
+    ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow, RankingRow,
+    SystemStatus, TrackingHealth, WalletJourney, WalletOverview, WalletRow,
 };
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
@@ -40,6 +40,8 @@ pub struct AppState {
     pub max_total_exposure_pct: f64,
     pub max_daily_loss_pct: f64,
     pub max_concurrent_positions: i64,
+    pub mirror_use_proportional_sizing: bool,
+    pub mirror_default_their_bankroll_usd: f64,
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -223,12 +225,6 @@ struct StatusStripTemplate {
 #[template(path = "partials/funnel_bar.html")]
 struct FunnelBarTemplate {
     stages: Vec<FunnelStage>,
-}
-
-#[derive(Template)]
-#[template(path = "partials/persona_funnel_bar.html")]
-struct PersonaFunnelBarTemplate {
-    stages: Vec<PersonaFunnelStage>,
 }
 
 #[derive(Template)]
@@ -421,10 +417,9 @@ async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let funnel_stage_infos = state.funnel_stage_infos.clone();
     match with_db(state.clone(), move |conn| {
-        let counts = queries::funnel_counts(conn)?;
-        Ok(counts.to_stages(&funnel_stage_infos))
+        let counts = queries::unified_funnel_counts(conn)?;
+        Ok(counts.to_stages())
     })
     .await
     {
@@ -439,12 +434,12 @@ async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 async fn persona_funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), move |conn| {
-        let counts = queries::persona_funnel_counts(conn)?;
+        let counts = queries::unified_funnel_counts(conn)?;
         Ok(counts.to_stages())
     })
     .await
     {
-        Ok(stages) => Html(PersonaFunnelBarTemplate { stages }.to_string()).into_response(),
+        Ok(stages) => Html(FunnelBarTemplate { stages }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -505,6 +500,8 @@ async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let max_total_exposure_pct = state.max_total_exposure_pct;
     let max_daily_loss_pct = state.max_daily_loss_pct;
     let max_concurrent_positions = state.max_concurrent_positions;
+    let mirror_use_proportional_sizing = state.mirror_use_proportional_sizing;
+    let mirror_default_their_bankroll_usd = state.mirror_default_their_bankroll_usd;
 
     match with_db(state.clone(), move |conn| {
         let summary = queries::paper_summary(
@@ -513,6 +510,8 @@ async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             max_total_exposure_pct,
             max_daily_loss_pct,
             max_concurrent_positions,
+            mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd,
         )?;
         let trades = queries::recent_paper_trades(conn, 20)?;
         Ok((summary, trades))
@@ -755,6 +754,10 @@ async fn main() -> Result<()> {
         max_total_exposure_pct: config.paper_trading.max_total_exposure_pct,
         max_daily_loss_pct: config.paper_trading.max_daily_loss_pct,
         max_concurrent_positions: i64::from(config.risk.max_concurrent_positions),
+        mirror_use_proportional_sizing: config.paper_trading.mirror_use_proportional_sizing,
+        mirror_default_their_bankroll_usd: config
+            .paper_trading
+            .mirror_default_their_bankroll_usd,
     });
 
     tokio::spawn(spawn_derived_gauges_updater(state.clone()));
@@ -786,6 +789,11 @@ mod tests {
         let stages = vec![FunnelStage {
             label: "Markets".to_string(),
             count: 1,
+            processed: 1,
+            total: 1,
+            pct: Some(100.0),
+            unit_kind: "markets".to_string(),
+            unit_change_from_prev: false,
             drop_pct: None,
             bg_color: "bg-gray-800".to_string(),
             drop_color: String::new(),
@@ -848,6 +856,10 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd: cfg
+                .paper_trading
+                .mirror_default_their_bankroll_usd,
         });
         create_router_with_state(state)
     }
@@ -875,6 +887,10 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd: cfg
+                .paper_trading
+                .mirror_default_their_bankroll_usd,
         });
         create_router_with_state(state)
     }
@@ -902,6 +918,10 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd: cfg
+                .paper_trading
+                .mirror_default_their_bankroll_usd,
         });
         create_router_with_state(state)
     }
@@ -1538,10 +1558,15 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Markets"));
-        assert!(html.contains("Scored"));
-        assert!(html.contains("Wallets"));
-        assert!(html.contains("Ranked"));
+        assert!(html.contains("Markets fetched"));
+        assert!(html.contains("Markets scored today"));
+        assert!(html.contains("Wallets discovered"));
+        assert!(html.contains("Paper active"));
+        assert!(html.contains("Follow-worthy"));
+        assert!(html.contains("Human approval"));
+        assert!(html.contains("Live"));
+        assert!(html.contains("0/0"));
+        assert!(html.contains("unit change"));
     }
 
     #[tokio::test]
@@ -1619,6 +1644,10 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd: cfg
+                .paper_trading
+                .mirror_default_their_bankroll_usd,
         });
         let app = create_router_with_state(state);
 
@@ -1720,6 +1749,10 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd: cfg
+                .paper_trading
+                .mirror_default_their_bankroll_usd,
         });
         let app = create_router_with_state(state);
 
@@ -1987,6 +2020,10 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            mirror_use_proportional_sizing: cfg.paper_trading.mirror_use_proportional_sizing,
+            mirror_default_their_bankroll_usd: cfg
+                .paper_trading
+                .mirror_default_their_bankroll_usd,
         });
         let app = create_router_with_state(state);
 

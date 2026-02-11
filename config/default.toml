@@ -57,6 +57,8 @@ backoff_base_ms = 1000
 strategies = ["mirror"]                # later: "delay", "consensus"
 mirror_delay_secs = 0                  # 0 = immediate mirror
 position_size_usdc = 25.0              # per-trade size (2.5% of $1000 bankroll)
+mirror_use_proportional_sizing = true
+mirror_default_their_bankroll_usd = 5000.0
 # Copy fidelity and risk
 bankroll_usd = 1000.0
 max_total_exposure_pct = 15.0
