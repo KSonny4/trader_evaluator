@@ -12,36 +12,31 @@
         <p class="text-gray-600 text-sm">Loading funnel...</p>
     </div>
 
-    <!-- Persona Funnel Bar (Strategy Bible §2): polls every 30s -->
-    <div hx-get="/partials/persona_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
-        <p class="text-gray-600 text-sm">Loading persona funnel...</p>
-    </div>
-
-    <!-- Stage 1: Markets -->
+    <!-- Markets Panel -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 1: Market Discovery
+            Market Discovery Panel
         </summary>
         <div hx-get="/partials/markets" hx-trigger="load, every 60s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading markets...</p>
         </div>
     </details>
 
-    <!-- Stage 2: Wallets -->
+    <!-- Wallets Panel -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 2: Wallet Discovery
+            Wallet Discovery Panel
         </summary>
         <div hx-get="/partials/wallets" hx-trigger="load, every 60s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading wallets...</p>
         </div>
     </details>
 
-    <!-- Stage 3: Wallet Health Monitor -->
+    <!-- Tracking Panel -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
             <div class="flex flex-col">
-                <span>Stage 3: Wallet Health Monitor</span>
+                <span>Wallet Health Monitoring Panel</span>
                 <span class="text-xs font-normal text-gray-500">Monitoring ingestion freshness, tracking coverage, and stale wallets for paper/live reliability.</span>
             </div>
         </summary>
@@ -50,20 +45,20 @@
         </div>
     </details>
 
-    <!-- Stage 4: Paper Copy -->
+    <!-- Paper Panel -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 4: Paper Copy Engine
+            Paper Copy Panel
         </summary>
         <div hx-get="/partials/paper" hx-trigger="load, every 30s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading paper trades...</p>
         </div>
     </details>
 
-    <!-- Stage 5: Rankings -->
+    <!-- Rankings Panel -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 5: Wallet Rankings
+            Wallet Rankings Panel
         </summary>
         <div hx-get="/partials/rankings" hx-trigger="load, every 60s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading rankings...</p>

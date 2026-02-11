@@ -67,53 +67,130 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
     })
 }
 
+pub fn followable_now_count(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "
+        WITH latest_persona AS (
+            SELECT proxy_wallet, MAX(classified_at) AS classified_at
+            FROM wallet_personas
+            GROUP BY proxy_wallet
+        ),
+        latest_exclusion AS (
+            SELECT proxy_wallet, MAX(excluded_at) AS excluded_at
+            FROM wallet_exclusions
+            GROUP BY proxy_wallet
+        )
+        SELECT COUNT(*)
+        FROM wallets w
+        JOIN latest_persona lp ON lp.proxy_wallet = w.proxy_wallet
+        LEFT JOIN latest_exclusion le ON le.proxy_wallet = w.proxy_wallet
+        WHERE w.is_active = 1
+          AND (le.excluded_at IS NULL OR le.excluded_at < lp.classified_at)
+        ",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(anyhow::Error::from)
+}
+
+pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
+    timed_db_op("web.unified_funnel_counts", || {
+        let markets_fetched: i64 =
+            conn.query_row("SELECT COUNT(*) FROM markets", [], |r| r.get(0))?;
+        let markets_scored_today: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT condition_id) FROM market_scores_daily",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let persona_counts = persona_funnel_counts(conn)?;
+        let paper_active_followable = persona_counts.paper_traded_wallets;
+
+        Ok(UnifiedFunnelCounts {
+            markets_fetched,
+            markets_scored_today,
+            wallets_discovered: persona_counts.wallets_discovered,
+            stage1_passed: persona_counts.stage1_passed,
+            stage2_classified: persona_counts.stage2_classified,
+            paper_active_followable,
+            follow_worthy_wallets: persona_counts.follow_worthy_wallets,
+            human_approval_wallets: 0,
+            live_wallets: 0,
+        })
+    })
+}
+
 pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
     let wallets_discovered: i64 =
         conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
 
-    // Stage 1 is evaluated for watchlist wallets (is_active=1). A wallet "passes" if it has no
-    // recorded Stage 1 exclusion reason (STAGE1_*).
+    // Ever/to-date semantics:
+    // Stage 1 passed includes wallets that either:
+    // - have no Stage 1 exclusion, or
+    // - show any evidence of progressing beyond Stage 1.
     let stage1_passed: i64 = conn.query_row(
         "
         SELECT COUNT(*)
         FROM wallets w
-        WHERE w.is_active = 1
-          AND NOT EXISTS (
-            SELECT 1
-            FROM wallet_exclusions e
-            WHERE e.proxy_wallet = w.proxy_wallet
-              AND e.reason LIKE 'STAGE1_%'
+        WHERE
+          NOT EXISTS (
+              SELECT 1
+              FROM wallet_exclusions e
+              WHERE e.proxy_wallet = w.proxy_wallet
+                AND e.reason LIKE 'STAGE1_%'
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM wallet_personas p
+              WHERE p.proxy_wallet = w.proxy_wallet
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM wallet_exclusions e2
+              WHERE e2.proxy_wallet = w.proxy_wallet
+                AND e2.reason NOT LIKE 'STAGE1_%'
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM paper_trades pt
+              WHERE pt.proxy_wallet = w.proxy_wallet
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM wallet_scores_daily ws
+              WHERE ws.proxy_wallet = w.proxy_wallet
           )
         ",
         [],
         |r| r.get(0),
     )?;
 
-    // Stage 2 produces either a followable persona (wallet_personas) or an exclusion reason
-    // (wallet_exclusions with non-stage1 reason).
+    // Stage 2 classified ever/to-date.
     let stage2_classified: i64 = conn.query_row(
         "
         SELECT COUNT(*)
         FROM wallets w
-        WHERE w.is_active = 1
-          AND NOT EXISTS (
-            SELECT 1
-            FROM wallet_exclusions e
-            WHERE e.proxy_wallet = w.proxy_wallet
-              AND e.reason LIKE 'STAGE1_%'
-          )
-          AND (
-            EXISTS (
+        WHERE
+          EXISTS (
               SELECT 1
               FROM wallet_personas p
               WHERE p.proxy_wallet = w.proxy_wallet
-            )
-            OR EXISTS (
+          )
+          OR EXISTS (
               SELECT 1
               FROM wallet_exclusions e2
               WHERE e2.proxy_wallet = w.proxy_wallet
                 AND e2.reason NOT LIKE 'STAGE1_%'
-            )
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM paper_trades pt
+              WHERE pt.proxy_wallet = w.proxy_wallet
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM wallet_scores_daily ws
+              WHERE ws.proxy_wallet = w.proxy_wallet
           )
         ",
         [],
@@ -126,10 +203,8 @@ pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
         |r| r.get(0),
     )?;
 
-    // Follow-worthy is a best-effort approximation based on available data:
-    // Promotion rules in docs/EVALUATION_STRATEGY.md §3.3 use ROI + hit rate + drawdown, but
-    // hit rate/drawdown aren't fully computed yet. For visibility in UI/Grafana, we use ROI-only
-    // thresholds: >+5% (7d) and >+10% (30d), both for score_date=today.
+    // Follow-worthy ever/to-date:
+    // wallet has met ROI thresholds on any score_date and has paper-trading history.
     let follow_worthy_wallets: i64 = conn.query_row(
         "
         SELECT COUNT(DISTINCT ws7.proxy_wallet)
@@ -138,10 +213,19 @@ pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
           ON ws30.proxy_wallet = ws7.proxy_wallet
          AND ws30.score_date = ws7.score_date
          AND ws30.window_days = 30
-        WHERE ws7.score_date = date('now')
-          AND ws7.window_days = 7
+        WHERE ws7.window_days = 7
           AND COALESCE(ws7.paper_roi_pct, 0) > 5.0
           AND COALESCE(ws30.paper_roi_pct, 0) > 10.0
+          AND EXISTS (
+              SELECT 1
+              FROM wallets w
+              WHERE w.proxy_wallet = ws7.proxy_wallet
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM paper_trades pt
+              WHERE pt.proxy_wallet = ws7.proxy_wallet
+          )
         ",
         [],
         |r| r.get(0),
@@ -316,7 +400,7 @@ pub fn top_markets_today(conn: &Connection) -> Result<Vec<MarketRow>> {
             FROM market_scores_daily ms
             JOIN markets m ON m.condition_id = ms.condition_id
             WHERE ms.score_date = date('now')
-            ORDER BY ms.rank ASC
+            ORDER BY ms.mscore DESC, ms.rank ASC, m.title ASC, ms.condition_id ASC
             LIMIT 20",
         )?;
         let rows = stmt
@@ -550,15 +634,20 @@ pub fn excluded_wallets_latest(
 
 pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<WalletJourney>> {
     timed_db_op("web.wallet_journey", || {
-        let discovered_at: Option<String> = conn
+        let discovered: Option<(String, String, Option<String>)> = conn
             .query_row(
-                "SELECT discovered_at FROM wallets WHERE proxy_wallet = ?1",
+                "
+                SELECT w.discovered_at, w.discovered_from, m.title
+                FROM wallets w
+                LEFT JOIN markets m ON m.condition_id = w.discovered_market
+                WHERE w.proxy_wallet = ?1
+                ",
                 [proxy_wallet],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
 
-        let Some(discovered_at) = discovered_at else {
+        let Some((discovered_at, discovered_from, discovered_market_title)) = discovered else {
             return Ok(None);
         };
 
@@ -682,6 +771,8 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
         Ok(Some(WalletJourney {
             proxy_wallet: proxy_wallet.to_string(),
             wallet_short: shorten_wallet(proxy_wallet),
+            discovered_from,
+            discovered_market_title,
             discovered_at,
             persona,
             confidence_display,
@@ -701,6 +792,8 @@ pub fn paper_summary(
     max_total_exposure_pct: f64,
     max_daily_loss_pct: f64,
     max_concurrent_positions: i64,
+    mirror_use_proportional_sizing: bool,
+    mirror_default_their_bankroll_usd: f64,
 ) -> Result<PaperSummary> {
     timed_db_op("web.paper_summary", || {
         let total_pnl: f64 = conn.query_row(
@@ -732,11 +825,7 @@ pub fn paper_summary(
         let pnl_display = format!("{sign}${total_pnl:.2}");
         let bankroll_display = format!("${bankroll:.0}");
 
-        let wallets_followed: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
-            [],
-            |r| r.get(0),
-        )?;
+        let wallets_followed = followable_now_count(conn)?;
 
         let exposure_usdc: f64 = conn.query_row(
             "SELECT COALESCE(SUM(total_size_usdc), 0) FROM paper_positions",
@@ -816,6 +905,12 @@ pub fn paper_summary(
             exposure_pct_display,
             copy_fidelity_display,
             follower_slippage_display,
+            sizing_mode_display: if mirror_use_proportional_sizing {
+                "proportional".to_string()
+            } else {
+                "flat fallback".to_string()
+            },
+            sizing_estimator_bankroll_display: format!("${mirror_default_their_bankroll_usd:.0}"),
             risk_status,
             risk_status_color,
         })
@@ -827,9 +922,11 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
         let mut stmt = conn.prepare(
             "SELECT pt.proxy_wallet, COALESCE(m.title, pt.condition_id),
                     pt.side, pt.size_usdc, pt.entry_price, pt.status,
-                    pt.pnl, pt.created_at
+                    pt.pnl, pt.created_at,
+                    (tr.size * tr.price) as source_notional_usd
             FROM paper_trades pt
             LEFT JOIN markets m ON m.condition_id = pt.condition_id
+            LEFT JOIN trades_raw tr ON tr.id = pt.triggered_by_trade_id
             ORDER BY pt.created_at DESC
             LIMIT ?1",
         )?;
@@ -841,6 +938,7 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
                 let entry_price: f64 = row.get(4)?;
                 let status: String = row.get(5)?;
                 let pnl: Option<f64> = row.get(6)?;
+                let source_notional_usd: Option<f64> = row.get(8)?;
 
                 let side_color = if side == "BUY" {
                     "bg-green-900/50 text-green-300"
@@ -875,6 +973,8 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
                     proxy_wallet: wallet.clone(),
                     wallet_short: shorten_wallet(&wallet),
                     market_title: row.get(1)?,
+                    source_notional_display: source_notional_usd
+                        .map_or_else(|| "-".to_string(), |v| format!("${v:.2}")),
                     side,
                     side_color,
                     size_display: format!("${size_usdc:.2}"),
@@ -903,7 +1003,7 @@ pub fn top_rankings(conn: &Connection, window_days: i64, limit: usize) -> Result
                               WHERE pt.proxy_wallet = ws.proxy_wallet AND pt.status != 'open'), 0)
             FROM wallet_scores_daily ws
             WHERE ws.score_date = date('now') AND ws.window_days = ?1
-            ORDER BY ws.wscore DESC
+            ORDER BY ws.wscore DESC, ws.proxy_wallet ASC
             LIMIT ?2",
         )?;
         let rows = stmt
@@ -1114,6 +1214,113 @@ mod tests {
     }
 
     #[test]
+    fn test_followable_now_count_uses_latest_persona_vs_exclusion() {
+        let conn = test_db();
+
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES
+             ('0xw1', 'HOLDER', 1),
+             ('0xw2', 'HOLDER', 1),
+             ('0xw3', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at) VALUES
+             ('0xw1', 'INFORMED_SPECIALIST', 0.8, '2026-02-10 00:00:00.100'),
+             ('0xw2', 'CONSISTENT_GENERALIST', 0.8, '2026-02-10 00:00:00.100')",
+            [],
+        )
+        .unwrap();
+
+        // Newer exclusion should make wallet non-followable now.
+        conn.execute(
+            "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at) VALUES
+             ('0xw2', 'NOISE_TRADER', 1.0, 0.0, '2026-02-10 00:00:00.200')",
+            [],
+        )
+        .unwrap();
+
+        let followable = followable_now_count(&conn).unwrap();
+        assert_eq!(followable, 1);
+    }
+
+    #[test]
+    fn test_unified_funnel_counts_returns_all_stages() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title) VALUES ('0xm1', 'M1'), ('0xm2', 'M2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES
+             ('0xm1', date('now'), 0.9, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES
+             ('0xm2', date('now', '-1 day'), 0.8, 2)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES
+             ('0xw1', 'HOLDER', 1),
+             ('0xw2', 'HOLDER', 1),
+             ('0xw3', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold)
+             VALUES ('0xw1', 'STAGE1_TOO_YOUNG', 5.0, 30.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+             VALUES ('0xw2', 'INFORMED_SPECIALIST', 0.87, '2026-02-10 00:00:00.100')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold)
+             VALUES ('0xw3', 'NOISE_TRADER', 60.0, 50.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xw2', date('now'), 7, 0.80, 6.0),
+                    ('0xw2', date('now'), 30, 0.85, 11.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status)
+             VALUES ('0xw2', 'mirror', '0xm1', 'BUY', 25.0, 0.5, 'open')",
+            [],
+        )
+        .unwrap();
+
+        let counts = unified_funnel_counts(&conn).unwrap();
+        assert_eq!(counts.markets_fetched, 2);
+        assert_eq!(counts.markets_scored_today, 2);
+        assert_eq!(counts.wallets_discovered, 3);
+        assert_eq!(counts.stage1_passed, 2);
+        assert_eq!(counts.stage2_classified, 2);
+        assert_eq!(counts.paper_active_followable, 1);
+        assert_eq!(counts.follow_worthy_wallets, 1);
+        assert_eq!(counts.human_approval_wallets, 0);
+        assert_eq!(counts.live_wallets, 0);
+    }
+
+    #[test]
     fn test_system_status_empty_db() {
         let conn = test_db();
         let status = system_status(&conn, ":memory:").unwrap();
@@ -1159,6 +1366,28 @@ mod tests {
         assert_eq!(markets.len(), 1);
         assert_eq!(markets[0].title, "BTC > 100k");
         assert_eq!(markets[0].rank, 1);
+    }
+
+    #[test]
+    fn test_top_markets_ordered_by_mscore_then_rank() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title) VALUES
+             ('0xm1', 'A'),
+             ('0xm2', 'B')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES
+             ('0xm1', date('now'), 0.70, 1),
+             ('0xm2', date('now'), 0.95, 2)",
+            [],
+        )
+        .unwrap();
+        let markets = top_markets_today(&conn).unwrap();
+        assert_eq!(markets[0].condition_id, "0xm2");
+        assert_eq!(markets[1].condition_id, "0xm1");
     }
 
     #[test]
@@ -1225,13 +1454,14 @@ mod tests {
             [],
         )
         .unwrap();
-        let summary = paper_summary(&conn, 1000.0, 15.0, 3.0, 20).unwrap();
+        let summary = paper_summary(&conn, 1000.0, 15.0, 3.0, 20, true, 5000.0).unwrap();
         assert_eq!(summary.total_pnl, 25.0);
         assert_eq!(summary.settled_wins, 1);
         assert_eq!(summary.settled_losses, 0);
         assert_eq!(summary.pnl_color, "text-green-400");
-        assert_eq!(summary.wallets_followed, 1);
+        assert_eq!(summary.wallets_followed, 0);
         assert_eq!(summary.exposure_usdc, 42.0);
+        assert_eq!(summary.sizing_mode_display, "proportional");
     }
 
     #[test]
@@ -1253,6 +1483,47 @@ mod tests {
         assert_eq!(rankings.len(), 2);
         assert_eq!(rankings[0].rank, 1);
         assert!(rankings[0].wscore > rankings[1].wscore);
+    }
+
+    #[test]
+    fn test_rankings_tie_breaks_by_wallet() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score)
+             VALUES ('0x2', date('now'), 30, 0.80, 0.9, 0.7)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score)
+             VALUES ('0x1', date('now'), 30, 0.80, 0.5, 0.7)",
+            [],
+        )
+        .unwrap();
+        let rankings = top_rankings(&conn, 30, 10).unwrap();
+        assert_eq!(rankings[0].proxy_wallet, "0x1");
+        assert_eq!(rankings[1].proxy_wallet, "0x2");
+    }
+
+    #[test]
+    fn test_recent_paper_trades_includes_source_notional_display() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO trades_raw (id, proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+             VALUES (1, '0xw', '0xm1', 'BUY', 200.0, 0.5, 1, '0xtx1', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, triggered_by_trade_id)
+             VALUES ('0xw', 'mirror', '0xm1', 'BUY', 20.0, 0.51, 'open', 1)",
+            [],
+        )
+        .unwrap();
+
+        let rows = recent_paper_trades(&conn, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_notional_display, "$100.00");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 <div class="space-y-4">
     <!-- Summary cards -->
-    <div class="grid grid-cols-2 md:grid-cols-9 gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-12 gap-3">
         <div class="bg-gray-800/50 rounded-lg p-3 text-center">
             <div class="text-lg font-bold {{ summary.pnl_color }}">
                 {{ summary.pnl_display }}
@@ -45,6 +45,14 @@
             <div class="text-lg font-bold text-gray-300">{{ summary.bankroll_display }}</div>
             <div class="text-xs text-gray-500">Bankroll</div>
         </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-300">{{ summary.sizing_mode_display }}</div>
+            <div class="text-xs text-gray-500">Sizing mode</div>
+        </div>
+        <div class="bg-gray-800/50 rounded-lg p-3 text-center">
+            <div class="text-lg font-bold text-gray-300">{{ summary.sizing_estimator_bankroll_display }}</div>
+            <div class="text-xs text-gray-500">Estimator bankroll</div>
+        </div>
     </div>
 
     <!-- Recent trades table -->
@@ -57,6 +65,7 @@
                 <tr class="text-gray-500 border-b border-gray-800">
                     <th class="text-left py-2 px-2">Wallet</th>
                     <th class="text-left py-2 px-2">Market</th>
+                    <th class="text-right py-2 px-2">Their Notional</th>
                     <th class="text-center py-2 px-2">Side</th>
                     <th class="text-right py-2 px-2">Size</th>
                     <th class="text-right py-2 px-2">Entry</th>
@@ -78,6 +87,7 @@
                         </a>
                     </td>
                     <td class="py-1.5 px-2 max-w-xs truncate text-gray-300" title="{{ t.market_title }}">{{ t.market_title }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-400">{{ t.source_notional_display }}</td>
                     <td class="py-1.5 px-2 text-center">
                         <span class="px-1.5 py-0.5 rounded text-xs {{ t.side_color }}">
                             {{ t.side }}

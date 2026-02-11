@@ -48,6 +48,21 @@ Real-money followed wallets (~1-3)
 
 Each stage has measurable drop-off rates visible in the UI and Grafana.
 
+### Dashboard canonical funnel rendering
+
+For `sniper.pkubelka.cz`, funnel rendering is unified into one bar and uses explicit `processed/total` values on every step:
+1. `Markets fetched`
+2. `Markets scored (ever)`
+3. `Wallets discovered`
+4. `Stage 1 passed (ever)`
+5. `Stage 2 classified (ever)`
+6. `Paper traded (ever)`
+7. `Follow-worthy (ever)`
+8. `Human approval` (placeholder `0`)
+9. `Live` (placeholder `0`)
+
+These dashboard funnel counts are cumulative `ever/to-date` values (historical context), not "today-only" counters.
+
 ---
 
 ## 3. Who We Follow (Followable Personas)

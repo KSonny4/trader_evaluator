@@ -11,6 +11,16 @@
                 aria-label="{{ stage.info }}"
             >ⓘ</span>
         </div>
+        <div class="text-[11px] text-gray-500 mt-0.5">
+            {{ stage.processed }}/{{ stage.total }}
+            {% match stage.pct %}
+            {% when Some with (p) %}({{ "{:.1}"|format(p) }}%)
+            {% when None %}(n/a)
+            {% endmatch %}
+        </div>
+        {% if stage.unit_change_from_prev %}
+        <div class="text-[10px] text-yellow-300/80 mt-0.5">unit change</div>
+        {% endif %}
     </div>
     {% if !loop.last %}
     <div class="flex-shrink-0 text-center">
