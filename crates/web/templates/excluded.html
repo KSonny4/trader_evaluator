@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-4">
+    <div class="flex items-end justify-between gap-4">
+        <div>
+            <h2 class="text-xl font-semibold text-gray-100">Excluded Wallets</h2>
+            <p class="text-sm text-gray-500">{{ total }} total (latest reason per wallet)</p>
+        </div>
+        <div class="text-sm text-gray-500">
+            Page {{ page }} / {{ total_pages }}
+        </div>
+    </div>
+
+    {% include "partials/excluded_table.html" %}
+
+    <div class="flex items-center justify-between text-sm">
+        <div class="text-gray-500">Page size: {{ page_size }}</div>
+        <div class="flex items-center gap-2">
+            {% if page > 1 %}
+            <a class="px-3 py-1 rounded bg-gray-800 text-gray-200 hover:bg-gray-700"
+               href="/excluded?page={{ page - 1 }}&page_size={{ page_size }}">Prev</a>
+            {% else %}
+            <span class="px-3 py-1 rounded bg-gray-900 text-gray-600">Prev</span>
+            {% endif %}
+
+            {% if page < total_pages %}
+            <a class="px-3 py-1 rounded bg-gray-800 text-gray-200 hover:bg-gray-700"
+               href="/excluded?page={{ page + 1 }}&page_size={{ page_size }}">Next</a>
+            {% else %}
+            <span class="px-3 py-1 rounded bg-gray-900 text-gray-600">Next</span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+

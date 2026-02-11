@@ -7,7 +7,9 @@ use common::types::{ApiHolderResponse, ApiTrade, GammaMarket};
 
 use crate::market_scoring::{rank_markets, MarketCandidate};
 use crate::paper_trading::{is_crypto_15m_market, mirror_trade_to_paper, Side};
-use crate::persona_classification::{classify_wallet, stage1_filter, PersonaConfig, Stage1Config};
+use crate::persona_classification::{
+    classify_wallet, stage1_filter, stage1_known_bot_check, PersonaConfig, Stage1Config,
+};
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_features::compute_wallet_features;
 use crate::wallet_rules_engine::{
@@ -33,6 +35,10 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         .call_named("paper_tick.select_unprocessed_trades", |conn| {
             let mut stmt = conn.prepare(
                 "
+                -- Paper tick gating:
+                -- Only mirror trades from wallets that are currently followable.
+                -- A wallet is considered followable if it has a persona classification and the
+                -- latest exclusion (if any) is strictly older than the latest persona.
                 WITH latest_persona AS (
                     SELECT proxy_wallet, MAX(classified_at) AS classified_at
                     FROM wallet_personas
@@ -75,6 +81,48 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
 
     let mut inserted = 0_u64;
     for (trade_id, proxy_wallet, condition_id, side_s, price, outcome, outcome_index) in rows {
+        // Stop mirroring immediately if a wallet becomes non-followable while we're mid-batch.
+        // (The batch query above filters at selection time, but persona/exclusion state can
+        // change concurrently via the persona classification job.)
+        let proxy_wallet_check = proxy_wallet.clone();
+        let followable_now: bool = db
+            .call_named("paper_tick.wallet_is_followable_now", move |conn| {
+                let followable: i64 = conn.query_row(
+                    "
+                    SELECT
+                      CASE
+                        WHEN (
+                          SELECT MAX(classified_at)
+                          FROM wallet_personas
+                          WHERE proxy_wallet = ?1
+                        ) IS NULL THEN 0
+                        WHEN (
+                          SELECT MAX(excluded_at)
+                          FROM wallet_exclusions
+                          WHERE proxy_wallet = ?1
+                        ) IS NULL THEN 1
+                        WHEN (
+                          SELECT MAX(excluded_at)
+                          FROM wallet_exclusions
+                          WHERE proxy_wallet = ?1
+                        ) < (
+                          SELECT MAX(classified_at)
+                          FROM wallet_personas
+                          WHERE proxy_wallet = ?1
+                        ) THEN 1
+                        ELSE 0
+                      END
+                    ",
+                    rusqlite::params![proxy_wallet_check],
+                    |row| row.get(0),
+                )?;
+                Ok(followable == 1)
+            })
+            .await?;
+        if !followable_now {
+            continue;
+        }
+
         let side = match side_s.as_deref() {
             Some("SELL") => Side::Sell,
             _ => Side::Buy,
@@ -291,41 +339,78 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     let w = WScoreWeights {
         edge_weight: cfg.wallet_scoring.edge_weight,
         consistency_weight: cfg.wallet_scoring.consistency_weight,
+        market_skill_weight: cfg.wallet_scoring.market_skill_weight,
+        timing_skill_weight: cfg.wallet_scoring.timing_skill_weight,
+        behavior_quality_weight: cfg.wallet_scoring.behavior_quality_weight,
     };
 
     let windows_days = cfg.wallet_scoring.windows_days.clone();
     let bankroll = cfg.risk.paper_bankroll_usdc;
+    let trust_30_90_multiplier = cfg.personas.trust_30_90_multiplier;
+    let obscurity_bonus_multiplier = cfg.personas.obscurity_bonus_multiplier;
 
     // Batch read: fetch all (wallet, window) PnL values in one db.call().
     let windows_c = windows_days.clone();
-    let pnl_data: Vec<(String, i64, f64)> = db
+    let pnl_data: Vec<(String, String, i64, i64, f64, u32, u32)> = db
         .call_named("wallet_scoring.read_pnl_batch", move |conn| {
             let mut stmt = conn.prepare(
                 "
-                SELECT proxy_wallet
+                SELECT proxy_wallet,
+                       discovered_from,
+                       CAST((julianday('now') - julianday(discovered_at)) AS INTEGER) AS age_days
                 FROM wallets
                 WHERE is_active = 1
                 ORDER BY discovered_at DESC
                 LIMIT 500
                 ",
             )?;
-            let wallets: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+            let wallets: Vec<(String, String, i64)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
             let mut results = Vec::new();
             let mut pnl_stmt = conn.prepare(
                 "SELECT SUM(pnl) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
             )?;
+            let mut total_markets_stmt = conn.prepare(
+                "SELECT COUNT(DISTINCT condition_id) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
+            )?;
+            let mut profitable_markets_stmt = conn.prepare(
+                "
+                SELECT COUNT(*) FROM (
+                    SELECT condition_id, SUM(pnl) AS pnl_sum
+                    FROM paper_trades
+                    WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)
+                    GROUP BY condition_id
+                    HAVING pnl_sum > 0
+                )
+                ",
+            )?;
 
-            for wallet in &wallets {
+            for (wallet, discovered_from, age_days) in &wallets {
                 for &wd in &windows_c {
                     let window = format!("-{wd} days");
                     let pnl: Option<f64> = pnl_stmt.query_row(
                         rusqlite::params![wallet, window],
                         |row| row.get(0),
                     )?;
-                    results.push((wallet.clone(), i64::from(wd), pnl.unwrap_or(0.0)));
+                    let total_markets: u32 = total_markets_stmt.query_row(
+                        rusqlite::params![wallet, window],
+                        |row| row.get(0),
+                    )?;
+                    let profitable_markets: u32 = profitable_markets_stmt.query_row(
+                        rusqlite::params![wallet, window],
+                        |row| row.get(0),
+                    )?;
+                    results.push((
+                        wallet.clone(),
+                        discovered_from.clone(),
+                        *age_days,
+                        i64::from(wd),
+                        pnl.unwrap_or(0.0),
+                        profitable_markets,
+                        total_markets,
+                    ));
                 }
             }
             Ok(results)
@@ -334,7 +419,9 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
 
     // Compute scores in Rust (no DB needed).
     let mut score_rows = Vec::with_capacity(pnl_data.len());
-    for (wallet, window_days, pnl) in &pnl_data {
+    for (wallet, discovered_from, age_days, window_days, pnl, profitable_markets, total_markets) in
+        &pnl_data
+    {
         let roi_pct = if bankroll > 0.0 {
             100.0 * pnl / bankroll
         } else {
@@ -343,9 +430,20 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         let input = WalletScoreInput {
             paper_roi_pct: roi_pct,
             daily_return_stdev_pct: 0.0,
-            hit_rate: 0.50, // TODO: calculate real hit rate from DB
+            hit_rate: 0.50, // TODO(Task 38): calculate real hit rate from DB
+            profitable_markets: *profitable_markets,
+            total_markets: *total_markets,
+            avg_post_entry_drift_cents: 0.0, // TODO(Task 38): compute from post-entry price drift metrics
+            noise_trade_ratio: 0.0, // TODO(Task 38): compute based on persona/exclusion heuristics
+            wallet_age_days: (*age_days).max(0) as u32,
+            is_public_leaderboard_top_500: discovered_from == "LEADERBOARD",
         };
-        let wscore = compute_wscore(&input, &w);
+        let wscore = compute_wscore(
+            &input,
+            &w,
+            trust_30_90_multiplier,
+            obscurity_bonus_multiplier,
+        );
         score_rows.push(ScoreRow {
             proxy_wallet: wallet.clone(),
             window_days: *window_days,
@@ -464,6 +562,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                 .or_else(|| m.volume.as_deref().and_then(|s| s.parse::<f64>().ok()))
                 .unwrap_or(0.0);
 
+            // Filled from local DB (trades_raw + holders_snapshots) after we upsert markets.
             let trades_24h = 0;
             let unique_traders_24h = 0;
             let top_holder_concentration = 0.5;
@@ -550,6 +649,37 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
             Ok(())
         })
         .await?;
+
+        // Populate density and whale inputs from local DB so MScore uses real signals.
+        let now_epoch = chrono::Utc::now().timestamp();
+        let condition_ids: Vec<String> = page_candidates
+            .iter()
+            .map(|c| c.condition_id.clone())
+            .collect();
+        let per_market: std::collections::HashMap<String, (u32, u32, f64)> = db
+            .call(move |conn| {
+                let mut out: std::collections::HashMap<String, (u32, u32, f64)> =
+                    std::collections::HashMap::new();
+                for cid in condition_ids {
+                    let trades_24h = count_trades_24h(conn, &cid, now_epoch)?;
+                    let unique_traders_24h = count_unique_traders_24h(conn, &cid, now_epoch)?;
+                    let top_holder_concentration = compute_whale_concentration(conn, &cid)?;
+                    out.insert(
+                        cid,
+                        (trades_24h, unique_traders_24h, top_holder_concentration),
+                    );
+                }
+                Ok(out)
+            })
+            .await?;
+
+        for c in &mut page_candidates {
+            if let Some((t, u, w)) = per_market.get(&c.condition_id) {
+                c.trades_24h = *t;
+                c.unique_traders_24h = *u;
+                c.top_holder_concentration = *w;
+            }
+        }
 
         all.extend(page_candidates);
 
@@ -718,6 +848,7 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         min_wallet_age_days: cfg.personas.stage1_min_wallet_age_days,
         min_total_trades: cfg.personas.stage1_min_total_trades,
         max_inactive_days: cfg.personas.stage1_max_inactive_days,
+        known_bots: cfg.personas.known_bots.clone(),
     };
 
     let classified: u64 = db
@@ -749,6 +880,13 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
 
             let mut count = 0_u64;
             for (proxy_wallet, wallet_age_days, total_trades, days_since_last) in wallets {
+                if let Some(reason) =
+                    stage1_known_bot_check(&proxy_wallet, &stage1_config.known_bots)
+                {
+                    crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
+                    count += 1;
+                    continue;
+                }
                 if let Some(reason) = stage1_filter(
                     wallet_age_days,
                     total_trades,
@@ -810,9 +948,71 @@ fn compute_days_to_expiry(end_date: Option<&str>) -> Option<u32> {
     }
 }
 
+fn count_trades_24h(
+    conn: &rusqlite::Connection,
+    condition_id: &str,
+    now_epoch: i64,
+) -> Result<u32> {
+    let cutoff = now_epoch - 86_400;
+    let count_i64: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM trades_raw WHERE condition_id = ?1 AND timestamp > ?2",
+        rusqlite::params![condition_id, cutoff],
+        |row| row.get(0),
+    )?;
+    Ok(count_i64.max(0) as u32)
+}
+
+fn count_unique_traders_24h(
+    conn: &rusqlite::Connection,
+    condition_id: &str,
+    now_epoch: i64,
+) -> Result<u32> {
+    let cutoff = now_epoch - 86_400;
+    let count_i64: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT proxy_wallet) FROM trades_raw WHERE condition_id = ?1 AND timestamp > ?2",
+        rusqlite::params![condition_id, cutoff],
+        |row| row.get(0),
+    )?;
+    Ok(count_i64.max(0) as u32)
+}
+
+fn compute_whale_concentration(conn: &rusqlite::Connection, condition_id: &str) -> Result<f64> {
+    // Latest snapshot for this condition_id (if any).
+    let total: f64 = conn.query_row(
+        "
+        SELECT COALESCE(SUM(amount), 0.0) FROM holders_snapshots
+        WHERE condition_id = ?1
+          AND snapshot_at = (
+            SELECT MAX(snapshot_at) FROM holders_snapshots WHERE condition_id = ?1
+          )
+        ",
+        rusqlite::params![condition_id],
+        |row| row.get(0),
+    )?;
+
+    if total <= 0.0 {
+        return Ok(0.5); // default when no data
+    }
+
+    let top_holder: f64 = conn.query_row(
+        "
+        SELECT COALESCE(MAX(amount), 0.0) FROM holders_snapshots
+        WHERE condition_id = ?1
+          AND snapshot_at = (
+            SELECT MAX(snapshot_at) FROM holders_snapshots WHERE condition_id = ?1
+          )
+        ",
+        rusqlite::params![condition_id],
+        |row| row.get(0),
+    )?;
+
+    Ok(top_holder / total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::db::Database;
 
     struct FakeGammaPager {
         pages: Vec<(Vec<GammaMarket>, Vec<u8>)>,
@@ -838,6 +1038,189 @@ mod tests {
             let idx = (offset / 100) as usize;
             Ok(self.pages.get(idx).cloned().unwrap_or_default())
         }
+    }
+
+    #[test]
+    fn test_compute_trades_24h_from_db() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        // Insert 5 trades in last 24h for market 0xm1
+        for i in 0..5 {
+            db.conn
+                .execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES ('0xw1', '0xm1', 'BUY', 10.0, 0.50, ?1)",
+                    rusqlite::params![now - 3600 * i],
+                )
+                .unwrap();
+        }
+        // Insert 3 old trades (>24h ago)
+        for i in 0..3 {
+            db.conn
+                .execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES ('0xw2', '0xm1', 'BUY', 10.0, 0.50, ?1)",
+                    rusqlite::params![now - 86400 - 3600 * i],
+                )
+                .unwrap();
+        }
+
+        let trades_24h = count_trades_24h(&db.conn, "0xm1", now).unwrap();
+        assert_eq!(trades_24h, 5);
+
+        let unique_traders = count_unique_traders_24h(&db.conn, "0xm1", now).unwrap();
+        assert_eq!(unique_traders, 1); // only 0xw1 traded in last 24h
+    }
+
+    #[test]
+    fn test_compute_whale_concentration_from_holders() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Top holder has 500 out of 1000 total = 50% concentration
+        db.conn
+            .execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0xm1', '0xwhale', 500.0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0xm1', '0xsmall1', 300.0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0xm1', '0xsmall2', 200.0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+
+        let concentration = compute_whale_concentration(&db.conn, "0xm1").unwrap();
+        assert!((concentration - 0.5).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_run_market_scoring_uses_db_density_and_whale_concentration() {
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.market_scoring.top_n_markets = 2;
+        // Keep the test focused on DB-derived density/whale factors.
+        cfg.market_scoring.min_liquidity_usdc = 0.0;
+        cfg.market_scoring.min_daily_volume_usdc = 0.0;
+        cfg.market_scoring.min_days_to_expiry = 0;
+        cfg.market_scoring.max_days_to_expiry = 10_000;
+
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        db.call(move |conn| {
+            // Market 0x1: lots of recent trades + dispersed holders.
+            for i in 0..200 {
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES ('0xw1', '0x1', 'BUY', 10.0, 0.50, ?1)",
+                    rusqlite::params![now - i * 60],
+                )?;
+            }
+
+            // Market 0x2: no recent trades + concentrated holders.
+            // (Leave trades_raw empty for 0x2.)
+
+            // Use a fixed snapshot_at so "latest snapshot" selection is deterministic.
+            let snap = "2026-02-10 00:00:00";
+
+            // 0x1: top holder 100 / total 1000 => 0.1
+            conn.execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0x1', '0xwhale1', 100.0, ?1)",
+                rusqlite::params![snap],
+            )?;
+            conn.execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0x1', '0xsmall1', 900.0, ?1)",
+                rusqlite::params![snap],
+            )?;
+
+            // 0x2: top holder 900 / total 1000 => 0.9
+            conn.execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0x2', '0xwhale2', 900.0, ?1)",
+                rusqlite::params![snap],
+            )?;
+            conn.execute(
+                "INSERT INTO holders_snapshots (condition_id, proxy_wallet, amount, snapshot_at)
+                 VALUES ('0x2', '0xsmall2', 100.0, ?1)",
+                rusqlite::params![snap],
+            )?;
+
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let end_date = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        let markets = vec![
+            GammaMarket {
+                condition_id: Some("0x1".to_string()),
+                question: Some("M1".to_string()),
+                title: None,
+                slug: None,
+                description: None,
+                end_date: Some(end_date.clone()),
+                liquidity: Some("5000".to_string()),
+                volume: Some("8000".to_string()),
+                volume_24hr: Some("8000".to_string()),
+                category: None,
+                event_slug: None,
+                neg_risk: None,
+            },
+            GammaMarket {
+                condition_id: Some("0x2".to_string()),
+                question: Some("M2".to_string()),
+                title: None,
+                slug: None,
+                description: None,
+                end_date: Some(end_date),
+                liquidity: Some("5000".to_string()),
+                volume: Some("8000".to_string()),
+                volume_24hr: Some("8000".to_string()),
+                category: None,
+                event_slug: None,
+                neg_risk: None,
+            },
+        ];
+
+        let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
+        run_market_scoring_once(&db, &pager, &cfg).await.unwrap();
+
+        let (m1, m2): (f64, f64) = db
+            .call(|conn| {
+                let m1: f64 = conn.query_row(
+                    "SELECT mscore FROM market_scores_daily WHERE condition_id = '0x1'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let m2: f64 = conn.query_row(
+                    "SELECT mscore FROM market_scores_daily WHERE condition_id = '0x2'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((m1, m2))
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            m1 > m2,
+            "expected mscore(0x1) > mscore(0x2), got {m1} vs {m2}"
+        );
     }
 
     #[tokio::test]
@@ -1229,6 +1612,8 @@ mod tests {
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xw"],
             )?;
+            // Paper tick gating: only followable wallets (i.e., wallets with a current persona)
+            // should be mirrored.
             conn.execute(
                 "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
                  VALUES (?1, 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
@@ -1262,6 +1647,224 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cnt, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_only_mirrors_followable_wallets_and_backfills_when_becoming_followable(
+    ) {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xunfollowable"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state) VALUES (?1, 'APPROVED')",
+                rusqlite::params!["0xunfollowable"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx_unfollowable', '{}')
+                ",
+                rusqlite::params!["0xunfollowable", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Not followable yet -> no paper trades.
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0);
+
+        let cnt: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt, 0);
+
+        // Become followable -> old (still-unprocessed) trade gets mirrored.
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES (?1, 'CONSISTENT_GENERALIST', 1.0, datetime('now'))",
+                rusqlite::params!["0xunfollowable"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted2 = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted2, 1);
+
+        let cnt2: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt2, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_stops_mirroring_immediately_when_wallet_becomes_excluded() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xw"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES (?1, 'CONSISTENT_GENERALIST', 1.0, datetime('now'))",
+                rusqlite::params!["0xw"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state) VALUES (?1, 'APPROVED')",
+                rusqlite::params!["0xw"],
+            )?;
+
+            // After the first paper trade is inserted, immediately exclude the wallet.
+            // This makes the "stop immediately" requirement deterministic in a unit test.
+            conn.execute_batch(
+                "
+                CREATE TRIGGER exclude_wallet_after_first_paper_trade
+                AFTER INSERT ON paper_trades
+                WHEN NEW.proxy_wallet = '0xw'
+                BEGIN
+                    INSERT OR IGNORE INTO wallet_exclusions
+                        (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                    VALUES
+                        ('0xw', 'STAGE1_TOO_YOUNG', 1.0, 30.0, datetime('now'));
+                END;
+                ",
+            )?;
+
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx1', '{}')
+                ",
+                rusqlite::params!["0xw", "0xcond"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.55, 2, '0xtx2', '{}')
+                ",
+                rusqlite::params!["0xw", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 1);
+
+        let cnt: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_skips_unclassified_wallets() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xunclassified"],
+            )?;
+            // No wallet_personas row => not currently followable.
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx_unclassified', '{}')
+                ",
+                rusqlite::params!["0xunclassified", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0);
+
+        let cnt: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_paper_tick_skips_wallets_excluded_after_persona() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xexcluded"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at) VALUES (?1, 'Consistent Generalist', 1.0, '2026-02-10 00:00:00')",
+                rusqlite::params!["0xexcluded"],
+            )?;
+            // Exclusion is newer than the persona => wallet is not currently followable.
+            conn.execute(
+                "INSERT INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at) VALUES (?1, 'NOISE_TRADER', 0.0, 0.0, '2026-02-10 00:00:01')",
+                rusqlite::params!["0xexcluded"],
+            )?;
+            conn.execute(
+                "
+                INSERT INTO trades_raw
+                    (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                VALUES
+                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx_excluded', '{}')
+                ",
+                rusqlite::params!["0xexcluded", "0xcond"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0);
+
+        let cnt: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt, 0);
     }
 
     #[tokio::test]

@@ -425,7 +425,7 @@ CREATE TABLE IF NOT EXISTS wallet_personas (
     persona TEXT NOT NULL,             -- Informed Specialist, Consistent Generalist, etc.
     confidence REAL NOT NULL,          -- 0.0 to 1.0
     feature_values_json TEXT,          -- JSON: trade_count, win_rate, unique_markets, etc.
-    classified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    classified_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
     UNIQUE(proxy_wallet, classified_at)
 );
 
@@ -435,7 +435,7 @@ CREATE TABLE IF NOT EXISTS wallet_exclusions (
     reason TEXT NOT NULL,              -- e.g. "tail_risk_seller", "noise_trader", "too_young"
     metric_value REAL,                 -- the actual value that triggered exclusion
     threshold REAL,                    -- the threshold it was compared against
-    excluded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    excluded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
     UNIQUE(proxy_wallet, reason)
 );
 

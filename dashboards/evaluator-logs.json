@@ -11,7 +11,7 @@
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "{unit=~\"evaluator.service|evaluator-web.service\"}",
+          "expr": "{unit=~\"evaluator.service|web.service|evaluator-web.service\"}",
           "datasource": { "type": "loki", "uid": "grafanacloud-logs" }
         }
       ],
@@ -23,7 +23,7 @@
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
       "targets": [
         {
-          "expr": "sum(rate({unit=~\"evaluator.service|evaluator-web.service\"} | json | level=\"ERROR\" [5m]))",
+          "expr": "sum(rate({unit=~\"evaluator.service|web.service|evaluator-web.service\"} | json | level=\"ERROR\" [5m]))",
           "legendFormat": "errors/s",
           "datasource": { "type": "loki", "uid": "grafanacloud-logs" }
         }
@@ -39,7 +39,6 @@
   "time": { "from": "now-1h", "to": "now" },
   "timezone": "browser",
   "title": "Trader Evaluator Logs",
-  "uid": null,
+  "uid": "trader-evaluator-logs",
   "version": 1
 }
-

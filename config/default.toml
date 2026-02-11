@@ -86,6 +86,8 @@ gamma_api_url = "https://gamma-api.polymarket.com"
 stage1_min_wallet_age_days = 30
 stage1_min_total_trades = 10
 stage1_max_inactive_days = 30
+# Known bot proxy addresses to exclude (e.g. "0x...")
+known_bots = []
 # Informed Specialist
 specialist_max_active_positions = 5    # max currently open positions
 specialist_min_concentration = 0.60    # min % of volume in top 3 markets

@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 mod cli;
+mod flow_metrics;
 mod ingestion;
 mod jobs;
 mod market_scoring;
@@ -96,6 +97,7 @@ async fn main() -> Result<()> {
     let (persona_classification_tx, mut persona_classification_rx) =
         tokio::sync::mpsc::channel::<()>(8);
     let (wal_checkpoint_tx, mut wal_checkpoint_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (flow_metrics_tx, mut flow_metrics_rx) = tokio::sync::mpsc::channel::<()>(8);
 
     let _scheduler_handles = scheduler::start(vec![
         scheduler::JobSpec {
@@ -163,6 +165,12 @@ async fn main() -> Result<()> {
             interval: std::time::Duration::from_secs(300), // every 5 minutes
             tick: wal_checkpoint_tx,
             run_immediately: false, // no need to checkpoint at startup
+        },
+        scheduler::JobSpec {
+            name: "flow_metrics".to_string(),
+            interval: std::time::Duration::from_secs(60), // every minute for Grafana flow panels
+            tick: flow_metrics_tx,
+            run_immediately: true,
         },
     ]);
 
@@ -342,6 +350,19 @@ async fn main() -> Result<()> {
                         tracing::info!(log, checkpointed, "wal_checkpoint done");
                     }
                     Err(e) => tracing::error!(error = %e, "wal_checkpoint failed"),
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let db = db.clone();
+        async move {
+            while flow_metrics_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "flow_metrics");
+                let _g = span.enter();
+                if let Err(e) = jobs::run_flow_metrics_once(&db).await {
+                    tracing::error!(error = %e, "flow_metrics failed");
                 }
             }
         }

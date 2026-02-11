@@ -170,6 +170,8 @@ pub enum ExclusionReason {
         trades_per_day: f64,
         avg_size_usdc: f64,
     },
+    /// Wallet is in the configured known_bots list (Strategy Bible §4 Stage 1).
+    KnownBot,
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -187,6 +189,7 @@ impl ExclusionReason {
             Self::LiquidityProvider { .. } => "LIQUIDITY_PROVIDER",
             Self::JackpotGambler { .. } => "JACKPOT_GAMBLER",
             Self::BotSwarmMicro { .. } => "BOT_SWARM_MICRO",
+            Self::KnownBot => "KNOWN_BOT",
         }
     }
 
@@ -210,6 +213,7 @@ impl ExclusionReason {
             Self::LiquidityProvider { mid_fill_ratio, .. } => *mid_fill_ratio,
             Self::JackpotGambler { pnl_top1_share, .. } => *pnl_top1_share,
             Self::BotSwarmMicro { trades_per_day, .. } => *trades_per_day,
+            Self::KnownBot => 1.0,
         }
     }
 
@@ -235,6 +239,7 @@ impl ExclusionReason {
             Self::LiquidityProvider { .. } => 0.0,
             Self::JackpotGambler { .. } => 0.0,
             Self::BotSwarmMicro { .. } => 0.0,
+            Self::KnownBot => 0.0,
         }
     }
 }
@@ -245,6 +250,18 @@ pub struct Stage1Config {
     pub min_wallet_age_days: u32,
     pub min_total_trades: u32,
     pub max_inactive_days: u32,
+    /// Proxy wallet addresses to exclude as known bots (Strategy Bible §4 Stage 1).
+    pub known_bots: Vec<String>,
+}
+
+/// Returns Some(KnownBot) if proxy_wallet is in the known_bots list, None otherwise.
+#[allow(dead_code)] // Wired into scheduler in Task 21
+pub fn stage1_known_bot_check(proxy_wallet: &str, known_bots: &[String]) -> Option<ExclusionReason> {
+    if known_bots.iter().any(|b| b.as_str() == proxy_wallet) {
+        Some(ExclusionReason::KnownBot)
+    } else {
+        None
+    }
 }
 
 /// Returns Some(reason) if the wallet should be excluded, None if it passes.
@@ -285,7 +302,7 @@ pub fn record_exclusion(
 ) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO wallet_exclusions (proxy_wallet, reason, metric_value, threshold, excluded_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%d %H:%M:%f', 'now'))",
         rusqlite::params![
             proxy_wallet,
             reason.reason_str(),
@@ -370,6 +387,14 @@ impl Persona {
         }
     }
 }
+
+/// Personas that are considered followable at Stage 2 (for flow metrics and ranking).
+/// Single source of truth: when adding a followable Persona variant, add it here.
+pub const FOLLOWABLE_PERSONAS: &[Persona] = &[
+    Persona::InformedSpecialist,
+    Persona::ConsistentGeneralist,
+    Persona::PatientAccumulator,
+];
 
 /// Detect the Informed Specialist persona: concentrated positions, high win rate.
 /// Combines active_positions count AND concentration_ratio to identify true specialists.
@@ -755,7 +780,7 @@ pub fn record_persona(
 ) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
-         VALUES (?1, ?2, ?3, datetime('now'))",
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%f', 'now'))",
         rusqlite::params![proxy_wallet, persona.as_str(), confidence],
     )?;
     Ok(())
@@ -767,6 +792,40 @@ mod tests {
     use common::db::Database;
 
     #[test]
+    fn test_known_bot_excluded_when_in_list() {
+        let known_bots = vec!["0xbot".to_string(), "0xother".to_string()];
+        let result = stage1_known_bot_check("0xbot", &known_bots);
+        assert_eq!(result, Some(ExclusionReason::KnownBot));
+    }
+
+    #[test]
+    fn test_known_bot_not_excluded_when_not_in_list() {
+        let known_bots = vec!["0xbot".to_string()];
+        let result = stage1_known_bot_check("0xhuman", &known_bots);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_known_bot_record_exclusion_persists() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let reason = ExclusionReason::KnownBot;
+        record_exclusion(&db.conn, "0xbot", &reason).unwrap();
+
+        let (stored_reason, metric, threshold): (String, f64, f64) = db.conn
+            .query_row(
+                "SELECT reason, metric_value, threshold FROM wallet_exclusions WHERE proxy_wallet = '0xbot'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_reason, "KNOWN_BOT");
+        assert!((metric - 1.0).abs() < f64::EPSILON);
+        assert!((threshold - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_stage1_too_young() {
         let result = stage1_filter(
             5,  // wallet_age_days
@@ -776,6 +835,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(
@@ -797,6 +857,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(
@@ -818,6 +879,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(
@@ -839,6 +901,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -855,6 +918,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -871,6 +935,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -887,6 +952,7 @@ mod tests {
                 min_wallet_age_days: 30,
                 min_total_trades: 10,
                 max_inactive_days: 30,
+                known_bots: vec![],
             },
         );
         assert_eq!(result, None);
@@ -1021,6 +1087,7 @@ mod tests {
             .reason_str(),
             "SNIPER_INSIDER"
         );
+        assert_eq!(ExclusionReason::KnownBot.reason_str(), "KNOWN_BOT");
     }
 
     #[test]
