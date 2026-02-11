@@ -210,10 +210,10 @@ async fn security_headers_middleware(request: Request, next: Next) -> Response {
 
     let headers = response.headers_mut();
 
-    // Content Security Policy - restrict to same origin for scripts and styles
+    // Content Security Policy - allow Tailwind and HTMX CDNs; partials fetched from same origin
     headers.insert(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';".parse().unwrap(),
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cdn.tailwindcss.com; frame-ancestors 'none';".parse().unwrap(),
     );
 
     // Prevent clickjacking
