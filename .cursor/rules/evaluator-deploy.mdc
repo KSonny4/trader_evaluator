@@ -29,8 +29,10 @@ Commit BEFORE deploying. Never commit `.env`, `data/`, or credentials.
 ## Deploy (only for code/config changes)
 
 ```bash
-make deploy SERVER=ubuntu@3.8.206.244
+make deploy
 ```
+
+Server is auto-discovered via `scripts/aws_find_server.sh` (AWS EC2 tag Name=trading-bot). Do **not** pass hardcoded `SERVER=` — EC2 IPs change on restart and cause "connection timed out". Override only when needed: `make deploy SERVER=ubuntu@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x make deploy`.
 
 This cross-compiles musl, SCPs to `/opt/evaluator/`, restarts systemd service, runs `make check`.
 
@@ -42,24 +44,24 @@ If the dashboard is behind a reverse proxy (cloudflared, nginx, ALB, etc.), the 
 
 ```bash
 # Service alive
-ssh -i trading-bot.pem ubuntu@3.8.206.244 'systemctl is-active evaluator'
+ssh -i ~/git_projects/trading/trading-bot.pem $(./scripts/aws_find_server.sh) 'systemctl is-active evaluator'
 
 # Metrics on port 9094
-ssh -i trading-bot.pem ubuntu@3.8.206.244 'curl -s localhost:9094/metrics | head -5'
+ssh -i ~/git_projects/trading/trading-bot.pem $(./scripts/aws_find_server.sh) 'curl -s localhost:9094/metrics | head -5'
 
 # No panics
-ssh -i trading-bot.pem ubuntu@3.8.206.244 'journalctl -u evaluator --no-pager -n 20'
+ssh -i ~/git_projects/trading/trading-bot.pem $(./scripts/aws_find_server.sh) 'journalctl -u evaluator --no-pager -n 20'
 
-# Phase checks (run highest applicable)
-make check-phase-0 SERVER=ubuntu@3.8.206.244   # Tables exist
-make check-phase-1 SERVER=ubuntu@3.8.206.244   # Markets scored
-make check-phase-2 SERVER=ubuntu@3.8.206.244   # Wallets classified
-make check-phase-3 SERVER=ubuntu@3.8.206.244   # Ingestion running
-make check-phase-4 SERVER=ubuntu@3.8.206.244   # Paper trading
-make check-phase-5 SERVER=ubuntu@3.8.206.244   # Wallet scores
+# Phase checks (run highest applicable; uses auto-discovered SERVER)
+make check-phase-0   # Tables exist
+make check-phase-1   # Markets scored
+make check-phase-2   # Wallets classified
+make check-phase-3   # Ingestion running
+make check-phase-4   # Paper trading
+make check-phase-5   # Wallet scores
 
 # Pipeline overview
-make status SERVER=ubuntu@3.8.206.244
+make status
 ```
 
 ## Quick Reference
@@ -68,7 +70,7 @@ make status SERVER=ubuntu@3.8.206.244
 |------|---------|------|
 | Test | `make test` | 0 failures |
 | Commit | `git commit && push` | Clean tree |
-| Deploy | `make deploy SERVER=...` | No errors |
+| Deploy | `make deploy` (uses AWS discovery) | No errors |
 | Service | `systemctl is-active evaluator` | `active` |
 | Metrics | `curl localhost:9094/metrics` | Non-empty |
 | Logs | `journalctl -u evaluator -n 20` | No panics |
