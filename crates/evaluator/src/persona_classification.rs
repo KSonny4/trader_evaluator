@@ -43,6 +43,7 @@ pub struct PersonaConfig {
     pub topic_lane_min_top_category_ratio: f64,
     pub bonder_min_extreme_price_ratio: f64,
     pub whale_min_avg_trade_size_usdc: f64,
+    pub stage2_min_roi: f64,
 }
 
 impl PersonaConfig {
@@ -77,6 +78,7 @@ impl PersonaConfig {
             topic_lane_min_top_category_ratio: 0.65,
             bonder_min_extreme_price_ratio: 0.60,
             whale_min_avg_trade_size_usdc: 100.0,
+            stage2_min_roi: 0.0,
         }
     }
 
@@ -111,6 +113,7 @@ impl PersonaConfig {
             topic_lane_min_top_category_ratio: p.topic_lane_min_top_category_ratio,
             bonder_min_extreme_price_ratio: p.bonder_min_extreme_price_ratio,
             whale_min_avg_trade_size_usdc: p.whale_min_avg_trade_size_usdc,
+            stage2_min_roi: p.stage2_min_roi,
         }
     }
 }
@@ -172,6 +175,11 @@ pub enum ExclusionReason {
     },
     /// Wallet is in the configured known_bots list (Strategy Bible §4 Stage 1).
     KnownBot,
+    /// Would pass persona checks but ROI < stage2_min_roi (win rate + PnL combo).
+    InsufficientPnl {
+        roi: f64,
+        min_roi: f64,
+    },
 }
 
 #[allow(dead_code)] // Wired into scheduler in Task 21
@@ -190,6 +198,7 @@ impl ExclusionReason {
             Self::JackpotGambler { .. } => "JACKPOT_GAMBLER",
             Self::BotSwarmMicro { .. } => "BOT_SWARM_MICRO",
             Self::KnownBot => "KNOWN_BOT",
+            Self::InsufficientPnl { .. } => "INSUFFICIENT_PNL",
         }
     }
 
@@ -214,6 +223,7 @@ impl ExclusionReason {
             Self::JackpotGambler { pnl_top1_share, .. } => *pnl_top1_share,
             Self::BotSwarmMicro { trades_per_day, .. } => *trades_per_day,
             Self::KnownBot => 1.0,
+            Self::InsufficientPnl { roi, .. } => *roi,
         }
     }
 
@@ -240,6 +250,7 @@ impl ExclusionReason {
             Self::JackpotGambler { .. } => 0.0,
             Self::BotSwarmMicro { .. } => 0.0,
             Self::KnownBot => 0.0,
+            Self::InsufficientPnl { min_roi, .. } => *min_roi,
         }
     }
 }
@@ -314,6 +325,22 @@ pub fn record_exclusion(
         ],
     )?;
     Ok(())
+}
+
+/// If roi < min_roi, records exclusion and returns Some(reason); otherwise returns None.
+fn record_exclusion_if_roi_fails(
+    conn: &Connection,
+    proxy_wallet: &str,
+    roi: f64,
+    min_roi: f64,
+) -> Result<Option<ExclusionReason>> {
+    if roi < min_roi {
+        let reason = ExclusionReason::InsufficientPnl { roi, min_roi };
+        record_exclusion(conn, proxy_wallet, &reason)?;
+        Ok(Some(reason))
+    } else {
+        Ok(None)
+    }
 }
 
 fn upsert_trait(conn: &Connection, proxy_wallet: &str, key: &str, value: &str) -> Result<()> {
@@ -738,6 +765,7 @@ pub fn classify_wallet(
     }
 
     // --- Followable persona detection (priority order) ---
+    // Each followable persona also requires roi >= stage2_min_roi (win rate + PnL combo).
 
     if let Some(persona) = detect_informed_specialist(
         features,
@@ -745,6 +773,11 @@ pub fn classify_wallet(
         config.specialist_min_concentration,
         config.specialist_min_win_rate,
     ) {
+        if let Some(reason) =
+            record_exclusion_if_roi_fails(conn, &features.proxy_wallet, roi, config.stage2_min_roi)?
+        {
+            return Ok(ClassificationResult::Excluded(reason));
+        }
         record_persona(conn, &features.proxy_wallet, &persona, win_rate)?;
         return Ok(ClassificationResult::Followable(persona));
     }
@@ -757,6 +790,11 @@ pub fn classify_wallet(
         config.generalist_max_drawdown,
         config.generalist_min_sharpe,
     ) {
+        if let Some(reason) =
+            record_exclusion_if_roi_fails(conn, &features.proxy_wallet, roi, config.stage2_min_roi)?
+        {
+            return Ok(ClassificationResult::Excluded(reason));
+        }
         record_persona(conn, &features.proxy_wallet, &persona, win_rate)?;
         return Ok(ClassificationResult::Followable(persona));
     }
@@ -766,6 +804,11 @@ pub fn classify_wallet(
         config.accumulator_min_hold_hours,
         config.accumulator_max_trades_per_week,
     ) {
+        if let Some(reason) =
+            record_exclusion_if_roi_fails(conn, &features.proxy_wallet, roi, config.stage2_min_roi)?
+        {
+            return Ok(ClassificationResult::Excluded(reason));
+        }
         record_persona(conn, &features.proxy_wallet, &persona, win_rate)?;
         return Ok(ClassificationResult::Followable(persona));
     }
@@ -1679,6 +1722,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_classify_wallet_excluded_insufficient_pnl() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Would be Informed Specialist (high win rate, concentration) but negative PnL
+        let features = WalletFeatures {
+            proxy_wallet: "0xneg".to_string(),
+            window_days: 30,
+            trade_count: 40,
+            win_count: 28,
+            loss_count: 12,
+            total_pnl: -100.0, // negative
+            avg_position_size: 200.0,
+            unique_markets: 5,
+            avg_hold_time_hours: 24.0,
+            max_drawdown_pct: 8.0,
+            trades_per_week: 10.0,
+            trades_per_day: 10.0 / 7.0,
+            sharpe_ratio: 1.5,
+            active_positions: 3,
+            concentration_ratio: 0.75,
+            avg_trade_size_usdc: 200.0,
+            size_cv: 0.0,
+            buy_sell_balance: 0.0,
+            mid_fill_ratio: 0.0,
+            extreme_price_ratio: 0.0,
+            burstiness_top_1h_ratio: 0.0,
+            top_category: None,
+            top_category_ratio: 0.0,
+        };
+
+        let mut config = PersonaConfig::default_for_test();
+        config.stage2_min_roi = 0.0; // require non-negative
+        let result = classify_wallet(&db.conn, &features, 90, &config).unwrap();
+
+        match &result {
+            ClassificationResult::Excluded(reason) => {
+                assert_eq!(reason.reason_str(), "INSUFFICIENT_PNL");
+            }
+            _ => panic!("Expected InsufficientPnl exclusion, got {result:?}"),
+        }
+
+        let reason: String = db
+            .conn
+            .query_row(
+                "SELECT reason FROM wallet_exclusions WHERE proxy_wallet = '0xneg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "INSUFFICIENT_PNL");
     }
 
     #[test]

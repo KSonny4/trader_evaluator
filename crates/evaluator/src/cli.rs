@@ -1,5 +1,5 @@
 use anyhow::Result;
-use common::db::Database;
+use common::db::{AsyncDb, Database};
 use rusqlite::OptionalExtension;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +10,7 @@ pub enum Command {
     Wallet { address: String },
     PaperPnl,
     Rankings,
+    Classify,
 }
 
 pub fn parse_args<I>(mut args: I) -> std::result::Result<Command, String>
@@ -35,6 +36,7 @@ where
         }
         "paper-pnl" => Ok(Command::PaperPnl),
         "rankings" => Ok(Command::Rankings),
+        "classify" => Ok(Command::Classify),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -47,6 +49,7 @@ pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
         Command::Wallet { address } => show_wallet(db, &address),
         Command::PaperPnl => show_paper_pnl(db),
         Command::Rankings => show_rankings(db),
+        Command::Classify => run_classify(db),
     }
 }
 
@@ -174,6 +177,41 @@ fn show_paper_pnl(db: &Database) -> Result<()> {
         |row| row.get(0),
     )?;
     println!("Paper PnL (settled): {}", pnl.unwrap_or(0.0));
+    Ok(())
+}
+
+fn run_classify(_db: &Database) -> Result<()> {
+    let config = common::config::Config::load()?;
+    let db_path = config.database.path.clone();
+
+    // Run in dedicated thread to avoid "runtime within runtime" when called from tokio::main
+    let db_path_inner = db_path.clone();
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let async_db = AsyncDb::open(&db_path_inner).await?;
+            let classified =
+                crate::jobs::run_persona_classification_once(&async_db, &config).await?;
+            println!("Classified {classified} wallets (followable or excluded)");
+            Ok::<_, anyhow::Error>(())
+        })
+    });
+    #[allow(clippy::map_err_ignore)] // JoinError is opaque
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("classify thread panicked"))??;
+
+    // Show summary
+    let db = Database::open(&db_path)?;
+    let (followable, exclusions): (i64, i64) = db.conn.query_row(
+        "SELECT
+            (SELECT COUNT(DISTINCT proxy_wallet) FROM wallet_personas),
+            (SELECT COUNT(DISTINCT proxy_wallet) FROM wallet_exclusions)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    println!("  → Followable: {followable} unique wallets");
+    println!("  → Excluded: {exclusions} unique wallets");
     Ok(())
 }
 
