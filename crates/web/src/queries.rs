@@ -656,6 +656,36 @@ mod tests {
     }
 
     #[test]
+    fn test_system_status_phase_paper_trading() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank)
+             VALUES ('0xabc', date('now'), 0.8, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from) VALUES ('0xw', 'HOLDER')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xw', '0xm', 'BUY', 10.0, 0.5, 1700000000, '0xtx1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status)
+             VALUES ('0xw', 'mirror', '0xm', 'BUY', 10.0, 0.5, 'open')",
+            [],
+        )
+        .unwrap();
+        let status = system_status(&conn, ":memory:").unwrap();
+        assert_eq!(status.phase, "4: Paper Trading");
+    }
+
+    #[test]
     fn test_top_markets_empty() {
         let conn = test_db();
         let markets = top_markets_today(&conn).unwrap();
