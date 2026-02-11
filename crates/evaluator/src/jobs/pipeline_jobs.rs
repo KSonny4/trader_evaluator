@@ -3,7 +3,7 @@ use common::config::Config;
 use common::db::AsyncDb;
 use common::polymarket::GammaFilter;
 #[cfg(test)]
-use common::types::{ApiHolderResponse, ApiTrade, GammaMarket};
+use common::types::{ApiHolderResponse, ApiLeaderboardEntry, ApiTrade, GammaMarket};
 
 use crate::market_scoring::{rank_markets, MarketCandidate};
 use crate::paper_trading::{is_crypto_15m_market, mirror_trade_to_paper, Side};
@@ -753,6 +753,11 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         })
         .await?;
 
+    let trades_pages = cfg
+        .wallet_discovery
+        .trades_pages_per_market
+        .min(TRADES_PAGES_CAP);
+
     let mut inserted = 0_u64;
     for condition_id in markets {
         let (holder_resp, _raw_h) = holders
@@ -762,9 +767,18 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
             )
             .await?;
 
-        let (market_trades, _raw_t) = trades
-            .fetch_market_trades_page(&condition_id, 200, 0)
-            .await?;
+        let mut market_trades: Vec<common::types::ApiTrade> = Vec::new();
+        for page in 0..trades_pages {
+            let offset = page * TRADES_PAGE_SIZE;
+            let (page_trades, _) = trades
+                .fetch_market_trades_page(&condition_id, TRADES_PAGE_SIZE, offset)
+                .await?;
+            if page_trades.len() < TRADES_PAGE_SIZE as usize {
+                market_trades.extend(page_trades);
+                break;
+            }
+            market_trades.extend(page_trades);
+        }
 
         let mut holder_wallets: Vec<HolderWallet> = Vec::new();
         for r in &holder_resp {
@@ -794,7 +808,6 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 
         let wallets_to_insert: Vec<(String, String)> = discovered
             .into_iter()
-            .take(cfg.wallet_discovery.max_wallets_per_market)
             .map(|w| (w.proxy_wallet, w.discovered_from.as_str().to_string()))
             .collect();
 
@@ -835,6 +848,102 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         })
         .await?;
     metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
+    Ok(inserted)
+}
+
+/// API limits for Polymarket Data API (documented in CLAUDE.md).
+const TRADES_API_OFFSET_CAP: u32 = 3000;
+const TRADES_PAGE_SIZE: u32 = 200;
+/// Max pages to stay under TRADES_API_OFFSET_CAP (3000 / 200 = 15).
+const TRADES_PAGES_CAP: u32 = TRADES_API_OFFSET_CAP / TRADES_PAGE_SIZE;
+const LEADERBOARD_API_OFFSET_MAX: u32 = 1000;
+
+/// Discover wallets from Polymarket leaderboard API. Inserts with discovered_from=LEADERBOARD, discovered_market=NULL.
+pub async fn run_leaderboard_discovery_once<L: super::fetcher_traits::LeaderboardFetcher + Sync>(
+    db: &AsyncDb,
+    leaderboard: &L,
+    cfg: &Config,
+) -> Result<u64> {
+    if !cfg.wallet_discovery.leaderboard.enabled {
+        return Ok(0);
+    }
+
+    let limit = 50_u32;
+    let mut inserted = 0_u64;
+
+    for category in &cfg.wallet_discovery.leaderboard.categories {
+        for time_period in &cfg.wallet_discovery.leaderboard.time_periods {
+            for page in 0..cfg.wallet_discovery.leaderboard.pages_per_category {
+                let offset = page * limit;
+                if offset > LEADERBOARD_API_OFFSET_MAX {
+                    break;
+                }
+                let entries = match leaderboard
+                    .fetch_leaderboard(category, time_period, limit, offset)
+                    .await
+                {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            category = %category,
+                            time_period = %time_period,
+                            offset,
+                            error = %e,
+                            "leaderboard fetch failed; continuing"
+                        );
+                        continue;
+                    }
+                };
+                if entries.is_empty() {
+                    break;
+                }
+
+                let wallets: Vec<String> =
+                    entries.into_iter().filter_map(|e| e.proxy_wallet).collect();
+
+                let page_inserted: u64 = db
+                    .call_named("wallet_discovery.insert_leaderboard_wallets", move |conn| {
+                        let tx = conn.transaction()?;
+                        let mut ins = 0_u64;
+                        for proxy_wallet in wallets {
+                            let changed = tx.execute(
+                                "
+                                INSERT OR IGNORE INTO wallets
+                                    (proxy_wallet, discovered_from, discovered_market, is_active)
+                                VALUES
+                                    (?1, 'LEADERBOARD', NULL, 1)
+                                ",
+                                rusqlite::params![proxy_wallet],
+                            )?;
+                            ins += changed as u64;
+                        }
+                        tx.commit()?;
+                        Ok(ins)
+                    })
+                    .await?;
+
+                inserted += page_inserted;
+
+                if page_inserted == 0 && page > 0 {
+                    break; // No new wallets, stop paginating this category/period
+                }
+            }
+        }
+    }
+
+    if inserted > 0 {
+        metrics::counter!("evaluator_wallets_discovered_total").increment(inserted);
+        let watchlist: i64 = db
+            .call_named("wallet_discovery.count_active_wallets", |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM wallets WHERE is_active = 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await?;
+        metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
+    }
     Ok(inserted)
 }
 
@@ -1368,6 +1477,70 @@ mod tests {
                 b"[]".to_vec(),
             ))
         }
+    }
+
+    struct FakeLeaderboardFetcher {
+        entries: Vec<ApiLeaderboardEntry>,
+    }
+
+    impl super::super::fetcher_traits::LeaderboardFetcher for FakeLeaderboardFetcher {
+        async fn fetch_leaderboard(
+            &self,
+            _category: &str,
+            _time_period: &str,
+            _limit: u32,
+            _offset: u32,
+        ) -> Result<Vec<ApiLeaderboardEntry>> {
+            Ok(self.entries.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_leaderboard_discovery_inserts_wallets() {
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.wallet_discovery.leaderboard.enabled = true;
+        cfg.wallet_discovery.leaderboard.categories = vec!["OVERALL".to_string()];
+        cfg.wallet_discovery.leaderboard.time_periods = vec!["WEEK".to_string()];
+        cfg.wallet_discovery.leaderboard.pages_per_category = 1;
+
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let leaderboard = FakeLeaderboardFetcher {
+            entries: vec![
+                ApiLeaderboardEntry {
+                    rank: Some("1".to_string()),
+                    proxy_wallet: Some("0xleader1".to_string()),
+                    user_name: Some("Alice".to_string()),
+                    vol: Some(1000.0),
+                    pnl: Some(50.0),
+                },
+                ApiLeaderboardEntry {
+                    rank: Some("2".to_string()),
+                    proxy_wallet: Some("0xleader2".to_string()),
+                    user_name: Some("Bob".to_string()),
+                    vol: Some(800.0),
+                    pnl: Some(30.0),
+                },
+            ],
+        };
+
+        let inserted = run_leaderboard_discovery_once(&db, &leaderboard, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2);
+
+        let cnt_wallets: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM wallets WHERE discovered_from = 'LEADERBOARD'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(cnt_wallets, 2);
     }
 
     #[tokio::test]
