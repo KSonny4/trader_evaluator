@@ -1,6 +1,8 @@
 use anyhow::Result;
 use common::polymarket::GammaFilter;
-use common::types::{ApiActivity, ApiHolderResponse, ApiPosition, ApiTrade, GammaMarket};
+use common::types::{
+    ApiActivity, ApiHolderResponse, ApiLeaderboardEntry, ApiPosition, ApiTrade, GammaMarket,
+};
 
 pub trait GammaMarketsPager {
     #[allow(dead_code)]
@@ -54,4 +56,14 @@ pub trait PositionsPager {
         limit: u32,
         offset: u32,
     ) -> impl std::future::Future<Output = Result<(Vec<ApiPosition>, Vec<u8>)>> + Send;
+}
+
+pub trait LeaderboardFetcher {
+    fn fetch_leaderboard(
+        &self,
+        category: &str,
+        time_period: &str,
+        limit: u32,
+        offset: u32,
+    ) -> impl std::future::Future<Output = Result<Vec<ApiLeaderboardEntry>>> + Send;
 }

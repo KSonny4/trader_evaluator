@@ -1,6 +1,8 @@
 use anyhow::Result;
 use common::polymarket::{classify_anyhow_api_error, GammaFilter, PolymarketClient};
-use common::types::{ApiActivity, ApiHolderResponse, ApiPosition, ApiTrade, GammaMarket};
+use common::types::{
+    ApiActivity, ApiHolderResponse, ApiLeaderboardEntry, ApiPosition, ApiTrade, GammaMarket,
+};
 use std::time::Instant;
 
 use super::fetcher_traits::*;
@@ -215,6 +217,38 @@ impl PositionsPager for PolymarketClient {
                 metrics::counter!(
                     "evaluator_api_errors_total",
                     "endpoint" => "positions",
+                    "kind" => classify_anyhow_api_error(&e).as_str()
+                )
+                .increment(1);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl LeaderboardFetcher for PolymarketClient {
+    async fn fetch_leaderboard(
+        &self,
+        category: &str,
+        time_period: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<ApiLeaderboardEntry>> {
+        let start = Instant::now();
+        let res =
+            PolymarketClient::fetch_leaderboard(self, category, time_period, limit, offset).await;
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        metrics::histogram!("evaluator_api_latency_ms", "endpoint" => "leaderboard").record(ms);
+        match res {
+            Ok(v) => {
+                metrics::counter!("evaluator_api_requests_total", "endpoint" => "leaderboard", "status" => "ok").increment(1);
+                Ok(v)
+            }
+            Err(e) => {
+                metrics::counter!("evaluator_api_requests_total", "endpoint" => "leaderboard", "status" => "error").increment(1);
+                metrics::counter!(
+                    "evaluator_api_errors_total",
+                    "endpoint" => "leaderboard",
                     "kind" => classify_anyhow_api_error(&e).as_str()
                 )
                 .increment(1);

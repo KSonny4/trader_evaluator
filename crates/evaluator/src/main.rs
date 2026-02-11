@@ -212,6 +212,7 @@ async fn main() -> Result<()> {
                 loop {
                     let span = tracing::info_span!("job_run", job = "wallet_discovery");
                     let _g = span.enter();
+                    let mut had_error = false;
                     match jobs::run_wallet_discovery_once(
                         &db,
                         api.as_ref(),
@@ -221,13 +222,23 @@ async fn main() -> Result<()> {
                     .await
                     {
                         Ok(n) => tracing::info!(inserted = n, "wallet_discovery done"),
-                        Err(e) => tracing::error!(error = %e, "wallet_discovery failed"),
+                        Err(e) => {
+                            tracing::error!(error = %e, "wallet_discovery failed");
+                            had_error = true;
+                        }
                     }
                     match jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref())
                         .await
                     {
                         Ok(n) => tracing::info!(inserted = n, "leaderboard_discovery done"),
-                        Err(e) => tracing::error!(error = %e, "leaderboard_discovery failed"),
+                        Err(e) => {
+                            tracing::error!(error = %e, "leaderboard_discovery failed");
+                            had_error = true;
+                        }
+                    }
+                    if had_error {
+                        tracing::info!("discovery error backoff: sleeping 60s");
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     }
                 }
             }
