@@ -13,8 +13,7 @@ pub fn record_flow_counts(counts: &FlowCounts) {
         .set(counts.funnel.wallets_discovered as f64);
     metrics::gauge!("evaluator_flow_funnel_wallets_tracked")
         .set(counts.funnel.wallets_tracked as f64);
-    metrics::gauge!("evaluator_flow_funnel_paper_wallets")
-        .set(counts.funnel.paper_wallets as f64);
+    metrics::gauge!("evaluator_flow_funnel_paper_wallets").set(counts.funnel.paper_wallets as f64);
     metrics::gauge!("evaluator_flow_funnel_wallets_ranked_today")
         .set(counts.funnel.wallets_ranked_today as f64);
     metrics::gauge!("evaluator_flow_classification_wallets_tracked")
