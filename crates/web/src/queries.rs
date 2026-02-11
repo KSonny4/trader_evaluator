@@ -97,7 +97,7 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
         let phase = if has_rankings {
             "5: Wallet Ranking"
         } else if has_paper {
-            "4: Paper Copy"
+            "4: Paper Trading"
         } else if has_trades {
             "3: Long-Term Tracking"
         } else if has_wallets {

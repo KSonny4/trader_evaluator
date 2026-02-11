@@ -48,6 +48,21 @@ Real-money followed wallets (~1-3)
 
 Each stage has measurable drop-off rates visible in the UI and Grafana.
 
+### Funnel stages (implementation)
+
+The dashboard and code use **6 implementation funnel stages** that map to the 5 evaluation phases (§9). These are the canonical names; the UI (section headers "Stage 1" … "Stage 5") and phase strings must use the **phase names** below. "Paper Copy Engine" is the implementation name for the component that performs Paper Trading.
+
+| # | Canonical label (short) | Phase | What it measures (one line) |
+|---|-------------------------|-------|-----------------------------|
+| 1 | Markets | 1 Market Discovery | Open Gamma markets meeting filters |
+| 2 | Scored | 1 Market Discovery | MScore top-n written today |
+| 3 | Wallets | 2 Wallet Discovery | Discovered wallets (watchlist) |
+| 4 | Tracked | 3 Long-Term Tracking | Wallets with is_active=1 |
+| 5 | Paper | 4 Paper Trading | Paper trades created (mirror engine) |
+| 6 | Ranked | 5 Wallet Ranking | Wallets with WScore today |
+
+**Phase names (for "Stage N" headers and phase string):** Market Discovery, Wallet Discovery, Long-Term Tracking, Paper Trading, Wallet Ranking.
+
 ---
 
 ## 3. Who We Follow (Followable Personas)

@@ -108,7 +108,7 @@ The goal is a wide funnel at the top and extreme selectivity at the bottom. We w
 - [ ] 7 days of continuous collection without data gaps
 - [ ] Ingestion lag metric tracked and <1 hour
 
-### Phase 4: Paper Copy Engine (EVALUATE)
+### Phase 4: Paper Trading (EVALUATE)
 **Entry:** Phase 3 running for 7+ days (enough wallet data to copy). Account identified as worth following.
 **What to build:** Paper trading engine that mirrors wallet trades with full risk management from `docs/on_risk2.txt`.
 
@@ -186,7 +186,7 @@ If follower_slippage is consistently negative by more than the trader's edge, yo
 **Entry:** Phase 5 complete with stable rankings.
 **What to build:** Deploy to AWS, run alongside existing trading bots.
 
-> **Note on early deployment:** Deploy to AWS as soon as Phase 3 (Long-Term Tracking) is ready — not Phase 6. Reason: Phase 4 (Paper Copy Engine) needs realistic latency to measure follower_slippage accurately. Running locally adds artificial delay that makes paper results unreliable. The Phase 3 → AWS path is: basic systemd service, SQLite on EBS, Prometheus export. Phase 6 adds the final validation criteria below.
+> **Note on early deployment:** Deploy to AWS as soon as Phase 3 (Long-Term Tracking) is ready — not Phase 6. Reason: Phase 4 (Paper Trading) needs realistic latency to measure follower_slippage accurately. Running locally adds artificial delay that makes paper results unreliable. The Phase 3 → AWS path is: basic systemd service, SQLite on EBS, Prometheus export. Phase 6 adds the final validation criteria below.
 
 **Exit criteria:**
 - [ ] Running on AWS t3.micro (same instance as trading bots)

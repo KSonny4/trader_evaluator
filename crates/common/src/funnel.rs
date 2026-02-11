@@ -9,6 +9,8 @@ fn fmt_f64(x: f64) -> String {
     }
 }
 
+/// Stage order and short names (Markets, Scored, Wallets, Tracked, Paper, Ranked) must match
+/// STRATEGY_BIBLE § Funnel stages (implementation).
 pub fn funnel_stage_infos(cfg: &Config) -> [String; 6] {
     let markets = format!(
         "Open Gamma markets: min_liquidity_usdc={} min_daily_volume_usdc={} days_to_expiry=[{},{}] end_date>=tomorrow.",
