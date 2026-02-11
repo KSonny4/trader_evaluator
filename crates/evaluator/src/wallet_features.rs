@@ -29,6 +29,47 @@ pub struct WalletFeatures {
     pub top_category_ratio: f64,
 }
 
+/// Prefer paper PnL (our copy) when settled paper trades exist; otherwise fallback to positions_snapshots.
+fn total_pnl_from_paper_or_positions(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> f64 {
+    let paper_pnl: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(pnl), 0.0) FROM paper_trades
+             WHERE proxy_wallet = ?1 AND status != 'open'
+             AND created_at >= datetime(?2, 'unixepoch')",
+            rusqlite::params![proxy_wallet, cutoff],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let has_settled_paper_trades: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM paper_trades
+             WHERE proxy_wallet = ?1 AND status != 'open'
+             AND created_at >= datetime(?2, 'unixepoch'))",
+            rusqlite::params![proxy_wallet, cutoff],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if has_settled_paper_trades {
+        paper_pnl
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(SUM(cash_pnl), 0.0) FROM positions_snapshots
+             WHERE proxy_wallet = ?1 AND snapshot_at >= datetime(?2, 'unixepoch')
+             AND (proxy_wallet, condition_id, snapshot_at) IN (
+               SELECT proxy_wallet, condition_id, MAX(snapshot_at)
+               FROM positions_snapshots
+               WHERE proxy_wallet = ?1 AND snapshot_at >= datetime(?2, 'unixepoch')
+               GROUP BY proxy_wallet, condition_id
+             )",
+            rusqlite::params![proxy_wallet, cutoff],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0)
+    }
+}
+
 #[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn compute_wallet_features(
     conn: &Connection,
@@ -81,16 +122,7 @@ pub fn compute_wallet_features(
         )
         .unwrap_or(0.0);
 
-    // Total PnL from paper trades (if any)
-    let total_pnl: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(pnl), 0.0) FROM paper_trades
-             WHERE proxy_wallet = ?1 AND status != 'open'
-             AND created_at >= datetime(?2, 'unixepoch')",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
+    let total_pnl = total_pnl_from_paper_or_positions(conn, proxy_wallet, cutoff);
 
     let weeks = f64::from(window_days) / 7.0;
     let trades_per_week = if weeks > 0.0 {
