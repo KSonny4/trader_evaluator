@@ -11,7 +11,7 @@ Wallet Discovery (Data API) --> Watchlist
     |
 Long-Term Tracking (trades, activity, positions, holders)
     |
-Paper Copy Engine (mirror trades with risk caps)
+Paper Trading (mirror trades with risk caps)
     |
 WScore Ranking --> "Who to Follow" with evidence
 ```

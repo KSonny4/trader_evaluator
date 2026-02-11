@@ -15,7 +15,7 @@ Wallet Discovery (Data API: holders + traders) → Watchlist
     ↓
 Long-Term Tracking (trades, activity, positions, holders snapshots)
     ↓
-Paper Copy Engine (mirror trades with risk caps)
+Paper Trading (mirror trades with risk caps)
     ↓
 WScore Ranking → "Who to Follow" with evidence
 ```
@@ -72,7 +72,7 @@ The system progresses through 7 phases. **Never skip a phase.**
 | 1 | Market Discovery | Markets scored daily for 3+ days. Handle rotating markets (e.g. BTC 15m markets change slug every 15 min). |
 | 2 | Wallet Discovery & Classification | All participants stored. Every wallet classified into persona. Only followable personas advance. |
 | 3 | Long-Term Tracking | 7 days continuous ingestion, no data gaps |
-| 4 | Paper Copy | Paper-trade only the best classified wallets (~5-10). Full risk management from `docs/on_risk2.txt`. |
+| 4 | Paper Trading | Paper-trade only the best classified wallets (~5-10). Full risk management from `docs/on_risk2.txt`. |
 | 5 | Wallet Ranking | WScore stable across 3 consecutive days |
 | 6 | Production | Deployed on AWS, 72h no crashes, metrics in Grafana |
 
