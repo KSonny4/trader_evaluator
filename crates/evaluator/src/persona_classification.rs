@@ -256,7 +256,10 @@ pub struct Stage1Config {
 
 /// Returns Some(KnownBot) if proxy_wallet is in the known_bots list, None otherwise.
 #[allow(dead_code)] // Wired into scheduler in Task 21
-pub fn stage1_known_bot_check(proxy_wallet: &str, known_bots: &[String]) -> Option<ExclusionReason> {
+pub fn stage1_known_bot_check(
+    proxy_wallet: &str,
+    known_bots: &[String],
+) -> Option<ExclusionReason> {
     if known_bots.iter().any(|b| b.as_str() == proxy_wallet) {
         Some(ExclusionReason::KnownBot)
     } else {

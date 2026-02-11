@@ -5,9 +5,8 @@ mod queries;
 use anyhow::Result;
 use askama::Template;
 use axum::body::Body;
-use axum::extract::Query;
-use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -40,6 +39,8 @@ pub struct AppState {
     pub max_total_exposure_pct: f64,
     pub max_daily_loss_pct: f64,
     pub max_concurrent_positions: i64,
+    // Rate limiter for login attempts
+    pub login_rate_limiter: Arc<LoginRateLimiter>,
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -85,6 +86,79 @@ const AUTH_COOKIE_NAME: &str = "evaluator_auth";
 const CSRF_COOKIE_NAME: &str = "evaluator_csrf";
 const SESSION_DURATION_SECS: i64 = 7 * 24 * 60 * 60; // 7 days
 
+// --- Rate Limiting for Login ---
+
+/// Simple in-memory rate limiter for login attempts
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone)]
+pub struct LoginRateLimiter {
+    attempts: Arc<Mutex<HashMap<String, Vec<u64>>>>,
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoginRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Check if the client IP is rate limited (5 attempts per minute)
+    #[allow(clippy::significant_drop_tightening)] // lock needed for retain + len; Clippy's suggestion is invalid
+    pub fn is_rate_limited(&self, client_ip: &str) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let count = {
+            let mut attempts = self.attempts.lock().unwrap();
+            let client_attempts = attempts.entry(client_ip.to_string()).or_default();
+            client_attempts.retain(|&timestamp| now - timestamp < 60);
+            client_attempts.len()
+        };
+        count >= 5
+    }
+
+    /// Record a login attempt
+    pub fn record_attempt(&self, client_ip: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.attempts
+            .lock()
+            .unwrap()
+            .entry(client_ip.to_string())
+            .or_default()
+            .push(now);
+    }
+
+    /// Extract client IP from request
+    fn extract_client_ip(req: &Request<Body>) -> String {
+        req.headers()
+            .get("x-forwarded-for")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .or_else(|| req.headers().get("x-real-ip").and_then(|h| h.to_str().ok()))
+            .or_else(|| {
+                req.headers()
+                    .get("cf-connecting-ip")
+                    .and_then(|h| h.to_str().ok())
+            })
+            .unwrap_or("unknown")
+            .to_string()
+    }
+}
+
 /// Generate cryptographically secure auth token using SHA-256
 fn generate_auth_token(password: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -98,6 +172,72 @@ fn generate_csrf_token() -> String {
     let mut rng = rand::thread_rng();
     let token: [u8; 32] = rng.gen();
     hex::encode(token)
+}
+
+// --- Security Headers Middleware ---
+
+/// Rate limiting middleware: only applies to POST /login (actual login attempts).
+/// GET /login, GET /logout, etc. pass through without counting.
+async fn login_rate_limit_middleware(
+    State(limiter): State<Arc<LoginRateLimiter>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() != Method::POST || request.uri().path() != "/login" {
+        return next.run(request).await;
+    }
+
+    let client_ip = LoginRateLimiter::extract_client_ip(&request);
+
+    if limiter.is_rate_limited(&client_ip) {
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", "60")
+            .body(Body::from(
+                "Too many login attempts. Please try again in 60 seconds.",
+            ))
+            .unwrap()
+            .into_response();
+    }
+
+    limiter.record_attempt(&client_ip);
+    next.run(request).await
+}
+
+/// Add security headers to all responses
+async fn security_headers_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+
+    let headers = response.headers_mut();
+
+    // Content Security Policy - restrict to same origin for scripts and styles
+    headers.insert(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';".parse().unwrap(),
+    );
+
+    // Prevent clickjacking
+    headers.insert("X-Frame-Options", "DENY".parse().unwrap());
+
+    // Prevent MIME type sniffing
+    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+
+    // XSS Protection (legacy but still useful)
+    headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
+
+    // Referrer Policy
+    headers.insert(
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin".parse().unwrap(),
+    );
+
+    // Strict Transport Security (only in production)
+    headers.insert(
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains".parse().unwrap(),
+    );
+
+    response
 }
 
 /// Iterate all cookie name/value pairs from (possibly multiple) Cookie headers.
@@ -685,7 +825,11 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/login", get(login_form).post(login_submit))
-        .route("/logout", get(logout));
+        .route("/logout", get(logout))
+        .layer(middleware::from_fn_with_state(
+            state.login_rate_limiter.clone(),
+            login_rate_limit_middleware,
+        )); // Apply rate limiting only to login
 
     // Protected routes (auth required if password is set)
     let protected_routes = Router::new()
@@ -707,6 +851,7 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
 
     public_routes
         .merge(protected_routes)
+        .layer(middleware::from_fn(security_headers_middleware)) // Security headers for all responses
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -749,6 +894,7 @@ async fn main() -> Result<()> {
         auth_password,
         funnel_stage_infos,
         db_semaphore: Arc::new(Semaphore::new(8)),
+        login_rate_limiter: Arc::new(LoginRateLimiter::new()),
         db_timeout: Duration::from_secs(5),
         db_open_delay: Duration::ZERO,
         paper_bankroll_usdc: config.risk.paper_bankroll_usdc,
@@ -842,6 +988,7 @@ mod tests {
             auth_password: None,
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
             db_semaphore: Arc::new(Semaphore::new(8)),
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
             db_timeout: Duration::from_secs(5),
             db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
@@ -869,6 +1016,7 @@ mod tests {
             auth_password: Some(password.to_string()),
             funnel_stage_infos: common::funnel::funnel_stage_infos(&cfg),
             db_semaphore: Arc::new(Semaphore::new(8)),
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
             db_timeout: Duration::from_secs(5),
             db_open_delay: Duration::ZERO,
             paper_bankroll_usdc: cfg.risk.paper_bankroll_usdc,
@@ -902,6 +1050,7 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
         });
         create_router_with_state(state)
     }
@@ -1619,6 +1768,7 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
         });
         let app = create_router_with_state(state);
 
@@ -1720,6 +1870,7 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
         });
         let app = create_router_with_state(state);
 
@@ -1987,6 +2138,7 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            login_rate_limiter: Arc::new(LoginRateLimiter::new()),
         });
         let app = create_router_with_state(state);
 
