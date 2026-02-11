@@ -223,6 +223,9 @@ pub struct Personas {
     pub topic_lane_min_top_category_ratio: f64,
     pub bonder_min_extreme_price_ratio: f64,
     pub whale_min_avg_trade_size_usdc: f64,
+    /// Stage 2 ROI gate: minimum ROI (win rate + PnL combo) for followable personas. 0 = disabled.
+    #[serde(default)]
+    pub stage2_min_roi: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
