@@ -71,9 +71,54 @@ pub struct MarketScoring {
 #[derive(Debug, Deserialize)]
 pub struct WalletDiscovery {
     pub min_total_trades: u32,
-    pub max_wallets_per_market: usize,
     pub holders_per_market: usize,
     pub refresh_interval_secs: u64,
+    /// Number of pages of 200 trades to fetch per market (offset 0, 200, 400, ...). Cap at 15 (API offset ~3000).
+    #[serde(default = "default_trades_pages_per_market")]
+    pub trades_pages_per_market: u32,
+    /// "continuous" = run discovery in loop (rate limit only); "scheduled" = use refresh_interval_secs.
+    #[serde(default = "default_wallet_discovery_mode")]
+    pub wallet_discovery_mode: String,
+    #[serde(default)]
+    pub leaderboard: WalletDiscoveryLeaderboard,
+}
+
+fn default_trades_pages_per_market() -> u32 {
+    15
+}
+
+fn default_wallet_discovery_mode() -> String {
+    "scheduled".to_string()
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct WalletDiscoveryLeaderboard {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Categories: OVERALL, POLITICS, SPORTS, CRYPTO, CULTURE, ECONOMICS, TECH, FINANCE, etc.
+    #[serde(default = "default_leaderboard_categories")]
+    pub categories: Vec<String>,
+    /// Time periods: DAY, WEEK, MONTH, ALL
+    #[serde(default = "default_leaderboard_time_periods")]
+    pub time_periods: Vec<String>,
+    #[serde(default = "default_leaderboard_pages_per_category")]
+    pub pages_per_category: u32,
+}
+
+fn default_leaderboard_categories() -> Vec<String> {
+    vec![
+        "OVERALL".to_string(),
+        "POLITICS".to_string(),
+        "CRYPTO".to_string(),
+    ]
+}
+
+fn default_leaderboard_time_periods() -> Vec<String> {
+    vec!["WEEK".to_string(), "MONTH".to_string()]
+}
+
+fn default_leaderboard_pages_per_category() -> u32 {
+    20
 }
 
 #[derive(Debug, Deserialize)]

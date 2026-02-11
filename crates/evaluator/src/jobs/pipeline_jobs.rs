@@ -753,6 +753,8 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         })
         .await?;
 
+    let trades_pages = cfg.wallet_discovery.trades_pages_per_market.min(15); // API offset cap ~3000
+
     let mut inserted = 0_u64;
     for condition_id in markets {
         let (holder_resp, _raw_h) = holders
@@ -762,9 +764,18 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
             )
             .await?;
 
-        let (market_trades, _raw_t) = trades
-            .fetch_market_trades_page(&condition_id, 200, 0)
-            .await?;
+        let mut market_trades: Vec<common::types::ApiTrade> = Vec::new();
+        for page in 0..trades_pages {
+            let offset = page * 200;
+            let (page_trades, _) = trades
+                .fetch_market_trades_page(&condition_id, 200, offset)
+                .await?;
+            if page_trades.len() < 200 {
+                market_trades.extend(page_trades);
+                break;
+            }
+            market_trades.extend(page_trades);
+        }
 
         let mut holder_wallets: Vec<HolderWallet> = Vec::new();
         for r in &holder_resp {
@@ -794,7 +805,6 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 
         let wallets_to_insert: Vec<(String, String)> = discovered
             .into_iter()
-            .take(cfg.wallet_discovery.max_wallets_per_market)
             .map(|w| (w.proxy_wallet, w.discovered_from.as_str().to_string()))
             .collect();
 
@@ -835,6 +845,95 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         })
         .await?;
     metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
+    Ok(inserted)
+}
+
+/// Discover wallets from Polymarket leaderboard API. Inserts with discovered_from=LEADERBOARD, discovered_market=NULL.
+pub async fn run_leaderboard_discovery_once(
+    db: &AsyncDb,
+    api: &common::polymarket::PolymarketClient,
+    cfg: &Config,
+) -> Result<u64> {
+    if !cfg.wallet_discovery.leaderboard.enabled {
+        return Ok(0);
+    }
+
+    let limit = 50_u32;
+    let mut inserted = 0_u64;
+
+    for category in &cfg.wallet_discovery.leaderboard.categories {
+        for time_period in &cfg.wallet_discovery.leaderboard.time_periods {
+            for page in 0..cfg.wallet_discovery.leaderboard.pages_per_category {
+                let offset = page * limit;
+                if offset > 1000 {
+                    break; // API offset max 1000
+                }
+                let entries = match api
+                    .fetch_leaderboard(category, time_period, limit, offset)
+                    .await
+                {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            category = %category,
+                            time_period = %time_period,
+                            offset,
+                            error = %e,
+                            "leaderboard fetch failed; continuing"
+                        );
+                        continue;
+                    }
+                };
+                if entries.is_empty() {
+                    break;
+                }
+
+                let wallets: Vec<String> =
+                    entries.into_iter().filter_map(|e| e.proxy_wallet).collect();
+
+                let page_inserted: u64 = db
+                    .call_named("wallet_discovery.insert_leaderboard_wallets", move |conn| {
+                        let tx = conn.transaction()?;
+                        let mut ins = 0_u64;
+                        for proxy_wallet in wallets {
+                            let changed = tx.execute(
+                                "
+                                INSERT OR IGNORE INTO wallets
+                                    (proxy_wallet, discovered_from, discovered_market, is_active)
+                                VALUES
+                                    (?1, 'LEADERBOARD', NULL, 1)
+                                ",
+                                rusqlite::params![proxy_wallet],
+                            )?;
+                            ins += changed as u64;
+                        }
+                        tx.commit()?;
+                        Ok(ins)
+                    })
+                    .await?;
+
+                inserted += page_inserted;
+
+                if page_inserted == 0 && page > 0 {
+                    break; // No new wallets, stop paginating this category/period
+                }
+            }
+        }
+    }
+
+    if inserted > 0 {
+        metrics::counter!("evaluator_wallets_discovered_total").increment(inserted);
+        let watchlist: i64 = db
+            .call_named("wallet_discovery.count_active_wallets", |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM wallets WHERE is_active = 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await?;
+        metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
+    }
     Ok(inserted)
 }
 

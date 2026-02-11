@@ -24,7 +24,7 @@ portfolio_weekly_loss_pct = 8.0
 max_concurrent_positions = 20
 
 [market_scoring]
-top_n_markets = 20
+top_n_markets = 50
 min_liquidity_usdc = 1000.0
 min_daily_volume_usdc = 5000.0
 min_daily_trades = 20
@@ -40,9 +40,16 @@ weights_time_to_expiry = 0.15
 
 [wallet_discovery]
 min_total_trades = 5                   # prune wallets with < N trades
-max_wallets_per_market = 100
 holders_per_market = 20                # Polymarket API caps at 20
-refresh_interval_secs = 86400          # daily
+refresh_interval_secs = 86400          # daily (ignored when mode=continuous)
+trades_pages_per_market = 15           # pages of 200 trades each (API offset cap ~3000)
+wallet_discovery_mode = "continuous"  # continuous = run loop (rate limit only); scheduled = use refresh_interval_secs
+
+[wallet_discovery.leaderboard]
+enabled = true
+categories = ["OVERALL", "POLITICS", "CRYPTO"]
+time_periods = ["WEEK", "MONTH"]
+pages_per_category = 20                # offset max 1000, limit 50
 
 [ingestion]
 trades_poll_interval_secs = 3600       # hourly

@@ -26,11 +26,11 @@ pub fn funnel_stage_infos(cfg: &Config) -> [String; 6] {
     );
 
     let wallets = format!(
-        "From top_n_markets={} scored markets: holders_per_market={} include traders with >=min_total_trades={} cap max_wallets_per_market={} per market.",
+        "From top_n_markets={} scored markets: holders_per_market={} trades_pages_per_market={} include traders with >=min_total_trades={}; no cap, insert all.",
         cfg.market_scoring.top_n_markets,
         cfg.wallet_discovery.holders_per_market,
-        cfg.wallet_discovery.min_total_trades,
-        cfg.wallet_discovery.max_wallets_per_market
+        cfg.wallet_discovery.trades_pages_per_market,
+        cfg.wallet_discovery.min_total_trades
     );
 
     let tracked = "Wallets with is_active=1; ingestion runs only for tracked wallets.".to_string();
@@ -81,7 +81,7 @@ mod tests {
 
         assert!(infos[2].contains("holders_per_market="));
         assert!(infos[2].contains("min_total_trades="));
-        assert!(infos[2].contains("max_wallets_per_market="));
+        assert!(infos[2].contains("trades_pages_per_market="));
 
         assert!(infos[4].contains("position_size_usdc="));
         assert!(infos[4].contains("slippage_pct="));

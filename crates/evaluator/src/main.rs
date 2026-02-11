@@ -67,6 +67,10 @@ async fn main() -> Result<()> {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
     }
+    match jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()).await {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: leaderboard_discovery done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
+    }
 
     match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
         Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
@@ -99,19 +103,26 @@ async fn main() -> Result<()> {
     let (wal_checkpoint_tx, mut wal_checkpoint_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (flow_metrics_tx, mut flow_metrics_rx) = tokio::sync::mpsc::channel::<()>(8);
 
-    let _scheduler_handles = scheduler::start(vec![
-        scheduler::JobSpec {
-            name: "market_scoring".to_string(),
-            interval: std::time::Duration::from_secs(cfg.market_scoring.refresh_interval_secs),
-            tick: market_scoring_tx,
-            run_immediately: false,
-        },
-        scheduler::JobSpec {
+    let discovery_continuous = cfg
+        .wallet_discovery
+        .wallet_discovery_mode
+        .eq_ignore_ascii_case("continuous");
+
+    let mut scheduler_jobs = vec![scheduler::JobSpec {
+        name: "market_scoring".to_string(),
+        interval: std::time::Duration::from_secs(cfg.market_scoring.refresh_interval_secs),
+        tick: market_scoring_tx,
+        run_immediately: false,
+    }];
+    if !discovery_continuous {
+        scheduler_jobs.push(scheduler::JobSpec {
             name: "wallet_discovery".to_string(),
             interval: std::time::Duration::from_secs(cfg.wallet_discovery.refresh_interval_secs),
             tick: wallet_discovery_tx,
             run_immediately: false,
-        },
+        });
+    }
+    scheduler_jobs.extend([
         scheduler::JobSpec {
             name: "trades_ingestion".to_string(),
             interval: std::time::Duration::from_secs(cfg.ingestion.trades_poll_interval_secs),
@@ -173,6 +184,7 @@ async fn main() -> Result<()> {
             run_immediately: true,
         },
     ]);
+    let _scheduler_handles = scheduler::start(scheduler_jobs);
 
     tokio::spawn({
         let api = api.clone();
@@ -190,23 +202,67 @@ async fn main() -> Result<()> {
         }
     });
 
-    tokio::spawn({
-        let api = api.clone();
-        let cfg = cfg.clone();
-        let db = db.clone();
-        async move {
-            while wallet_discovery_rx.recv().await.is_some() {
-                let span = tracing::info_span!("job_run", job = "wallet_discovery");
-                let _g = span.enter();
-                match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref())
+    if discovery_continuous {
+        // Continuous mode: run discovery in a loop (rate limit only, no scheduler interval).
+        tokio::spawn({
+            let api = api.clone();
+            let cfg = cfg.clone();
+            let db = db.clone();
+            async move {
+                loop {
+                    let span = tracing::info_span!("job_run", job = "wallet_discovery");
+                    let _g = span.enter();
+                    match jobs::run_wallet_discovery_once(
+                        &db,
+                        api.as_ref(),
+                        api.as_ref(),
+                        cfg.as_ref(),
+                    )
                     .await
-                {
-                    Ok(n) => tracing::info!(inserted = n, "wallet_discovery done"),
-                    Err(e) => tracing::error!(error = %e, "wallet_discovery failed"),
+                    {
+                        Ok(n) => tracing::info!(inserted = n, "wallet_discovery done"),
+                        Err(e) => tracing::error!(error = %e, "wallet_discovery failed"),
+                    }
+                    match jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref())
+                        .await
+                    {
+                        Ok(n) => tracing::info!(inserted = n, "leaderboard_discovery done"),
+                        Err(e) => tracing::error!(error = %e, "leaderboard_discovery failed"),
+                    }
                 }
             }
-        }
-    });
+        });
+    } else {
+        // Scheduled mode: run on scheduler ticks.
+        tokio::spawn({
+            let api = api.clone();
+            let cfg = cfg.clone();
+            let db = db.clone();
+            async move {
+                while wallet_discovery_rx.recv().await.is_some() {
+                    let span = tracing::info_span!("job_run", job = "wallet_discovery");
+                    let _g = span.enter();
+                    match jobs::run_wallet_discovery_once(
+                        &db,
+                        api.as_ref(),
+                        api.as_ref(),
+                        cfg.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(n) => tracing::info!(inserted = n, "wallet_discovery done"),
+                        Err(e) => tracing::error!(error = %e, "wallet_discovery failed"),
+                    }
+                    match jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref())
+                        .await
+                    {
+                        Ok(n) => tracing::info!(inserted = n, "leaderboard_discovery done"),
+                        Err(e) => tracing::error!(error = %e, "leaderboard_discovery failed"),
+                    }
+                }
+            }
+        });
+    }
 
     tokio::spawn({
         let api = api.clone();

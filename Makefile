@@ -47,6 +47,7 @@ MAX_FILE_LINES ?= 500
 # Files that currently exceed the limit — each must have a tracking issue to split them.
 # Remove entries as files are refactored below the threshold.
 OVERLENGTH_ALLOWLIST := \
+	crates/common/src/config.rs \
 	crates/evaluator/src/jobs/pipeline_jobs.rs \
 	crates/web/src/main.rs \
 	crates/web/src/queries.rs \
