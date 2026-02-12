@@ -99,6 +99,15 @@ pub struct SystemStatus {
     pub events_display: String,
 }
 
+/// Last completed run stats for the "async funnel" (wallets/markets/trades processed).
+pub struct LastRunStats {
+    pub trades_wallets: i64,
+    pub trades_inserted: i64,
+    pub events_markets: i64,
+    pub trades_run_at: Option<String>,
+    pub events_run_at: Option<String>,
+}
+
 /// Row in the top events table (events = grouped by event_slug, or single market when no event_slug)
 pub struct EventRow {
     pub rank: i64,
@@ -228,10 +237,27 @@ pub struct JourneyEvent {
     pub detail: String,
 }
 
+/// One row from trades_raw for the wallet scorecard.
+#[derive(serde::Serialize)]
+pub struct WalletTradeRow {
+    pub id: i64,
+    pub condition_id: String,
+    pub market_title: Option<String>,
+    pub side: String,
+    pub size_display: String,
+    pub price_display: String,
+    pub timestamp_display: String,
+    pub outcome: Option<String>,
+}
+
 pub struct WalletJourney {
     pub proxy_wallet: String,
     pub wallet_short: String,
+    /// Display label: Polymarket profile name if set, otherwise wallet_short.
+    pub wallet_display_label: String,
     pub discovered_at: String,
+    /// When we last ingested trades for this wallet (MAX(ingested_at) in trades_raw). We never have "all" trades; this is when we last fetched.
+    pub last_trades_ingestion_at: Option<String>,
     pub persona: Option<String>,
     pub confidence_display: Option<String>,
     pub exclusion_reason: Option<String>,
@@ -240,6 +266,10 @@ pub struct WalletJourney {
     pub copy_fidelity_display: String,
     pub follower_slippage_display: String,
     pub events: Vec<JourneyEvent>,
+    /// Trades from trades_raw for this wallet (newest first; initial page loads first 20).
+    pub trades: Vec<WalletTradeRow>,
+    /// Total number of trades in trades_raw for this wallet (for "All trades (N)" and load-more).
+    pub total_trades_count: usize,
 }
 
 // Helper to truncate wallet addresses

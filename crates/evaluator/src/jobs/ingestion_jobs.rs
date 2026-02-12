@@ -9,8 +9,10 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
     limit: u32,
     wallets_limit: u32,
 ) -> Result<(u64, u64)> {
-    // Put wallets that already have recent trades first; then wallets with no trades or too-old
-    // trades so we (re)download for them.
+    // Backfill first: wallets with 0 trades (so persona can evaluate them), then wallets that
+    // already have trades. Within each tier, oldest discovered first so we make progress through
+    // the backlog and don't starve older wallets. Persona runs on a schedule and reads trades_raw;
+    // it doesn't "wait" for ingestion — fill trades_raw by running this job (e.g. hourly).
     let wallets: Vec<String> = db
         .call_named("run_trades_ingestion.wallets_select", move |conn| {
             let mut stmt = conn.prepare(
@@ -19,14 +21,8 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
                 FROM wallets w
                 WHERE w.is_active = 1
                 ORDER BY
-                  CASE
-                    WHEN (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) > 0
-                     AND (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
-                          FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) <= 30
-                    THEN 0
-                    ELSE 1
-                  END,
-                  w.discovered_at DESC
+                  CASE WHEN (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) = 0 THEN 0 ELSE 1 END,
+                  w.discovered_at ASC
                 LIMIT ?1
                 ",
             )?;
@@ -62,6 +58,24 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
         }
     }
     metrics::counter!("evaluator_trades_ingested_total").increment(inserted);
+
+    // Persist last-run stats for dashboard "async funnel".
+    let wallets_count = total as i64;
+    let trades_count = inserted as i64;
+    let _ = db
+        .call_named("run_trades_ingestion.persist_last_run", move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO discovery_scheduler_state (key, value_int, updated_at) VALUES ('last_run_trades_wallets', ?1, datetime('now'))",
+                [wallets_count],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO discovery_scheduler_state (key, value_int, updated_at) VALUES ('last_run_trades_inserted', ?1, datetime('now'))",
+                [trades_count],
+            )?;
+            Ok(())
+        })
+        .await;
+
     Ok((pages, inserted))
 }
 

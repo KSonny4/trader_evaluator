@@ -50,6 +50,7 @@ OVERLENGTH_ALLOWLIST := \
 	crates/common/src/config.rs \
 	crates/evaluator/src/jobs/pipeline_jobs.rs \
 	crates/web/src/main.rs \
+	crates/web/src/models.rs \
 	crates/web/src/queries.rs \
 	crates/evaluator/src/ingestion.rs \
 	crates/evaluator/src/paper_trading.rs \

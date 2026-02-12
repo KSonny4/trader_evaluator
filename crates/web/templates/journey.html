@@ -5,7 +5,7 @@
     <div class="flex items-end justify-between gap-4">
         <div>
             <h2 class="text-xl font-semibold text-gray-100">Journey</h2>
-            <div class="text-sm text-gray-500 font-mono">{{ journey.proxy_wallet }}</div>
+            <a href="https://polymarket.com/profile/{{ journey.proxy_wallet }}" target="_blank" rel="noopener" class="text-sm text-blue-400 hover:text-blue-300 font-mono" title="{{ journey.proxy_wallet }}">{{ journey.wallet_display_label }}</a>
         </div>
         <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
     </div>
@@ -37,6 +37,15 @@
             <div class="text-xs text-gray-500">Copy Fidelity</div>
             <div class="text-sm text-gray-200">{{ journey.copy_fidelity_display }}</div>
         </div>
+    </div>
+
+    <div class="text-sm text-gray-500">
+        <span class="text-gray-400">Last trades ingestion:</span>
+        {% match journey.last_trades_ingestion_at %}
+        {% when Some with (t) %}{{ t }}
+        {% when None %}never
+        {% endmatch %}
+        <span class="text-gray-600 ml-1">(we never have all trades; this is when we last fetched for this wallet)</span>
     </div>
 
     <div class="bg-gray-900 rounded-lg p-4">

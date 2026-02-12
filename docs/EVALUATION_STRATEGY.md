@@ -58,6 +58,8 @@ Every discovered wallet gets classified into a persona. This determines whether 
 
 Wallet age < 30 days is a **hard filter** at Stage 1 — wallets are excluded immediately. Older wallets are still stored and tracked with trust multipliers applied to WScore.
 
+**We never have "all" trades:** Wallet age and Stage 1 use the **oldest trade we have** in `trades_raw` (days since that timestamp). Ingestion is paginated and subject to API limits, so we do not wait for or guarantee "full" history; the dashboard shows "Last trades ingestion" per wallet so you can see when we last fetched. See per-wallet journey page and Strategy Bible §4.
+
 **Obscurity bonus:** Wallets NOT on the public leaderboard and NOT tracked by known analytics tools (predictfolio, polyterm) get a scoring bonus. Rationale: less-known wallets = fewer copiers = less front-running = better fills for us. Detection: check if wallet appears in leaderboard API top-500. If not, apply 1.2x multiplier to WScore.
 
 **The funnel (discover many → trade few):**
@@ -85,6 +87,8 @@ The goal is a wide funnel at the top and extreme selectivity at the bottom. We w
 3. Store persona + confidence + feature values in `wallet_personas` table
 4. Re-classify weekly as more data arrives
 5. Future: train classifier on paper-trading outcomes (label = "profitable to follow" vs "not")
+
+**Ingestion and persona:** Persona classification runs on a schedule (e.g. hourly); it does not wait for trades. It reads `trades_raw` (age, trade count, last trade). Trades ingestion **prioritizes wallets with 0 trades** (backfill-first), then oldest-discovered first, so we fill `trades_raw` for all wallets and persona can evaluate them as data arrives. Ensure `wallets_per_ingestion_run` and `trades_poll_interval_secs` allow enough wallets per hour to backfill in reasonable time.
 
 **Exit criteria:**
 - [ ] For each selected market: ALL participants extracted and stored (not just top holders — everyone who traded)
