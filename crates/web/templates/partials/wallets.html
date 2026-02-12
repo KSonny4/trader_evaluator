@@ -17,13 +17,15 @@
             {% for w in wallets %}
             <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
                 <td class="py-1.5 px-2 font-mono" title="{{ w.proxy_wallet }}">
-                    <a href="https://polymarket.com/profile/{{ w.proxy_wallet }}" target="_blank" rel="noopener"
-                       class="inline-flex items-center gap-1 text-gray-300 hover:text-blue-400 transition-colors">
-                        {{ w.wallet_short }}
-                        <svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-                        </svg>
-                    </a>
+                    <span class="inline-flex items-center gap-1">
+                        <a href="/journey/{{ w.proxy_wallet }}" class="text-gray-300 hover:text-blue-400 transition-colors">{{ w.wallet_short }}</a>
+                        <a href="https://polymarket.com/profile/{{ w.proxy_wallet }}" target="_blank" rel="noopener"
+                           class="text-gray-500 hover:text-blue-400 transition-colors" title="View on Polymarket">
+                            <svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                            </svg>
+                        </a>
+                    </span>
                 </td>
                 <td class="py-1.5 px-2">
                     <span class="px-1.5 py-0.5 rounded text-xs
