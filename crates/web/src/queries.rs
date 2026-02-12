@@ -33,6 +33,33 @@ fn timed_db_op<T>(op: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T> 
     res
 }
 
+/// Last completed run stats from discovery_scheduler_state (written by evaluator).
+pub fn last_run_stats(conn: &Connection) -> Result<LastRunStats> {
+    timed_db_op("web.last_run_stats", || {
+        let row = |key: &str| -> Result<(i64, Option<String>)> {
+            let opt = conn
+                .query_row(
+                    "SELECT value_int, updated_at FROM discovery_scheduler_state WHERE key = ?1",
+                    [key],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .optional()
+                .map_err(anyhow::Error::from)?;
+            Ok(opt.unwrap_or((0, None)))
+        };
+        let (trades_wallets, trades_run_at) = row("last_run_trades_wallets")?;
+        let (trades_inserted, _) = row("last_run_trades_inserted")?;
+        let (events_markets, events_run_at) = row("last_run_events_markets")?;
+        Ok(LastRunStats {
+            trades_wallets,
+            trades_inserted,
+            events_markets,
+            trades_run_at,
+            events_run_at,
+        })
+    })
+}
+
 pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
     timed_db_op("web.funnel_counts", || {
         let markets_fetched: i64 =
@@ -194,10 +221,18 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
         let suitable_personas: i64 =
             conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
         // Evaluated = active, passed Stage 1, classified, and oldest trade >= 45 days ago (matches stage1_min_wallet_age_days).
+        // Use a single CTE for wallet age to avoid O(n) correlated subqueries over trades_raw.
         let personas_evaluated: i64 = conn.query_row(
             "
+            WITH wallet_age_days AS (
+              SELECT proxy_wallet,
+                     CAST((julianday('now') - julianday(datetime(MIN(timestamp), 'unixepoch'))) AS INTEGER) AS age_days
+              FROM trades_raw
+              GROUP BY proxy_wallet
+            )
             SELECT COUNT(*)
             FROM wallets w
+            LEFT JOIN wallet_age_days wad ON wad.proxy_wallet = w.proxy_wallet
             WHERE w.is_active = 1
               AND NOT EXISTS (
                 SELECT 1 FROM wallet_exclusions e
@@ -208,8 +243,7 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
                 OR EXISTS (SELECT 1 FROM wallet_exclusions e2
                            WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
               )
-              AND (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
-                   FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 45
+              AND COALESCE(wad.age_days, 0) >= 45
             ",
             [],
             |r| r.get(0),
@@ -251,12 +285,20 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
 
 /// Returns (suitable_count, evaluated_count) for the suitable personas section.
 /// Evaluated = wallets whose oldest trade is at least 45 days ago (matches stage1_min_wallet_age_days).
+/// Uses a single CTE for wallet age to avoid O(n) correlated subqueries over trades_raw.
 pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
     let suitable: i64 = conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
     let evaluated: i64 = conn.query_row(
         "
+        WITH wallet_age_days AS (
+          SELECT proxy_wallet,
+                 CAST((julianday('now') - julianday(datetime(MIN(timestamp), 'unixepoch'))) AS INTEGER) AS age_days
+          FROM trades_raw
+          GROUP BY proxy_wallet
+        )
         SELECT COUNT(*)
         FROM wallets w
+        LEFT JOIN wallet_age_days wad ON wad.proxy_wallet = w.proxy_wallet
         WHERE w.is_active = 1
           AND NOT EXISTS (
             SELECT 1 FROM wallet_exclusions e
@@ -267,8 +309,7 @@ pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
             OR EXISTS (SELECT 1 FROM wallet_exclusions e2
                        WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
           )
-          AND (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
-               FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 45
+          AND COALESCE(wad.age_days, 0) >= 45
         ",
         [],
         |r| r.get(0),
@@ -281,10 +322,16 @@ pub fn suitable_personas_wallets(
     limit: usize,
 ) -> Result<Vec<SuitablePersonaRow>> {
     timed_db_op("web.suitable_personas_wallets", || {
+        // One row per wallet: latest classification only (wallet_personas can have multiple rows per wallet on reclassify).
         let mut stmt = conn.prepare(
             "
             SELECT p.proxy_wallet, p.persona, p.classified_at
             FROM wallet_personas p
+            INNER JOIN (
+                SELECT proxy_wallet, MAX(classified_at) AS max_at
+                FROM wallet_personas
+                GROUP BY proxy_wallet
+            ) latest ON latest.proxy_wallet = p.proxy_wallet AND latest.max_at = p.classified_at
             ORDER BY p.classified_at DESC
             LIMIT ?1
             ",
@@ -570,6 +617,15 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
             events_display,
         })
     })
+}
+
+/// Format unix timestamp (seconds) for display.
+fn format_unix_timestamp(secs: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    match Utc.timestamp_opt(secs, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        _ => secs.to_string(),
+    }
 }
 
 /// Parse a SQLite datetime string and return age in seconds from now
@@ -915,6 +971,12 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             return Ok(None);
         };
 
+        let last_trades_ingestion_at: Option<String> = conn.query_row(
+            "SELECT MAX(ingested_at) FROM trades_raw WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get(0),
+        )?;
+
         let persona_row: Option<(String, f64, String)> = conn
             .query_row(
                 "
@@ -1028,14 +1090,64 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
 
         events.sort_by(|a, b| a.at.cmp(&b.at));
 
+        let total_trades_count: usize = conn.query_row(
+            "SELECT COUNT(*) FROM trades_raw WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get::<_, i64>(0).map(|n| n as usize),
+        )?;
+
+        let trades: Vec<WalletTradeRow> = {
+            let mut stmt = conn.prepare(
+                "
+                SELECT tr.id, tr.condition_id, m.title, tr.side, tr.size, tr.price, tr.timestamp, tr.outcome
+                FROM trades_raw tr
+                LEFT JOIN markets m ON m.condition_id = tr.condition_id
+                WHERE tr.proxy_wallet = ?1
+                ORDER BY tr.timestamp DESC
+                LIMIT 20
+                ",
+            )?;
+            let rows = stmt.query_map([proxy_wallet], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, f64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            })?;
+            rows.map(|row| {
+                let (id, condition_id, market_title, side, size, price, timestamp_sec, outcome) =
+                    row?;
+                let timestamp_display = format_unix_timestamp(timestamp_sec);
+                Ok(WalletTradeRow {
+                    id,
+                    condition_id,
+                    market_title,
+                    side,
+                    size_display: format!("{size:.2}"),
+                    price_display: format!("{price:.2}"),
+                    timestamp_display,
+                    outcome,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+        };
+
         let (persona, confidence_display) =
             persona_row.map_or((None, None), |(p, c, _)| (Some(p), Some(format!("{c:.2}"))));
         let exclusion_reason = exclusion_row.map(|(r, _, _, _)| r);
 
+        let wallet_short = shorten_wallet(proxy_wallet);
         Ok(Some(WalletJourney {
             proxy_wallet: proxy_wallet.to_string(),
-            wallet_short: shorten_wallet(proxy_wallet),
+            wallet_short: wallet_short.clone(),
+            wallet_display_label: wallet_short,
             discovered_at,
+            last_trades_ingestion_at,
             persona,
             confidence_display,
             exclusion_reason,
@@ -1044,7 +1156,69 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             copy_fidelity_display,
             follower_slippage_display,
             events,
+            trades,
+            total_trades_count,
         }))
+    })
+}
+
+/// Paginated trades for a wallet (for load-more on scorecard). Returns (trades, total_count).
+pub fn wallet_trades_page(
+    conn: &Connection,
+    proxy_wallet: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<WalletTradeRow>, u64)> {
+    timed_db_op("web.wallet_trades_page", || {
+        let total: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM trades_raw WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get(0),
+        )?;
+
+        let limit = i64::from(limit.min(100));
+        let offset = i64::from(offset);
+
+        let mut stmt = conn.prepare(
+            "
+            SELECT tr.id, tr.condition_id, m.title, tr.side, tr.size, tr.price, tr.timestamp, tr.outcome
+            FROM trades_raw tr
+            LEFT JOIN markets m ON m.condition_id = tr.condition_id
+            WHERE tr.proxy_wallet = ?1
+            ORDER BY tr.timestamp DESC
+            LIMIT ?2 OFFSET ?3
+            ",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![proxy_wallet, limit, offset], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        let trades: Vec<WalletTradeRow> = rows
+            .map(|row| {
+                let (id, condition_id, market_title, side, size, price, timestamp_sec, outcome) =
+                    row?;
+                let timestamp_display = format_unix_timestamp(timestamp_sec);
+                Ok(WalletTradeRow {
+                    id,
+                    condition_id,
+                    market_title,
+                    side,
+                    size_display: format!("{size:.2}"),
+                    price_display: format!("{price:.2}"),
+                    timestamp_display,
+                    outcome,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((trades, total))
     })
 }
 

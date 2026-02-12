@@ -8,18 +8,18 @@ use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use models::{
-    EventRow, ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow,
+    EventRow, ExcludedWalletRow, FunnelStage, LastRunStats, MarketRow, PaperSummary, PaperTradeRow,
     PersonaFunnelStage, RankingRow, SuitablePersonaRow, SystemStatus, TrackingHealth,
     UnifiedFunnelStage, WalletJourney, WalletRow,
 };
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,6 +42,10 @@ pub struct AppState {
     pub max_concurrent_positions: i64,
     // Rate limiter for login attempts
     pub login_rate_limiter: Arc<LoginRateLimiter>,
+    /// Gamma API base URL for Polymarket profile fetch (optional; when set, wallet display uses profile name).
+    pub gamma_api_url: Option<String>,
+    /// HTTP client for outbound requests (e.g. Polymarket profile).
+    pub http_client: Option<reqwest::Client>,
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -355,6 +359,12 @@ struct JourneyTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "wallet_scorecard.html")]
+struct ScorecardTemplate {
+    journey: WalletJourney,
+}
+
+#[derive(Template)]
 #[template(path = "partials/status_strip.html")]
 struct StatusStripTemplate {
     status: SystemStatus,
@@ -376,6 +386,12 @@ struct PersonaFunnelBarTemplate {
 #[template(path = "partials/unified_funnel_bar.html")]
 struct UnifiedFunnelBarTemplate {
     stages: Vec<UnifiedFunnelStage>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/async_funnel_bar.html")]
+struct AsyncFunnelBarTemplate {
+    stats: LastRunStats,
 }
 
 #[derive(Template)]
@@ -614,6 +630,17 @@ async fn unified_funnel_partial(State(state): State<Arc<AppState>>) -> impl Into
     }
 }
 
+async fn async_funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match with_db(state.clone(), queries::last_run_stats).await {
+        Ok(stats) => Html(AsyncFunnelBarTemplate { stats }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), queries::top_markets_today).await {
         Ok(markets) => Html(MarketsTemplate { markets }.to_string()).into_response(),
@@ -795,6 +822,34 @@ async fn excluded_page(
     }
 }
 
+/// Fetch Polymarket display name (name or pseudonym) from Gamma API. Returns None on error or if unset.
+async fn fetch_polymarket_display_name(
+    client: &reqwest::Client,
+    gamma_api_url: &str,
+    proxy_wallet: &str,
+) -> Option<String> {
+    let base = gamma_api_url.trim_end_matches('/');
+    let url = format!("{base}/public-profile");
+    let resp = client
+        .get(&url)
+        .query(&[("address", proxy_wallet)])
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let name = json.get("name").and_then(|v| v.as_str()).map(str::trim);
+    let pseudonym = json
+        .get("pseudonym")
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    name.filter(|s| !s.is_empty())
+        .or_else(|| pseudonym.filter(|s| !s.is_empty()))
+        .map(String::from)
+}
+
 async fn journey_page(
     State(state): State<Arc<AppState>>,
     Path(wallet): Path<String>,
@@ -804,11 +859,92 @@ async fn journey_page(
     })
     .await
     {
-        Ok(Some(journey)) => Html(JourneyTemplate { journey }.to_string()).into_response(),
+        Ok(Some(mut journey)) => {
+            if let (Some(client), Some(url)) =
+                (state.http_client.as_ref(), state.gamma_api_url.as_deref())
+            {
+                if let Some(name) =
+                    fetch_polymarket_display_name(client, url, &journey.proxy_wallet).await
+                {
+                    journey.wallet_display_label = name;
+                }
+            }
+            Html(JourneyTemplate { journey }.to_string()).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WalletTradesQuery {
+    #[serde(default)]
+    offset: u32,
+    #[serde(default = "default_trades_limit")]
+    limit: u32,
+}
+
+fn default_trades_limit() -> u32 {
+    20
+}
+
+#[derive(Serialize)]
+struct WalletTradesResponse {
+    trades: Vec<models::WalletTradeRow>,
+    total: u64,
+}
+
+async fn scorecard_page(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+) -> impl IntoResponse {
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_journey(conn, &wallet)
+    })
+    .await
+    {
+        Ok(Some(mut journey)) => {
+            if let (Some(client), Some(url)) =
+                (state.http_client.as_ref(), state.gamma_api_url.as_deref())
+            {
+                if let Some(name) =
+                    fetch_polymarket_display_name(client, url, &journey.proxy_wallet).await
+                {
+                    journey.wallet_display_label = name;
+                }
+            }
+            Html(ScorecardTemplate { journey }.to_string()).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn wallet_trades_json(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+    Query(q): Query<WalletTradesQuery>,
+) -> impl IntoResponse {
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_trades_page(conn, &wallet, q.offset, q.limit)
+    })
+    .await
+    {
+        Ok((trades, total)) => Json(WalletTradesResponse { trades, total }).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(WalletTradesResponse {
+                trades: vec![],
+                total: 0,
+            }),
         )
             .into_response(),
     }
@@ -904,7 +1040,10 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/excluded", get(excluded_page))
         .route("/journey/{wallet}", get(journey_page))
+        .route("/wallet/{wallet}", get(scorecard_page))
+        .route("/wallet/{wallet}/trades", get(wallet_trades_json))
         .route("/partials/status", get(status_partial))
+        .route("/partials/async_funnel", get(async_funnel_partial))
         .route("/partials/unified_funnel", get(unified_funnel_partial))
         .route("/partials/markets", get(markets_partial))
         .route("/partials/events", get(events_partial))
@@ -964,6 +1103,10 @@ async fn main() -> Result<()> {
     let funnel_stage_infos = common::funnel::funnel_stage_infos(&config);
     metrics::init()?;
 
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok();
     let state = Arc::new(AppState {
         db_path,
         auth_password,
@@ -976,6 +1119,8 @@ async fn main() -> Result<()> {
         max_total_exposure_pct: config.paper_trading.max_total_exposure_pct,
         max_daily_loss_pct: config.paper_trading.max_daily_loss_pct,
         max_concurrent_positions: i64::from(config.risk.max_concurrent_positions),
+        gamma_api_url: Some(config.polymarket.gamma_api_url.clone()),
+        http_client,
     });
 
     tokio::spawn(spawn_derived_gauges_updater(state.clone()));
@@ -1070,6 +1215,8 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            gamma_api_url: None,
+            http_client: None,
         });
         create_router_with_state(state)
     }
@@ -1098,6 +1245,8 @@ mod tests {
             max_total_exposure_pct: cfg.paper_trading.max_total_exposure_pct,
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
+            gamma_api_url: None,
+            http_client: None,
         });
         create_router_with_state(state)
     }
@@ -1126,6 +1275,8 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            gamma_api_url: None,
+            http_client: None,
         });
         create_router_with_state(state)
     }
@@ -1830,6 +1981,8 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            gamma_api_url: None,
+            http_client: None,
         });
         let app = create_router_with_state(state);
 
@@ -1932,6 +2085,8 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            gamma_api_url: None,
+            http_client: None,
         });
         let app = create_router_with_state(state);
 
@@ -2154,6 +2309,7 @@ mod tests {
     async fn test_all_partials_return_200() {
         let routes = vec![
             "/partials/status",
+            "/partials/async_funnel",
             "/partials/unified_funnel",
             "/partials/markets",
             "/partials/events",
@@ -2243,6 +2399,8 @@ mod tests {
             max_daily_loss_pct: cfg.paper_trading.max_daily_loss_pct,
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+            gamma_api_url: None,
+            http_client: None,
         });
         let app = create_router_with_state(state);
 

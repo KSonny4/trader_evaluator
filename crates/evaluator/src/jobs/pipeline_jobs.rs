@@ -740,6 +740,19 @@ pub async fn run_event_scoring_once<P: GammaMarketsPager + Sync>(
         .await?;
 
     metrics::counter!("evaluator_markets_scored_total").increment(inserted);
+
+    // Persist last-run stats for dashboard "async funnel".
+    let markets_count = inserted as i64;
+    let _ = db
+        .call_named("market_scoring.persist_last_run", move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO discovery_scheduler_state (key, value_int, updated_at) VALUES ('last_run_events_markets', ?1, datetime('now'))",
+                [markets_count],
+            )?;
+            Ok(())
+        })
+        .await;
+
     Ok(inserted)
 }
 
@@ -972,6 +985,11 @@ pub async fn run_leaderboard_discovery_once<L: super::fetcher_traits::Leaderboar
 
 /// Run Stage 2 persona classification for all watchlist wallets that pass Stage 1.
 /// Returns the number of wallets that received a classification (followable or excluded).
+///
+/// This job runs on a schedule (e.g. hourly); it does not wait for trades ingestion. It reads
+/// age/trades from `trades_raw`. To get wallets evaluated, ensure trades ingestion runs and
+/// prioritizes wallets with 0 trades (backfill-first) so `trades_raw` fills; then the next
+/// persona run will classify them.
 pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     let now_epoch = chrono::Utc::now().timestamp();
     let window_days = 30_u32;
@@ -1049,6 +1067,9 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                     count += 1;
                     continue;
                 }
+
+                // Wallet passed Stage 1; clear any old Stage 1 exclusion so re-runs don't leave stale "young" etc.
+                let _ = crate::persona_classification::clear_stage1_exclusion(conn, &proxy_wallet);
 
                 let Ok(features) = compute_wallet_features(
                     conn,

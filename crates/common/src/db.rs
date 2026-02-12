@@ -532,6 +532,7 @@ CREATE TABLE IF NOT EXISTS wallet_rules_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet_timestamp ON trades_raw(proxy_wallet, timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_timestamp ON trades_raw(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_ingested_at ON trades_raw(ingested_at);

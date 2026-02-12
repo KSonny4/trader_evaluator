@@ -7,6 +7,11 @@
         <p class="text-gray-600 text-sm">Loading status...</p>
     </div>
 
+    <!-- Async funnel: last run stats (wallets / markets / trades_raw processed) -->
+    <div hx-get="/partials/async_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <p class="text-gray-600 text-sm">Loading last run...</p>
+    </div>
+
     <!-- Unified Funnel Bar: Markets → All wallets → Suitable personas → Actively paper traded → Worth following -->
     <div hx-get="/partials/unified_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
         <p class="text-gray-600 text-sm">Loading funnel...</p>

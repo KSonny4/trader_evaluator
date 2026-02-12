@@ -307,6 +307,16 @@ pub fn stage1_filter(
     None
 }
 
+/// Remove any Stage 1 exclusion for this wallet (e.g. STAGE1_TOO_YOUNG). Call when the wallet
+/// passes Stage 1 on a re-run so we don't leave a stale "young" label.
+pub fn clear_stage1_exclusion(conn: &Connection, proxy_wallet: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM wallet_exclusions WHERE proxy_wallet = ?1 AND reason LIKE 'STAGE1_%'",
+        [proxy_wallet],
+    )?;
+    Ok(())
+}
+
 /// Record an exclusion in the wallet_exclusions table.
 #[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn record_exclusion(
