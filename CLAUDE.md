@@ -6,10 +6,10 @@ Polymarket wallet discovery and paper copy-trading evaluation system. Discovers 
 
 ## The pipeline
 
-> **Grafana dashboard:** Build a funnel view showing: markets scored → markets selected → wallets discovered → wallets tracked → wallets paper-copied → wallets ranked. Show counts at each stage and drop-off rates.
+> **Grafana dashboard:** Build a funnel view showing: events scored → events selected → wallets discovered → wallets tracked → wallets paper-copied → wallets ranked. Show counts at each stage and drop-off rates.
 
 ```
-Markets (Gamma API) → MScore ranking → Top-20 markets
+Markets (Gamma API) → MScore + EScore ranking → Top-50 events
     ↓
 Wallet Discovery (Data API: holders + traders) → Watchlist
     ↓
@@ -55,7 +55,8 @@ WScore Ranking → "Who to Follow" with evidence
 
 ## Domain concepts
 
-- **MScore**: Market Score [0, 1] — ranks markets by follow-worthiness using liquidity, volume, trade density, whale concentration, time-to-expiry
+- **MScore**: Market Score [0, 1] — ranks individual markets by follow-worthiness using liquidity, volume, trade density, whale concentration, time-to-expiry
+- **EScore**: Event Score [0, 1] — max(MScore) over all markets in an event; used to rank events (top-50 for discovery)
 - **WScore**: Wallet Score [0, 1] — ranks wallets by copy-worthiness using edge, consistency, market skill, timing skill, behavior quality
 - **Paper copy**: Simulated portfolio that mirrors a wallet's trades with risk caps and slippage
 - **Discovery source**: How we found a wallet — HOLDER (top holders list), TRADER_RECENT (active in market), LEADERBOARD (global ranking)
@@ -69,7 +70,7 @@ The system progresses through 7 phases. **Never skip a phase.**
 | Phase | Name | Key gate |
 |-------|------|----------|
 | 0 | Foundation | Build compiles, APIs reachable, tests pass |
-| 1 | Market Discovery | Markets scored daily for 3+ days. Handle rotating markets (e.g. BTC 15m markets change slug every 15 min). |
+| 1 | Event Discovery | Events scored for 3+ days. Handle rotating markets (e.g. BTC 15m markets change slug every 15 min). |
 | 2 | Wallet Discovery & Classification | All participants stored. Every wallet classified into persona. Only followable personas advance. |
 | 3 | Long-Term Tracking | 7 days continuous ingestion, no data gaps |
 | 4 | Paper Trading | Paper-trade only the best classified wallets (~5-10). Full risk management from `docs/on_risk2.txt`. |

@@ -36,7 +36,7 @@ trader_evaluator/
       src/
         main.rs                     # Entry point, Tokio runtime
         scheduler.rs                # Periodic job scheduling
-        market_scoring.rs           # MScore computation
+        market_scoring.rs           # MScore + EScore computation (event scoring)
         wallet_discovery.rs         # Wallet extraction + watchlist
         ingestion.rs                # Trade/activity/position/holder polling
         paper_trading.rs            # Mirror strategy + risk engine
@@ -48,7 +48,7 @@ trader_evaluator/
           fetcher_traits.rs         # API fetcher trait definitions
           fetcher_impls.rs          # PolymarketClient trait implementations
           ingestion_jobs.rs         # Trade/activity/position/holder ingestion
-          pipeline_jobs.rs          # Market scoring, wallet discovery/scoring, paper tick
+          pipeline_jobs.rs          # Event scoring, wallet discovery/scoring, paper tick
           maintenance.rs            # WAL checkpoint
     web/                            # Dashboard web server (htmx + cookie-based auth). With cloudflared/other proxy: forward Cookie and Host.
       src/
@@ -85,7 +85,7 @@ trader_evaluator/
 | `activity_raw` | Append-only activity timeline | proxy_wallet, activity_type, timestamp |
 | `positions_snapshots` | Periodic position state | proxy_wallet, condition_id, size, cash_pnl |
 | `holders_snapshots` | Periodic holder rankings | condition_id, proxy_wallet, amount |
-| `market_scores_daily` | MScore + factor breakdown | condition_id, mscore, rank |
+| `market_scores` | MScore + factor breakdown | condition_id, mscore, rank |
 | `wallet_features_daily` | Derived features per window (including A–G style signals) | proxy_wallet, window_days, trade_count, total_pnl, trades_per_day, mid_fill_ratio, burstiness_top_1h_ratio |
 | `paper_trades` | Simulated copy trades | proxy_wallet, strategy, entry_price, pnl, status |
 | `paper_positions` | Current paper portfolio state | proxy_wallet, strategy, total_size_usdc |

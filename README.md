@@ -5,7 +5,7 @@ Polymarket wallet discovery and paper copy-trading evaluation system. Discovers 
 ## The Pipeline
 
 ```
-Markets (Gamma API) --> MScore ranking --> Top-20 markets
+Markets (Gamma API) --> MScore + EScore ranking --> Top-50 events
     |
 Wallet Discovery (Data API) --> Watchlist
     |

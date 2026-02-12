@@ -1,5 +1,5 @@
 {% if wallets.is_empty() %}
-<p class="text-gray-500 text-sm italic">No wallets discovered yet.</p>
+<p class="text-gray-500 text-sm italic">No wallets actively paper traded yet.</p>
 {% else %}
 <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -9,7 +9,6 @@
                 <th class="text-left py-2 px-2">Source</th>
                 <th class="text-left py-2 px-2">Market</th>
                 <th class="text-right py-2 px-2">Trades</th>
-                <th class="text-center py-2 px-2">Active</th>
                 <th class="text-right py-2 px-2">Discovered</th>
             </tr>
         </thead>
@@ -35,7 +34,6 @@
                 </td>
                 <td class="py-1.5 px-2 max-w-xs truncate text-gray-400">{% match w.discovered_market_title %}{% when Some with (t) %}{{ t }}{% when None %}-{% endmatch %}</td>
                 <td class="py-1.5 px-2 text-right text-gray-400">{{ w.trade_count }}</td>
-                <td class="py-1.5 px-2 text-center">{% if w.is_active %}<span class="text-green-400">&#9679;</span>{% else %}<span class="text-gray-600">&#9679;</span>{% endif %}</td>
                 <td class="py-1.5 px-2 text-right text-gray-500">{{ w.discovered_at }}</td>
             </tr>
             {% endfor %}

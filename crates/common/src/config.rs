@@ -53,7 +53,8 @@ pub struct Risk {
 
 #[derive(Debug, Deserialize)]
 pub struct MarketScoring {
-    pub top_n_markets: usize,
+    #[serde(alias = "top_n_markets")]
+    pub top_n_events: usize,
     pub min_liquidity_usdc: f64,
     pub min_daily_volume_usdc: f64,
     pub min_daily_trades: u32,
@@ -72,6 +73,9 @@ pub struct MarketScoring {
 pub struct WalletDiscovery {
     pub min_total_trades: u32,
     pub holders_per_market: usize,
+    /// Max markets to process per discovery run (batched to avoid long bootstrap).
+    #[serde(default = "default_markets_per_discovery_run")]
+    pub markets_per_discovery_run: usize,
     pub refresh_interval_secs: u64,
     /// Number of pages of 200 trades to fetch per market (offset 0, 200, 400, ...). Cap at 15 (API offset ~3000).
     #[serde(default = "default_trades_pages_per_market")]
@@ -85,6 +89,10 @@ pub struct WalletDiscovery {
 
 fn default_trades_pages_per_market() -> u32 {
     15
+}
+
+fn default_markets_per_discovery_run() -> usize {
+    20
 }
 
 fn default_wallet_discovery_mode() -> String {
@@ -121,8 +129,14 @@ fn default_leaderboard_pages_per_category() -> u32 {
     20
 }
 
+fn default_wallets_per_ingestion_run() -> u32 {
+    20
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Ingestion {
+    #[serde(default = "default_wallets_per_ingestion_run")]
+    pub wallets_per_ingestion_run: u32,
     pub trades_poll_interval_secs: u64,
     pub activity_poll_interval_secs: u64,
     pub positions_poll_interval_secs: u64,
@@ -220,7 +234,8 @@ pub struct Personas {
     pub bot_swarm_max_avg_trade_size_usdc: f64,
     pub jackpot_min_pnl_top1_share: f64,
     pub jackpot_max_win_rate: f64,
-    pub topic_lane_min_top_category_ratio: f64,
+    #[serde(alias = "topic_lane_min_top_category_ratio")]
+    pub topic_lane_min_top_domain_ratio: f64,
     pub bonder_min_extreme_price_ratio: f64,
     pub whale_min_avg_trade_size_usdc: f64,
     /// Stage 2 ROI gate: minimum ROI (win rate + PnL combo) for followable personas. 0 = disabled.
@@ -322,7 +337,7 @@ mod tests {
         assert!(config.personas.liquidity_provider_min_mid_fill_ratio > 0.0);
         assert!(config.personas.bot_swarm_min_trades_per_day > 0.0);
         assert!(config.personas.jackpot_min_pnl_top1_share > 0.0);
-        assert!(config.personas.topic_lane_min_top_category_ratio > 0.0);
+        assert!(config.personas.topic_lane_min_top_domain_ratio > 0.0);
         assert!(config.personas.bonder_min_extreme_price_ratio > 0.0);
         assert!(config.personas.whale_min_avg_trade_size_usdc > 0.0);
     }
@@ -396,14 +411,14 @@ portfolio_weekly_loss_pct = 8.0
 max_concurrent_positions = 20
 
 [market_scoring]
-top_n_markets = 20
+top_n_events = 50
 min_liquidity_usdc = 1000.0
 min_daily_volume_usdc = 5000.0
 min_daily_trades = 20
 min_unique_traders = 10
 max_days_to_expiry = 90
 min_days_to_expiry = 1
-refresh_interval_secs = 86400
+refresh_interval_secs = 3600
 weights_liquidity = 0.25
 weights_volume = 0.25
 weights_density = 0.20
@@ -414,6 +429,7 @@ weights_time_to_expiry = 0.15
 min_total_trades = 5
 max_wallets_per_market = 100
 holders_per_market = 20
+markets_per_discovery_run = 20
 refresh_interval_secs = 86400
 
 [ingestion]
@@ -483,7 +499,7 @@ bot_swarm_min_trades_per_day = 200.0
 bot_swarm_max_avg_trade_size_usdc = 5.0
 jackpot_min_pnl_top1_share = 0.60
 jackpot_max_win_rate = 0.45
-topic_lane_min_top_category_ratio = 0.65
+topic_lane_min_top_domain_ratio = 0.65
 bonder_min_extreme_price_ratio = 0.60
 whale_min_avg_trade_size_usdc = 100.0
 

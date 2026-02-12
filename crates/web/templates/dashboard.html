@@ -7,63 +7,55 @@
         <p class="text-gray-600 text-sm">Loading status...</p>
     </div>
 
-    <!-- Funnel Bar: polls every 30s -->
-    <div hx-get="/partials/funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    <!-- Unified Funnel Bar: Markets → All wallets → Suitable personas → Actively paper traded → Worth following -->
+    <div hx-get="/partials/unified_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
         <p class="text-gray-600 text-sm">Loading funnel...</p>
     </div>
 
-    <!-- Persona Funnel Bar (Strategy Bible §2): polls every 30s -->
-    <div hx-get="/partials/persona_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
-        <p class="text-gray-600 text-sm">Loading persona funnel...</p>
-    </div>
-
-    <!-- Stage 1: Markets -->
+    <!-- Stage: Events -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 1: Market Discovery
+            Events
         </summary>
-        <div hx-get="/partials/markets" hx-trigger="load, every 60s" hx-swap="innerHTML">
-            <p class="text-gray-600 text-sm">Loading markets...</p>
+        <div hx-get="/partials/events" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading events...</p>
         </div>
     </details>
 
-    <!-- Stage 2: Wallets -->
+    <!-- Stage: All wallets -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 2: Wallet Discovery
+            All wallets
         </summary>
         <div hx-get="/partials/wallets" hx-trigger="load, every 60s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading wallets...</p>
         </div>
     </details>
 
-    <!-- Stage 3: Wallet Health Monitor -->
+    <!-- Stage: Suitable personas wallets -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            <div class="flex flex-col">
-                <span>Stage 3: Wallet Health Monitor</span>
-                <span class="text-xs font-normal text-gray-500">Monitoring ingestion freshness, tracking coverage, and stale wallets for paper/live reliability.</span>
-            </div>
+            Suitable personas wallets
         </summary>
-        <div hx-get="/partials/tracking" hx-trigger="load, every 30s" hx-swap="innerHTML">
-            <p class="text-gray-600 text-sm">Loading tracking...</p>
+        <div hx-get="/partials/suitable_personas" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading suitable personas...</p>
         </div>
     </details>
 
-    <!-- Stage 4: Paper Trading -->
+    <!-- Stage: Actively paper traded -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 4: Paper Trading
+            Actively paper traded
         </summary>
-        <div hx-get="/partials/paper" hx-trigger="load, every 30s" hx-swap="innerHTML">
-            <p class="text-gray-600 text-sm">Loading paper trades...</p>
+        <div hx-get="/partials/paper_traded_wallets" hx-trigger="load, every 30s" hx-swap="innerHTML">
+            <p class="text-gray-600 text-sm">Loading paper traded wallets...</p>
         </div>
     </details>
 
-    <!-- Stage 5: Wallet Ranking -->
+    <!-- Stage: Worth following -->
     <details open>
         <summary class="cursor-pointer text-lg font-semibold text-gray-200 mb-2">
-            Stage 5: Wallet Ranking
+            Worth following
         </summary>
         <div hx-get="/partials/rankings" hx-trigger="load, every 60s" hx-swap="innerHTML">
             <p class="text-gray-600 text-sm">Loading rankings...</p>

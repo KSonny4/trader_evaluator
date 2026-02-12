@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean check-file-length
-.PHONY: todo todo-check todo-test
+.PHONY: todo todo-check todo-test reset-and-run
 
 # === Local enforcement ===
 setup-hooks:
@@ -127,13 +127,13 @@ check-phase-0: check-tables
 	@echo "Phase 0: PASSED"
 
 check-phase-1: check-phase-0
-	@echo "=== Phase 1: Market Discovery ==="
+	@echo "=== Phase 1: Event Discovery ==="
 	@$(DB_CMD) "SELECT COUNT(*) FROM markets" | \
 		awk '{if ($$1 == 0) {print "FAIL: no markets"; exit 1} else print "OK: " $$1 " markets"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now')" | \
+	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores WHERE score_date = date('now')" | \
 		awk '{if ($$1 == 0) {print "FAIL: no market scores today"; exit 1} else print "OK: " $$1 " market scores today"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now') AND rank <= 20" | \
-		awk '{print "OK: " $$1 " top-20 markets selected"}'
+	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores WHERE score_date = date('now') AND rank <= 50" | \
+		awk '{print "OK: " $$1 " top-50 events selected"}'
 	@echo "Phase 1: PASSED"
 
 check-phase-2: check-phase-1
@@ -191,11 +191,24 @@ check-tables:
 	@$(DB_CMD) ".tables" | grep -q raw_api_responses || (echo "FAIL: raw_api_responses table missing" && exit 1)
 	@echo "OK: core tables exist"
 
+# === Local reset and run ===
+# Keep DB, delete everything except markets and wallets, then start evaluator and web.
+LOCAL_DB ?= data/evaluator.db
+
+reset-and-run:
+	@mkdir -p data
+	@./scripts/reset_db_keep_markets_wallets.sh $(LOCAL_DB)
+	@echo "Starting evaluator in background..."
+	@cargo run -p evaluator &
+	@sleep 3
+	@echo "Starting web (Ctrl+C to stop)..."
+	@cargo run -p web
+
 # === Status (human-friendly pipeline overview) ===
 status:
 	@echo "=== Pipeline Status ==="
 	@$(DB_CMD) "SELECT 'markets:            ' || COUNT(*) FROM markets"
-	@$(DB_CMD) "SELECT 'market scores today: ' || COUNT(*) FROM market_scores_daily WHERE score_date = date('now')"
+	@$(DB_CMD) "SELECT 'market scores today: ' || COUNT(*) FROM market_scores WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'wallets:            ' || COUNT(*) FROM wallets"
 	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_personas') THEN 'wallet personas:    ' || (SELECT COUNT(*) FROM wallet_personas) ELSE 'wallet personas:    table not created' END"
 	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_exclusions') THEN 'wallet exclusions:  ' || (SELECT COUNT(*) FROM wallet_exclusions) ELSE 'wallet exclusions:  table not created' END"

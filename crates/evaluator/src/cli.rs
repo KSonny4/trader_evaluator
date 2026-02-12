@@ -65,7 +65,7 @@ pub fn query_markets_today(db: &Database) -> Result<Vec<MarketRow>> {
     let mut stmt = db.conn.prepare(
         "
         SELECT condition_id, score_date, mscore, rank
-        FROM market_scores_daily
+        FROM market_scores
         WHERE score_date = date('now')
         ORDER BY rank ASC
         LIMIT 20
@@ -252,7 +252,7 @@ mod tests {
         db.run_migrations().unwrap();
 
         db.conn.execute(
-            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES ('0x1', date('now'), 0.9, 1)",
+            "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('0x1', date('now'), 0.9, 1)",
             [],
         ).unwrap();
 

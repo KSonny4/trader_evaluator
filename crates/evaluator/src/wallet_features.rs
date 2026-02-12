@@ -25,8 +25,9 @@ pub struct WalletFeatures {
     pub mid_fill_ratio: f64,
     pub extreme_price_ratio: f64,
     pub burstiness_top_1h_ratio: f64,
-    pub top_category: Option<String>,
-    pub top_category_ratio: f64,
+    /// Dominant domain (wallet's lane) — e.g. Sports, Politics, Crypto.
+    pub top_domain: Option<String>,
+    pub top_domain_ratio: f64,
 }
 
 /// Prefer paper PnL (our copy) when settled paper trades exist; otherwise fallback to positions_snapshots.
@@ -270,32 +271,33 @@ pub fn compute_wallet_features(
         best as f64 / ts_rows.len() as f64
     };
 
-    let top_category_row: Option<(String, f64)> = conn
+    // Domain = Polymarket category (Sports, Politics, Crypto). See STRATEGY_BIBLE §Domain hierarchy.
+    let top_domain_row: Option<(String, f64)> = conn
         .query_row(
             "
-            WITH category_volumes AS (
-                SELECT COALESCE(m.category, 'unknown') AS category, SUM(tr.size) AS volume
+            WITH domain_volumes AS (
+                SELECT COALESCE(m.category, 'unknown') AS domain, SUM(tr.size) AS volume
                 FROM trades_raw tr
                 LEFT JOIN markets m ON m.condition_id = tr.condition_id
                 WHERE tr.proxy_wallet = ?1 AND tr.timestamp >= ?2
                 GROUP BY COALESCE(m.category, 'unknown')
             ),
             total AS (
-                SELECT COALESCE(SUM(volume), 0.0) AS total_volume FROM category_volumes
+                SELECT COALESCE(SUM(volume), 0.0) AS total_volume FROM domain_volumes
             )
             SELECT
-                cv.category,
-                CASE WHEN t.total_volume > 0 THEN cv.volume / t.total_volume ELSE 0.0 END AS ratio
-            FROM category_volumes cv, total t
-            ORDER BY cv.volume DESC
+                dv.domain,
+                CASE WHEN t.total_volume > 0 THEN dv.volume / t.total_volume ELSE 0.0 END AS ratio
+            FROM domain_volumes dv, total t
+            ORDER BY dv.volume DESC
             LIMIT 1
             ",
             rusqlite::params![proxy_wallet, cutoff],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let (top_category, top_category_ratio) = match top_category_row {
-        Some((category, ratio)) => (Some(category), ratio),
+    let (top_domain, top_domain_ratio) = match top_domain_row {
+        Some((domain, ratio)) => (Some(domain), ratio),
         None => (None, 0.0),
     };
 
@@ -321,8 +323,8 @@ pub fn compute_wallet_features(
         mid_fill_ratio,
         extreme_price_ratio,
         burstiness_top_1h_ratio,
-        top_category,
-        top_category_ratio,
+        top_domain,
+        top_domain_ratio,
     })
 }
 
@@ -338,7 +340,7 @@ pub fn save_wallet_features(
           total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct,
           trades_per_week, trades_per_day, sharpe_ratio, active_positions, concentration_ratio,
           avg_trade_size_usdc, size_cv, buy_sell_balance, mid_fill_ratio, extreme_price_ratio,
-          burstiness_top_1h_ratio, top_category, top_category_ratio)
+          burstiness_top_1h_ratio, top_domain, top_domain_ratio)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         rusqlite::params![
             features.proxy_wallet,
@@ -363,8 +365,8 @@ pub fn save_wallet_features(
             features.mid_fill_ratio,
             features.extreme_price_ratio,
             features.burstiness_top_1h_ratio,
-            features.top_category,
-            features.top_category_ratio,
+            features.top_domain,
+            features.top_domain_ratio,
         ],
     )?;
     Ok(())
@@ -456,8 +458,8 @@ mod tests {
             mid_fill_ratio: 0.3,
             extreme_price_ratio: 0.4,
             burstiness_top_1h_ratio: 0.5,
-            top_category: Some("sports".to_string()),
-            top_category_ratio: 0.8,
+            top_domain: Some("sports".to_string()),
+            top_domain_ratio: 0.8,
         };
 
         save_wallet_features(&db.conn, &features, "2026-02-08").unwrap();
@@ -476,7 +478,7 @@ mod tests {
         let (tpw, sr, tpd, top_cat): (f64, f64, f64, Option<String>) = db
             .conn
             .query_row(
-                "SELECT trades_per_week, sharpe_ratio, trades_per_day, top_category FROM wallet_features_daily WHERE proxy_wallet = '0xabc'",
+                "SELECT trades_per_week, sharpe_ratio, trades_per_day, top_domain FROM wallet_features_daily WHERE proxy_wallet = '0xabc'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -515,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_top_category_ratio_computed() {
+    fn test_top_domain_ratio_computed() {
         let now = 1_700_000_000i64;
         let db = setup_db_with_trades(&[
             ("0xabc", "m_sports", "BUY", 50.0, 0.55, now - 40),
@@ -527,8 +529,8 @@ mod tests {
         upsert_market_category(&db, "m_politics", "politics");
 
         let f = compute_wallet_features(&db.conn, "0xabc", 30, now).unwrap();
-        assert_eq!(f.top_category.as_deref(), Some("sports"));
-        assert!(f.top_category_ratio > 0.8);
+        assert_eq!(f.top_domain.as_deref(), Some("sports"));
+        assert!(f.top_domain_ratio > 0.8);
     }
 
     #[test]

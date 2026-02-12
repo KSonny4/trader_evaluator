@@ -13,7 +13,7 @@
 | Stage   | Count source (queries.rs) | Criteria / what’s happening (from code) |
 |---------|---------------------------|----------------------------------------|
 | Markets | `COUNT(*) FROM markets` | Fetched from Gamma API; filter: closed=false, min liquidity, min 24h volume, end_date ≥ tomorrow. All passing markets are upserted (pipeline_jobs.rs fetch loop + markets upsert). |
-| Scored  | `market_scores_daily WHERE score_date = date('now')` | MScore applied to candidates that pass min_liquidity_usdc, min_daily_volume_usdc, days_to_expiry in [min_days_to_expiry, max_days_to_expiry]. Top N by MScore (config top_n_markets, default 20) written to market_scores_daily (pipeline_jobs run_market_scoring_once, market_scoring rank_markets). |
+| Scored  | `market_scores WHERE score_date = max` | MScore per market, EScore = max(MScore) per event. Top N events (config top_n_events, default 50) written to market_scores (pipeline_jobs run_market_scoring_once, market_scoring rank_events). |
 | Wallets | `COUNT(*) FROM wallets` | From today’s scored markets: Data API holders (up to holders_per_market) + market trades (200). Included if in top holders or have ≥ min_total_trades in that market; capped at max_wallets_per_market per market (wallet_discovery discover_wallets_for_market, pipeline_jobs run_wallet_discovery_once). |
 | Tracked | `COUNT(*) FROM wallets WHERE is_active = 1` | Wallets on the watchlist; ingestion (trades, activity, positions, holders) runs only for is_active=1. New discoveries inserted with is_active=1 (pipeline_jobs, ingestion_jobs). |
 | Paper   | `COUNT(*) FROM paper_trades` | Each row = one mirrored paper trade. Paper tick mirrors trades_raw for tracked wallets; each real trade may create one paper trade if risk rules pass: position size, portfolio stop, per-market/per-wallet exposure, daily cap (paper_trading mirror_trade_to_paper, pipeline_jobs run_paper_tick_once). |
@@ -36,7 +36,7 @@
 **Example info strings (concise, code-derived):**
 
 - Markets: "Markets fetched from Gamma API (open, min liquidity/volume, end date ≥ tomorrow)."
-- Scored: "Markets scored today with MScore; only top N by score (config: top_n_markets) are stored."
+- Scored: "Events scored today with EScore (max MScore per event); only top N events (config: top_n_events) are stored."
 - Wallets: "Wallets discovered from today’s scored markets: top holders + traders with enough trades in that market; capped per market."
 - Tracked: "Wallets with is_active=1; trades, activity, positions and holders are ingested only for these."
 - Paper: "Total paper trades. Each mirrored from a real trade for a tracked wallet when risk rules allow."
@@ -84,5 +84,5 @@
 
 ## Out of scope
 
-- Config-driven tooltip text (e.g. injecting top_n_markets value): keep tooltips static to avoid config/code drift; “config” is enough.
+- Config-driven tooltip text (e.g. injecting top_n_events value): keep tooltips static to avoid config/code drift; “config” is enough.
 - Fancy tooltip UI (e.g. custom popover): native `title` is sufficient for this feature.

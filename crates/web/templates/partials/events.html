@@ -1,0 +1,43 @@
+{% if events.is_empty() %}
+<p class="text-gray-500 text-sm italic">No events scored.</p>
+{% else %}
+{% if events_evaluated > events_selected %}
+<p class="text-gray-400 text-sm mb-2">{{ events_selected }} selected / {{ events_evaluated }} evaluated</p>
+{% endif %}
+<div class="overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-gray-500 border-b border-gray-800">
+                <th class="text-left py-2 px-2">#</th>
+                <th class="text-left py-2 px-2">Event</th>
+                <th class="text-right py-2 px-2">EScore</th>
+                <th class="text-right py-2 px-2">Markets</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for e in events %}
+            <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
+                <td class="py-1.5 px-2 text-gray-500">{{ e.rank }}</td>
+                <td class="py-1.5 px-2 max-w-xs truncate" title="{{ e.title }}">
+                {% match e.polymarket_url %}
+                {% when Some with (url) %}
+                <a href="{{ url }}" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 hover:underline">{{ e.title }}</a>
+                {% when None %}
+                {{ e.title }}
+                {% endmatch %}
+                </td>
+                <td class="py-1.5 px-2 text-right">
+                    <div class="flex items-center justify-end gap-2">
+                        <div class="w-16 bg-gray-800 rounded-full h-1.5">
+                            <div class="bg-blue-500 h-1.5 rounded-full" style="width: {{ e.best_mscore * 100.0 }}%"></div>
+                        </div>
+                        <span class="text-gray-300 w-10 text-right">{{ "{:.2}"|format(e.best_mscore) }}</span>
+                    </div>
+                </td>
+                <td class="py-1.5 px-2 text-right text-gray-400">{{ e.market_count }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

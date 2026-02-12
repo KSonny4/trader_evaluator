@@ -40,7 +40,7 @@ pub struct PersonaConfig {
     pub bot_swarm_max_avg_trade_size_usdc: f64,
     pub jackpot_min_pnl_top1_share: f64,
     pub jackpot_max_win_rate: f64,
-    pub topic_lane_min_top_category_ratio: f64,
+    pub topic_lane_min_top_domain_ratio: f64,
     pub bonder_min_extreme_price_ratio: f64,
     pub whale_min_avg_trade_size_usdc: f64,
     pub stage2_min_roi: f64,
@@ -75,7 +75,7 @@ impl PersonaConfig {
             bot_swarm_max_avg_trade_size_usdc: 5.0,
             jackpot_min_pnl_top1_share: 0.60,
             jackpot_max_win_rate: 0.45,
-            topic_lane_min_top_category_ratio: 0.65,
+            topic_lane_min_top_domain_ratio: 0.65,
             bonder_min_extreme_price_ratio: 0.60,
             whale_min_avg_trade_size_usdc: 100.0,
             stage2_min_roi: 0.0,
@@ -110,7 +110,7 @@ impl PersonaConfig {
             bot_swarm_max_avg_trade_size_usdc: p.bot_swarm_max_avg_trade_size_usdc,
             jackpot_min_pnl_top1_share: p.jackpot_min_pnl_top1_share,
             jackpot_max_win_rate: p.jackpot_max_win_rate,
-            topic_lane_min_top_category_ratio: p.topic_lane_min_top_category_ratio,
+            topic_lane_min_top_domain_ratio: p.topic_lane_min_top_domain_ratio,
             bonder_min_extreme_price_ratio: p.bonder_min_extreme_price_ratio,
             whale_min_avg_trade_size_usdc: p.whale_min_avg_trade_size_usdc,
             stage2_min_roi: p.stage2_min_roi,
@@ -368,9 +368,9 @@ fn record_persona_traits(
     features: &WalletFeatures,
     config: &PersonaConfig,
 ) -> Result<()> {
-    if features.top_category_ratio >= config.topic_lane_min_top_category_ratio {
-        if let Some(category) = features.top_category.as_deref() {
-            upsert_trait(conn, &features.proxy_wallet, "TOPIC_LANE", category)?;
+    if features.top_domain_ratio >= config.topic_lane_min_top_domain_ratio {
+        if let Some(domain) = features.top_domain.as_deref() {
+            upsert_trait(conn, &features.proxy_wallet, "TOPIC_LANE", domain)?;
         }
     } else {
         delete_trait(conn, &features.proxy_wallet, "TOPIC_LANE")?;
@@ -1195,8 +1195,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         }
     }
 
@@ -1302,8 +1302,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         }
     }
 
@@ -1400,8 +1400,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         }
     }
 
@@ -1649,8 +1649,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1699,8 +1699,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1752,8 +1752,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         };
 
         let mut config = PersonaConfig::default_for_test();
@@ -1805,8 +1805,8 @@ mod tests {
             mid_fill_ratio: 0.0,
             extreme_price_ratio: 0.0,
             burstiness_top_1h_ratio: 0.0,
-            top_category: None,
-            top_category_ratio: 0.0,
+            top_domain: None,
+            top_domain_ratio: 0.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1842,8 +1842,8 @@ mod tests {
             mid_fill_ratio: 0.3,
             extreme_price_ratio: 0.8,
             burstiness_top_1h_ratio: 0.1,
-            top_category: Some("sports".to_string()),
-            top_category_ratio: 0.9,
+            top_domain: Some("sports".to_string()),
+            top_domain_ratio: 0.9,
         };
 
         let config = PersonaConfig::default_for_test();

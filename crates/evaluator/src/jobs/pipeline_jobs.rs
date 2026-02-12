@@ -5,7 +5,7 @@ use common::polymarket::GammaFilter;
 #[cfg(test)]
 use common::types::{ApiHolderResponse, ApiLeaderboardEntry, ApiTrade, GammaMarket};
 
-use crate::market_scoring::{rank_markets, MarketCandidate};
+use crate::market_scoring::{rank_events, rank_markets, MarketCandidate};
 use crate::paper_trading::{is_crypto_15m_market, mirror_trade_to_paper, Side};
 use crate::persona_classification::{
     classify_wallet, stage1_filter, stage1_known_bot_check, PersonaConfig, Stage1Config,
@@ -494,7 +494,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     Ok(inserted)
 }
 
-pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
+pub async fn run_event_scoring_once<P: GammaMarketsPager + Sync>(
     db: &AsyncDb,
     pager: &P,
     cfg: &Config,
@@ -581,6 +581,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                 continue;
             }
 
+            let event_slug = m.effective_event_slug();
             page_db_rows.push(MarketDbRow {
                 condition_id: condition_id.clone(),
                 title: title.clone(),
@@ -590,12 +591,13 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                 liquidity,
                 volume: volume_24h,
                 category: m.category.clone(),
-                event_slug: m.event_slug.clone(),
+                event_slug: event_slug.clone(),
             });
 
             page_candidates.push(MarketCandidate {
                 condition_id,
                 title,
+                event_slug,
                 liquidity,
                 volume_24h,
                 trades_24h,
@@ -689,15 +691,16 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
         }
     }
 
-    let ranked = rank_markets(all, cfg.market_scoring.top_n_markets);
+    let scored = rank_markets(all);
+    let (total_events_evaluated, ranked) = rank_events(scored, cfg.market_scoring.top_n_events);
 
     let today = chrono::Utc::now().date_naive().to_string();
     let ranked_data: Vec<(String, f64, i64)> = ranked
         .iter()
-        .enumerate()
-        .map(|(i, sm)| (sm.market.condition_id.clone(), sm.mscore, (i + 1) as i64))
+        .map(|(event_rank, sm)| (sm.market.condition_id.clone(), sm.mscore, *event_rank))
         .collect();
 
+    let top_events_selected = cfg.market_scoring.top_n_events;
     let inserted: u64 = db
         .call_named("market_scoring.upsert_ranked_scores", move |conn| {
             let tx = conn.transaction()?;
@@ -705,7 +708,7 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
             for (condition_id, mscore, rank) in ranked_data {
                 let changed = tx.execute(
                     "
-                    INSERT INTO market_scores_daily
+                    INSERT INTO market_scores
                         (condition_id, score_date, mscore, rank)
                     VALUES
                         (?1, ?2, ?3, ?4)
@@ -717,6 +720,20 @@ pub async fn run_market_scoring_once<P: GammaMarketsPager + Sync>(
                 )?;
                 ins += changed as u64;
             }
+            tx.execute(
+                "
+                INSERT INTO scoring_stats (score_date, total_events_evaluated, top_events_selected)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(score_date) DO UPDATE SET
+                    total_events_evaluated = excluded.total_events_evaluated,
+                    top_events_selected = excluded.top_events_selected
+                ",
+                rusqlite::params![
+                    today,
+                    total_events_evaluated as i64,
+                    top_events_selected as i64
+                ],
+            )?;
             tx.commit()?;
             Ok(ins)
         })
@@ -732,26 +749,27 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
     trades: &T,
     cfg: &Config,
 ) -> Result<u64> {
-    let top_n_markets = cfg.market_scoring.top_n_markets as i64;
     let markets: Vec<String> = db
-        .call_named("wallet_discovery.select_top_markets", move |conn| {
+        .call_named("wallet_discovery.select_top_events_markets", move |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT condition_id
-                FROM market_scores_daily
-                WHERE score_date = date('now')
+                FROM market_scores
+                WHERE score_date = (SELECT MAX(score_date) FROM market_scores)
                 ORDER BY rank ASC
-                LIMIT ?1
                 ",
             )?;
             let rows = stmt
-                .query_map(rusqlite::params![top_n_markets], |row| {
-                    row.get::<_, String>(0)
-                })?
+                .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .await?;
+
+    let total = markets.len();
+    if total > 0 {
+        tracing::info!(markets = total, "wallet_discovery: processing top events");
+    }
 
     let trades_pages = cfg
         .wallet_discovery
@@ -759,19 +777,24 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         .min(TRADES_PAGES_CAP);
 
     let mut inserted = 0_u64;
-    for condition_id in markets {
+    for (idx, condition_id) in markets.iter().enumerate() {
+        if (idx + 1) % 10 == 0 || idx == 0 {
+            tracing::info!(
+                progress = idx + 1,
+                total = total,
+                inserted_so_far = inserted,
+                "wallet_discovery: progress"
+            );
+        }
         let (holder_resp, _raw_h) = holders
-            .fetch_holders(
-                &condition_id,
-                cfg.wallet_discovery.holders_per_market as u32,
-            )
+            .fetch_holders(condition_id, cfg.wallet_discovery.holders_per_market as u32)
             .await?;
 
         let mut market_trades: Vec<common::types::ApiTrade> = Vec::new();
         for page in 0..trades_pages {
             let offset = page * TRADES_PAGE_SIZE;
             let (page_trades, _) = trades
-                .fetch_market_trades_page(&condition_id, TRADES_PAGE_SIZE, offset)
+                .fetch_market_trades_page(condition_id, TRADES_PAGE_SIZE, offset)
                 .await?;
             if page_trades.len() < TRADES_PAGE_SIZE as usize {
                 market_trades.extend(page_trades);
@@ -966,7 +989,8 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                 .prepare(
                     "
                     SELECT w.proxy_wallet,
-                        CAST((julianday('now') - julianday(w.discovered_at)) AS INTEGER) AS age_days,
+                        (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
+                         FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS age_days,
                         (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS total_trades,
                         (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
                          FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS days_since_last
@@ -977,7 +1001,7 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1).unwrap_or(0).max(0) as u32,
+                        row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as u32,
                         row.get::<_, i64>(2).unwrap_or(0).max(0) as u32,
                         row.get::<_, Option<i64>>(3)?
                             .unwrap_or(i64::MAX)
@@ -987,12 +1011,26 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
+            let wallets_with_trades = wallets.iter().filter(|(_, _, t, _)| *t > 0).count();
+            let wallets_no_trades = wallets.len().saturating_sub(wallets_with_trades);
+            tracing::info!(
+                total = wallets.len(),
+                with_trades = wallets_with_trades,
+                no_trades = wallets_no_trades,
+                "persona_classification: starting (wallets with no trades fail Stage 1)"
+            );
+
             let mut count = 0_u64;
+            let mut stage1_no_trades = 0_u64;
+            let mut stage1_other = 0_u64;
+            let mut stage2_excluded = 0_u64;
+            let mut suitable = 0_u64;
             for (proxy_wallet, wallet_age_days, total_trades, days_since_last) in wallets {
                 if let Some(reason) =
                     stage1_known_bot_check(&proxy_wallet, &stage1_config.known_bots)
                 {
                     crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
+                    stage1_other += 1;
                     count += 1;
                     continue;
                 }
@@ -1003,6 +1041,11 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                     &stage1_config,
                 ) {
                     crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
+                    if total_trades == 0 {
+                        stage1_no_trades += 1;
+                    } else {
+                        stage1_other += 1;
+                    }
                     count += 1;
                     continue;
                 }
@@ -1022,6 +1065,25 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
 
                 match classify_wallet(conn, &features, wallet_age_days, &persona_config) {
                     Ok(result) => {
+                        match &result {
+                            crate::persona_classification::ClassificationResult::Followable(p) => {
+                                suitable += 1;
+                                tracing::info!(
+                                    wallet = %proxy_wallet,
+                                    persona = %p.as_str(),
+                                    "persona: suitable"
+                                );
+                            }
+                            crate::persona_classification::ClassificationResult::Excluded(r) => {
+                                stage2_excluded += 1;
+                                tracing::info!(
+                                    wallet = %proxy_wallet,
+                                    reason = %r.reason_str(),
+                                    "persona: excluded Stage 2"
+                                );
+                            }
+                            crate::persona_classification::ClassificationResult::Unclassified => {}
+                        }
                         if !matches!(result, crate::persona_classification::ClassificationResult::Unclassified) {
                             count += 1;
                         }
@@ -1035,6 +1097,13 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                     }
                 }
             }
+            tracing::info!(
+                stage1_no_trades,
+                stage1_other,
+                stage2_excluded,
+                suitable,
+                "persona_classification: summary (no_trades = excluded at Stage 1 due to no trade data)"
+            );
             Ok(count)
         })
         .await?;
@@ -1219,7 +1288,7 @@ mod tests {
     async fn test_run_market_scoring_uses_db_density_and_whale_concentration() {
         let mut cfg =
             Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
-        cfg.market_scoring.top_n_markets = 2;
+        cfg.market_scoring.top_n_events = 2;
         // Keep the test focused on DB-derived density/whale factors.
         cfg.market_scoring.min_liquidity_usdc = 0.0;
         cfg.market_scoring.min_daily_volume_usdc = 0.0;
@@ -1288,6 +1357,7 @@ mod tests {
                 volume_24hr: Some("8000".to_string()),
                 category: None,
                 event_slug: None,
+                events: None,
                 neg_risk: None,
             },
             GammaMarket {
@@ -1302,22 +1372,23 @@ mod tests {
                 volume_24hr: Some("8000".to_string()),
                 category: None,
                 event_slug: None,
+                events: None,
                 neg_risk: None,
             },
         ];
 
         let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
-        run_market_scoring_once(&db, &pager, &cfg).await.unwrap();
+        run_event_scoring_once(&db, &pager, &cfg).await.unwrap();
 
         let (m1, m2): (f64, f64) = db
             .call(|conn| {
                 let m1: f64 = conn.query_row(
-                    "SELECT mscore FROM market_scores_daily WHERE condition_id = '0x1'",
+                    "SELECT mscore FROM market_scores WHERE condition_id = '0x1'",
                     [],
                     |row| row.get(0),
                 )?;
                 let m2: f64 = conn.query_row(
-                    "SELECT mscore FROM market_scores_daily WHERE condition_id = '0x2'",
+                    "SELECT mscore FROM market_scores WHERE condition_id = '0x2'",
                     [],
                     |row| row.get(0),
                 )?;
@@ -1351,6 +1422,7 @@ mod tests {
                 volume_24hr: Some("8000".to_string()),
                 category: None,
                 event_slug: None,
+                events: None,
                 neg_risk: None,
             },
             GammaMarket {
@@ -1365,19 +1437,19 @@ mod tests {
                 volume_24hr: Some("9000".to_string()),
                 category: None,
                 event_slug: None,
+                events: None,
                 neg_risk: None,
             },
         ];
 
         let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
-        let inserted = run_market_scoring_once(&db, &pager, &cfg).await.unwrap();
+        let inserted = run_event_scoring_once(&db, &pager, &cfg).await.unwrap();
         assert!(inserted > 0);
 
         let (cnt_scores, cnt_markets): (i64, i64) = db
             .call(|conn| {
-                let cs = conn.query_row("SELECT COUNT(*) FROM market_scores_daily", [], |row| {
-                    row.get(0)
-                })?;
+                let cs =
+                    conn.query_row("SELECT COUNT(*) FROM market_scores", [], |row| row.get(0))?;
                 let cm = conn.query_row("SELECT COUNT(*) FROM markets", [], |row| row.get(0))?;
                 Ok((cs, cm))
             })
@@ -1550,7 +1622,7 @@ mod tests {
 
         db.call(|conn| {
             conn.execute(
-                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, 1)",
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, 1)",
                 rusqlite::params!["0xcond"],
             )?;
             Ok(())
@@ -1672,26 +1744,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_wallet_discovery_respects_top_n_markets() {
+    async fn test_run_wallet_discovery_processes_all_top_events_markets() {
         let mut cfg =
             Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
-        cfg.market_scoring.top_n_markets = 1;
         cfg.wallet_discovery.min_total_trades = 1;
 
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         db.call(|conn| {
-            // Three markets scored today, with ranks 1..3.
             conn.execute(
-                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, 1)",
+                "INSERT INTO markets (condition_id, title) VALUES ('0xcond1', 'M1'), ('0xcond2', 'M2'), ('0xcond3', 'M3')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, 1)",
                 rusqlite::params!["0xcond1"],
             )?;
             conn.execute(
-                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.8, 2)",
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.8, 2)",
                 rusqlite::params!["0xcond2"],
             )?;
             conn.execute(
-                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.7, 3)",
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.7, 2)",
                 rusqlite::params!["0xcond3"],
             )?;
             Ok(())
@@ -1753,26 +1827,12 @@ mod tests {
             .await
             .unwrap();
 
-        // top_n_markets=1 => only rank=1 market should be processed (holder + trader).
-        assert_eq!(inserted, 2);
-
         let cnt_wallets: i64 = db
             .call(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM wallets", [], |row| row.get(0))?))
             .await
             .unwrap();
-        assert_eq!(cnt_wallets, 2);
-
-        let cnt_wallets_other_markets: i64 = db
-            .call(|conn| {
-                Ok(conn.query_row(
-                    "SELECT COUNT(*) FROM wallets WHERE discovered_market IN ('0xcond2', '0xcond3')",
-                    [],
-                    |row| row.get(0),
-                )?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(cnt_wallets_other_markets, 0);
+        assert_eq!(cnt_wallets, 6);
+        assert_eq!(inserted, 6);
     }
 
     #[tokio::test]

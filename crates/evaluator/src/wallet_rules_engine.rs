@@ -34,7 +34,7 @@ pub struct StyleSnapshot {
     pub unique_markets: u32,
     pub burstiness_top_1h_ratio: f64,
     pub buy_sell_balance: f64,
-    pub top_category_ratio: f64,
+    pub top_domain_ratio: f64,
 }
 
 pub fn evaluate_discovery(features: &WalletFeatures, cfg: &WalletRules) -> WalletRuleDecision {
@@ -239,7 +239,7 @@ pub fn evaluate_live(
                         reason: "live_style_drift".to_string(),
                     });
                 }
-                if current.top_category_ratio > cfg.live_max_theme_concentration {
+                if current.top_domain_ratio > cfg.live_max_theme_concentration {
                     return Ok(WalletRuleDecision {
                         allow: false,
                         reason: "live_theme_concentration".to_string(),
@@ -324,7 +324,7 @@ pub fn style_snapshot_from_features(features: &WalletFeatures) -> StyleSnapshot 
         unique_markets: features.unique_markets,
         burstiness_top_1h_ratio: features.burstiness_top_1h_ratio,
         buy_sell_balance: features.buy_sell_balance,
-        top_category_ratio: features.top_category_ratio,
+        top_domain_ratio: features.top_domain_ratio,
     }
 }
 
@@ -336,7 +336,7 @@ pub fn read_latest_style(conn: &Connection, proxy_wallet: &str) -> Result<Option
                 unique_markets,
                 burstiness_top_1h_ratio,
                 buy_sell_balance,
-                top_category_ratio
+                top_domain_ratio
              FROM wallet_features_daily
              WHERE proxy_wallet = ?1
              ORDER BY feature_date DESC
@@ -350,7 +350,7 @@ pub fn read_latest_style(conn: &Connection, proxy_wallet: &str) -> Result<Option
         unique_markets: mkts,
         burstiness_top_1h_ratio: burst,
         buy_sell_balance: bal,
-        top_category_ratio: top,
+        top_domain_ratio: top,
     }))
 }
 
@@ -361,7 +361,7 @@ pub fn style_drift_score(base: &StyleSnapshot, cur: &StyleSnapshot) -> f64 {
     let burst =
         ((base.burstiness_top_1h_ratio - cur.burstiness_top_1h_ratio).abs() / 0.50).min(1.0);
     let bal = ((base.buy_sell_balance - cur.buy_sell_balance).abs() / 1.0).min(1.0);
-    let theme = ((base.top_category_ratio - cur.top_category_ratio).abs() / 1.0).min(1.0);
+    let theme = ((base.top_domain_ratio - cur.top_domain_ratio).abs() / 1.0).min(1.0);
     0.30 * tpd + 0.20 * mkts + 0.25 * burst + 0.15 * bal + 0.10 * theme
 }
 
@@ -435,8 +435,8 @@ mod tests {
             mid_fill_ratio: 0.2,
             extreme_price_ratio: 0.1,
             burstiness_top_1h_ratio: 0.1,
-            top_category: Some("sports".to_string()),
-            top_category_ratio: 0.7,
+            top_domain: Some("sports".to_string()),
+            top_domain_ratio: 0.7,
         }
     }
 

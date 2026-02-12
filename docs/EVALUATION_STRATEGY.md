@@ -21,13 +21,13 @@ The system progresses through discrete phases. Each phase has entry criteria (wh
 - [x] `cargo test --all` passes
 - [x] At least one real API response saved as test fixture
 
-### Phase 1: Market Discovery (COLLECT)
+### Phase 1: Event Discovery (COLLECT)
 **Entry:** Phase 0 complete.
-**What to build:** Market scoring (MScore), daily market selection job.
+**What to build:** Event scoring (EScore), daily event selection job.
 **Exit criteria:**
 - [ ] System fetches all active markets from Gamma API
 - [ ] MScore computed for each market using: liquidity, volume, trade density, whale concentration
-- [ ] Daily top-20 markets selected and persisted to `market_scores_daily`
+- [ ] Daily top-50 events selected (markets from top events persisted to `market_scores`, EScore = max MScore per event)
 - [ ] Output is explainable (each factor visible in the score breakdown)
 - [ ] Running for 3+ days with stable output
 
@@ -207,8 +207,8 @@ If follower_slippage is consistently negative by more than the trader's edge, yo
 | Metric | Good | Marginal | Bad |
 |--------|------|----------|-----|
 | Markets with MScore >0.5 | >50 per day | 20-50 | <20 |
-| Top-20 markets have >$10K volume/day | >80% | 50-80% | <50% |
-| Top-20 markets have >50 unique traders/day | >80% | 50-80% | <50% |
+| Top-50 events have >$10K volume/day | >80% | 50-80% | <50% |
+| Top-50 events have >50 unique traders/day | >80% | 50-80% | <50% |
 | Markets with resolution within 30 days | >70% | 40-70% | <40% |
 | MScore ranking stable day-to-day (Kendall tau >0.6) | Yes | 0.3-0.6 | <0.3 |
 

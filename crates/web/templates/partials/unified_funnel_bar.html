@@ -1,0 +1,11 @@
+<div class="funnel-scroll flex items-center gap-2 p-4 bg-gray-900 rounded-lg">
+    {% for stage in stages %}
+    <div class="flex-shrink-0 text-center px-4 py-2 rounded {{ stage.bg_color }}">
+        <div class="text-lg font-bold">{{ stage.count_display }}</div>
+        <div class="text-xs text-gray-400">{{ stage.label }}</div>
+    </div>
+    {% if !loop.last %}
+    <div class="flex-shrink-0 text-gray-600">&rarr;</div>
+    {% endif %}
+    {% endfor %}
+</div>

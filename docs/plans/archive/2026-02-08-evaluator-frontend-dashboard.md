@@ -401,7 +401,7 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
         "SELECT COUNT(*) FROM markets", [], |r| r.get(0)
     )?;
     let markets_scored: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now')",
+        "SELECT COUNT(*) FROM market_scores WHERE score_date = date('now')",
         [], |r| r.get(0)
     )?;
     let wallets_discovered: i64 = conn.query_row(
@@ -523,9 +523,9 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
         .map(|m| m.len() as f64 / 1_048_576.0)
         .unwrap_or(0.0);
 
-    // Last market scoring: latest entry in market_scores_daily
+    // Last market scoring: latest entry in market_scores
     let last_market_scoring: Option<String> = conn.query_row(
-        "SELECT MAX(score_date) FROM market_scores_daily",
+        "SELECT MAX(score_date) FROM market_scores",
         [], |r| r.get(0)
     ).unwrap_or(None);
 
@@ -695,7 +695,7 @@ pub fn top_markets_today(conn: &Connection) -> Result<Vec<MarketRow>> {
         "SELECT ms.rank, m.title, ms.condition_id, ms.mscore,
                 COALESCE(m.liquidity, 0), COALESCE(m.volume, 0),
                 COALESCE(ms.density_score, 0), m.end_date
-         FROM market_scores_daily ms
+         FROM market_scores ms
          JOIN markets m ON m.condition_id = ms.condition_id
          WHERE ms.score_date = date('now')
          ORDER BY ms.rank ASC
@@ -730,7 +730,7 @@ fn test_top_markets_with_data() {
         [],
     ).unwrap();
     conn.execute(
-        "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank)
+        "INSERT INTO market_scores (condition_id, score_date, mscore, rank)
          VALUES ('0xabc', date('now'), 0.85, 1)",
         [],
     ).unwrap();

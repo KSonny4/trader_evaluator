@@ -22,7 +22,7 @@ The evaluator uses a **timer-driven “tick” pattern**:
 
 ### Data flow
 
-- **Bootstrap:** On startup, `main` runs `run_market_scoring_once` and `run_wallet_discovery_once` once, then starts the scheduler.
+- **Bootstrap:** On startup, `main` runs `run_event_scoring_once` and `run_wallet_discovery_once` once, then starts the scheduler.
 - **Ongoing:** All jobs run on **fixed intervals** (configurable in `config/default.toml`). Dependencies are **implicit**: e.g. paper_tick reads from DB after trades_ingestion has written; there is no “on event X, run Y.” No typed events or subscriptions.
 
 ### Failure handling
@@ -40,7 +40,7 @@ The evaluator uses a **timer-driven “tick” pattern**:
 ```mermaid
 flowchart LR
   subgraph scheduler [Scheduler tasks]
-    T1[interval market_scoring]
+    T1[interval event_scoring]
     T2[interval wallet_discovery]
     T3[interval ingestion]
   end
@@ -50,7 +50,7 @@ flowchart LR
     C3[( )]
   end
   subgraph workers [Worker tasks]
-    W1[run_market_scoring_once]
+    W1[run_event_scoring_once]
     W2[run_wallet_discovery_once]
     W3[run_ingestion_once...]
   end
@@ -93,8 +93,8 @@ The following is the **intended direction** for the evaluator, still as a **sing
 
 ### Observability (Grafana Tempo and service graph)
 
-- **Tempo:** Instrumentation should emit **traces** (e.g. OpenTelemetry or `tracing` spans with trace IDs) so that job runs and key steps (market scoring, wallet discovery, paper tick, etc.) appear as spans. That allows Grafana Tempo to show latency and flow.
-- **Service graph:** Define logical “services” (e.g. market_scoring, wallet_discovery, ingestion, paper_trading) and document that the service graph view will be built from these trace spans. In-process today; the same concepts apply if the system is split into multiple processes later.
+- **Tempo:** Instrumentation should emit **traces** (e.g. OpenTelemetry or `tracing` spans with trace IDs) so that job runs and key steps (event scoring, wallet discovery, paper tick, etc.) appear as spans. That allows Grafana Tempo to show latency and flow.
+- **Service graph:** Define logical “services” (e.g. event_scoring, wallet_discovery, ingestion, paper_trading) and document that the service graph view will be built from these trace spans. In-process today; the same concepts apply if the system is split into multiple processes later.
 
 ### Saga (local)
 

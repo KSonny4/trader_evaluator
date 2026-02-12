@@ -38,7 +38,12 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
         let markets_fetched: i64 =
             conn.query_row("SELECT COUNT(*) FROM markets", [], |r| r.get(0))?;
         let markets_scored: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now')",
+            "
+            SELECT COUNT(DISTINCT COALESCE(m.event_slug, m.condition_id))
+            FROM market_scores ms
+            JOIN markets m ON m.condition_id = ms.condition_id
+            WHERE ms.score_date = (SELECT MAX(score_date) FROM market_scores)
+            ",
             [],
             |r| r.get(0),
         )?;
@@ -52,7 +57,7 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
         let paper_trades_total: i64 =
             conn.query_row("SELECT COUNT(*) FROM paper_trades", [], |r| r.get(0))?;
         let wallets_ranked: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT proxy_wallet) FROM wallet_scores_daily WHERE score_date = date('now')",
+            "SELECT COUNT(DISTINCT proxy_wallet) FROM wallet_scores_daily WHERE score_date = (SELECT MAX(score_date) FROM wallet_scores_daily)",
             [],
             |r| r.get(0),
         )?;
@@ -138,7 +143,7 @@ pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
           ON ws30.proxy_wallet = ws7.proxy_wallet
          AND ws30.score_date = ws7.score_date
          AND ws30.window_days = 30
-        WHERE ws7.score_date = date('now')
+        WHERE ws7.score_date = (SELECT MAX(score_date) FROM wallet_scores_daily)
           AND ws7.window_days = 7
           AND COALESCE(ws7.paper_roi_pct, 0) > 5.0
           AND COALESCE(ws30.paper_roi_pct, 0) > 10.0
@@ -156,6 +161,272 @@ pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
     })
 }
 
+/// Returns (events_selected, events_evaluated) for the Events section.
+/// events_selected uses scoring_stats.top_events_selected (cap at config top_n_events) when present.
+pub fn events_counts(conn: &Connection) -> Result<(i64, i64)> {
+    timed_db_op("web.events_counts", || {
+        let (events_selected, events_evaluated): (i64, i64) = conn.query_row(
+            "
+            SELECT COALESCE(ss.top_events_selected,
+                (SELECT COUNT(DISTINCT COALESCE(m.event_slug, m.condition_id))
+                 FROM market_scores ms
+                 JOIN markets m ON m.condition_id = ms.condition_id
+                 WHERE ms.score_date = (SELECT MAX(score_date) FROM market_scores))),
+                   COALESCE(ss.total_events_evaluated,
+                (SELECT COUNT(DISTINCT COALESCE(m.event_slug, m.condition_id))
+                 FROM market_scores ms
+                 JOIN markets m ON m.condition_id = ms.condition_id
+                 WHERE ms.score_date = (SELECT MAX(score_date) FROM market_scores)))
+            FROM (SELECT MAX(score_date) AS sd FROM market_scores) maxd
+            LEFT JOIN scoring_stats ss ON ss.score_date = maxd.sd
+            ",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((events_selected, events_evaluated))
+    })
+}
+
+pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
+    timed_db_op("web.unified_funnel_counts", || {
+        let (events_selected, events_evaluated) = events_counts(conn)?;
+        let all_wallets: i64 = conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
+        let suitable_personas: i64 =
+            conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
+        // Evaluated = active, passed Stage 1, classified (persona or Stage 2 exclusion), and oldest trade >= 30 days ago.
+        let personas_evaluated: i64 = conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM wallets w
+            WHERE w.is_active = 1
+              AND NOT EXISTS (
+                SELECT 1 FROM wallet_exclusions e
+                WHERE e.proxy_wallet = w.proxy_wallet AND e.reason LIKE 'STAGE1_%'
+              )
+              AND (
+                EXISTS (SELECT 1 FROM wallet_personas p WHERE p.proxy_wallet = w.proxy_wallet)
+                OR EXISTS (SELECT 1 FROM wallet_exclusions e2
+                           WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
+              )
+              AND (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
+                   FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 30
+            ",
+            [],
+            |r| r.get(0),
+        )?;
+        let actively_paper_traded: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
+            [],
+            |r| r.get(0),
+        )?;
+        let worth_following: i64 = conn.query_row(
+            "
+            SELECT COUNT(DISTINCT ws7.proxy_wallet)
+            FROM wallet_scores_daily ws7
+            JOIN wallet_scores_daily ws30
+              ON ws30.proxy_wallet = ws7.proxy_wallet
+             AND ws30.score_date = ws7.score_date
+             AND ws30.window_days = 30
+            WHERE ws7.score_date = (SELECT MAX(score_date) FROM wallet_scores_daily)
+              AND ws7.window_days = 7
+              AND COALESCE(ws7.paper_roi_pct, 0) > 5.0
+              AND COALESCE(ws30.paper_roi_pct, 0) > 10.0
+            ",
+            [],
+            |r| r.get(0),
+        )?;
+        let personas_excluded: i64 = excluded_wallets_count(conn)?;
+        Ok(UnifiedFunnelCounts {
+            events_selected,
+            events_evaluated,
+            all_wallets,
+            suitable_personas,
+            personas_evaluated,
+            personas_excluded,
+            actively_paper_traded,
+            worth_following,
+        })
+    })
+}
+
+/// Returns (suitable_count, evaluated_count) for the suitable personas section.
+/// Evaluated counts only wallets whose oldest trade is at least 30 days ago (trade-based age, not scrape age).
+pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
+    let suitable: i64 = conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
+    let evaluated: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM wallets w
+        WHERE w.is_active = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM wallet_exclusions e
+            WHERE e.proxy_wallet = w.proxy_wallet AND e.reason LIKE 'STAGE1_%'
+          )
+          AND (
+            EXISTS (SELECT 1 FROM wallet_personas p WHERE p.proxy_wallet = w.proxy_wallet)
+            OR EXISTS (SELECT 1 FROM wallet_exclusions e2
+                       WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
+          )
+          AND (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
+               FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 30
+        ",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok((suitable, evaluated))
+}
+
+pub fn suitable_personas_wallets(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<SuitablePersonaRow>> {
+    timed_db_op("web.suitable_personas_wallets", || {
+        let mut stmt = conn.prepare(
+            "
+            SELECT p.proxy_wallet, p.persona, p.classified_at
+            FROM wallet_personas p
+            ORDER BY p.classified_at DESC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let wallet: String = row.get(0)?;
+                Ok(SuitablePersonaRow {
+                    proxy_wallet: wallet.clone(),
+                    wallet_short: shorten_wallet(&wallet),
+                    persona: row.get(1)?,
+                    classified_at: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+pub fn paper_traded_wallets_list(conn: &Connection, limit: usize) -> Result<Vec<WalletRow>> {
+    timed_db_op("web.paper_traded_wallets_list", || {
+        let mut stmt = conn.prepare(
+            "
+            SELECT w.proxy_wallet, w.discovered_from,
+                    m.title, w.discovered_at, w.is_active,
+                    (SELECT COUNT(*) FROM trades_raw t WHERE t.proxy_wallet = w.proxy_wallet)
+            FROM wallets w
+            JOIN (
+                SELECT proxy_wallet, MAX(created_at) AS last_trade
+                FROM paper_trades
+                GROUP BY proxy_wallet
+                ORDER BY last_trade DESC
+                LIMIT ?1
+            ) pt ON pt.proxy_wallet = w.proxy_wallet
+            LEFT JOIN markets m ON m.condition_id = w.discovered_market
+            ORDER BY pt.last_trade DESC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let wallet: String = row.get(0)?;
+                Ok(WalletRow {
+                    proxy_wallet: wallet.clone(),
+                    wallet_short: shorten_wallet(&wallet),
+                    discovered_from: row.get(1)?,
+                    discovered_market_title: row.get(2)?,
+                    discovered_at: row.get(3)?,
+                    is_active: row.get::<_, i64>(4)? != 0,
+                    trade_count: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+pub fn follow_worthy_rankings(conn: &Connection, limit: Option<usize>) -> Result<Vec<RankingRow>> {
+    let limit = limit.unwrap_or(500);
+    timed_db_op("web.follow_worthy_rankings", || {
+        let mut stmt = conn.prepare(
+            "
+            SELECT ws.proxy_wallet, ws.wscore,
+                    COALESCE(ws.edge_score, 0), COALESCE(ws.consistency_score, 0),
+                    COALESCE(ws.recommended_follow_mode, 'mirror'),
+                    (SELECT COUNT(*) FROM trades_raw t WHERE t.proxy_wallet = ws.proxy_wallet),
+                    COALESCE((SELECT SUM(pnl) FROM paper_trades pt
+                              WHERE pt.proxy_wallet = ws.proxy_wallet AND pt.status != 'open'), 0)
+            FROM wallet_scores_daily ws
+            JOIN wallet_scores_daily ws30
+              ON ws30.proxy_wallet = ws.proxy_wallet
+             AND ws30.score_date = ws.score_date
+             AND ws30.window_days = 30
+            WHERE ws.score_date = (SELECT MAX(score_date) FROM wallet_scores_daily)
+              AND ws.window_days = 7
+              AND COALESCE(ws.paper_roi_pct, 0) > 5.0
+              AND COALESCE(ws30.paper_roi_pct, 0) > 10.0
+            ORDER BY ws.wscore DESC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let wallet: String = row.get(0)?;
+                let wscore: f64 = row.get(1)?;
+                let edge_score: f64 = row.get(2)?;
+                let consistency_score: f64 = row.get(3)?;
+                let paper_pnl: f64 = row.get(6)?;
+
+                let pnl_color = if paper_pnl >= 0.0 {
+                    "text-green-400"
+                } else {
+                    "text-red-400"
+                }
+                .to_string();
+                let sign = if paper_pnl >= 0.0 { "+" } else { "" };
+
+                Ok(RankingRow {
+                    rank: 0,
+                    rank_display: String::new(),
+                    row_class: String::new(),
+                    proxy_wallet: wallet.clone(),
+                    wallet_short: shorten_wallet(&wallet),
+                    wscore,
+                    wscore_display: format!("{wscore:.2}"),
+                    wscore_pct: format!("{:.0}", wscore * 100.0),
+                    edge_score,
+                    edge_display: format!("{edge_score:.2}"),
+                    consistency_score,
+                    consistency_display: format!("{consistency_score:.2}"),
+                    follow_mode: row.get(4)?,
+                    trade_count: row.get(5)?,
+                    paper_pnl,
+                    pnl_display: format!("{sign}${paper_pnl:.2}"),
+                    pnl_color,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let rows: Vec<RankingRow> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut r)| {
+                let rank = (i + 1) as i64;
+                r.rank = rank;
+                r.rank_display = match rank {
+                    1 => "\u{1F3C6}".to_string(),
+                    2 => "\u{1F948}".to_string(),
+                    3 => "\u{1F949}".to_string(),
+                    n => n.to_string(),
+                };
+                r.row_class = if rank <= 3 {
+                    "bg-gray-800/20".to_string()
+                } else {
+                    String::new()
+                };
+                r
+            })
+            .collect();
+        Ok(rows)
+    })
+}
+
 pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
     timed_db_op("web.system_status", || {
         let db_size_mb = std::fs::metadata(db_path).map_or_else(
@@ -165,9 +436,7 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
 
         // Determine phase from data presence
         let has_scores: bool = conn
-            .query_row("SELECT COUNT(*) > 0 FROM market_scores_daily", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT COUNT(*) > 0 FROM market_scores", [], |r| r.get(0))
             .unwrap_or(false);
         let has_wallets: bool = conn
             .query_row("SELECT COUNT(*) > 0 FROM wallets", [], |r| r.get(0))
@@ -193,7 +462,7 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
         } else if has_wallets {
             "2: Wallet Discovery"
         } else if has_scores {
-            "1: Market Discovery"
+            "1: Event Discovery"
         } else {
             "0: Foundation"
         };
@@ -201,9 +470,9 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
         // Job heartbeats: check freshness of each data source
         let job_defs: Vec<(&str, &str, &str, &str, i64)> = vec![
             (
-                "Market Scoring",
-                "MScore",
-                "market_scores_daily",
+                "Event Scoring",
+                "EScore",
+                "market_scores",
                 "score_date",
                 86400,
             ),
@@ -252,6 +521,17 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
             ),
         ];
 
+        let events_display = events_counts(conn).map_or_else(
+            |_| "0".to_string(),
+            |(sel, ev)| {
+                if ev > 0 && ev != sel {
+                    format!("{sel} / {ev}")
+                } else {
+                    sel.to_string()
+                }
+            },
+        );
+
         let mut jobs = Vec::new();
         for (name, short, table, ts_col, expected_interval_secs) in job_defs {
             let last_run: Option<String> = conn
@@ -287,6 +567,7 @@ pub fn system_status(conn: &Connection, db_path: &str) -> Result<SystemStatus> {
             db_size_mb,
             phase: phase.to_string(),
             jobs,
+            events_display,
         })
     })
 }
@@ -312,15 +593,24 @@ pub fn top_markets_today(conn: &Connection) -> Result<Vec<MarketRow>> {
         let mut stmt = conn.prepare(
             "SELECT ms.rank, m.title, ms.condition_id, ms.mscore,
                     COALESCE(m.liquidity, 0), COALESCE(m.volume, 0),
-                    COALESCE(ms.density_score, 0), m.end_date
-            FROM market_scores_daily ms
+                    COALESCE(ms.density_score, 0), m.end_date, m.event_slug, m.slug
+            FROM market_scores ms
             JOIN markets m ON m.condition_id = ms.condition_id
-            WHERE ms.score_date = date('now')
+            WHERE ms.score_date = (SELECT MAX(score_date) FROM market_scores)
             ORDER BY ms.rank ASC
             LIMIT 20",
         )?;
         let rows = stmt
             .query_map([], |row| {
+                let event_slug: Option<String> = row.get(8)?;
+                let slug: Option<String> = row.get(9)?;
+                let polymarket_url = event_slug
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("https://polymarket.com/event/{s}"))
+                    .or_else(|| {
+                        slug.filter(|s| !s.is_empty())
+                            .map(|s| format!("https://polymarket.com/market/{s}"))
+                    });
                 Ok(MarketRow {
                     rank: row.get(0)?,
                     title: row.get(1)?,
@@ -330,6 +620,7 @@ pub fn top_markets_today(conn: &Connection) -> Result<Vec<MarketRow>> {
                     volume: row.get(5)?,
                     density_score: row.get(6)?,
                     end_date: row.get(7)?,
+                    polymarket_url,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -337,6 +628,66 @@ pub fn top_markets_today(conn: &Connection) -> Result<Vec<MarketRow>> {
     })
 }
 
+pub fn top_events(conn: &Connection, limit: usize) -> Result<Vec<EventRow>> {
+    timed_db_op("web.top_events", || {
+        let mut stmt = conn.prepare(
+            "
+            WITH scored AS (
+                SELECT ms.condition_id, ms.mscore, m.title, m.event_slug, m.slug,
+                       COALESCE(m.event_slug, ms.condition_id) AS event_key
+                FROM market_scores ms
+                JOIN markets m ON m.condition_id = ms.condition_id
+                WHERE ms.score_date = (SELECT MAX(score_date) FROM market_scores)
+            ),
+            best AS (
+                SELECT event_key, MAX(mscore) AS best_mscore, COUNT(*) AS market_count
+                FROM scored
+                GROUP BY event_key
+            )
+            SELECT b.event_key, b.best_mscore, b.market_count,
+                   (SELECT s.title FROM scored s WHERE s.event_key = b.event_key ORDER BY s.mscore DESC LIMIT 1),
+                   (SELECT s.event_slug FROM scored s WHERE s.event_key = b.event_key ORDER BY s.mscore DESC LIMIT 1),
+                   (SELECT s.slug FROM scored s WHERE s.event_key = b.event_key ORDER BY s.mscore DESC LIMIT 1)
+            FROM best b
+            WHERE b.market_count >= 1
+            ORDER BY b.best_mscore DESC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let event_slug: Option<String> = row.get(4)?;
+                let slug: Option<String> = row.get(5)?;
+                let polymarket_url = event_slug
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("https://polymarket.com/event/{s}"))
+                    .or_else(|| {
+                        slug.filter(|s| !s.is_empty())
+                            .map(|s| format!("https://polymarket.com/market/{s}"))
+                    });
+                Ok(EventRow {
+                    rank: 0,
+                    title: row.get(3)?,
+                    event_key: row.get(0)?,
+                    best_mscore: row.get(1)?,
+                    market_count: row.get(2)?,
+                    polymarket_url,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut r)| {
+                r.rank = (i + 1) as i64;
+                r
+            })
+            .collect();
+        Ok(rows)
+    })
+}
+
+#[allow(dead_code)] // Used by /excluded, journey; retained for potential future use
 pub fn wallet_overview(conn: &Connection) -> Result<WalletOverview> {
     timed_db_op("web.wallet_overview", || {
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
@@ -406,6 +757,7 @@ pub fn recent_wallets(conn: &Connection, limit: usize) -> Result<Vec<WalletRow>>
     })
 }
 
+#[allow(dead_code)] // Retained for potential future tracking dashboard
 pub fn tracking_health(conn: &Connection) -> Result<Vec<TrackingHealth>> {
     timed_db_op("web.tracking_health", || {
         let data_types = vec![
@@ -461,6 +813,7 @@ pub fn tracking_health(conn: &Connection) -> Result<Vec<TrackingHealth>> {
     })
 }
 
+#[allow(dead_code)] // Retained for potential future tracking dashboard
 pub fn stale_wallets(conn: &Connection) -> Result<Vec<String>> {
     timed_db_op("web.stale_wallets", || {
         let mut stmt = conn.prepare(
@@ -695,6 +1048,7 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
     })
 }
 
+#[allow(dead_code)] // Retained for potential future paper dashboard
 pub fn paper_summary(
     conn: &Connection,
     bankroll: f64,
@@ -822,6 +1176,7 @@ pub fn paper_summary(
     })
 }
 
+#[allow(dead_code)] // Retained for potential future paper dashboard
 pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperTradeRow>> {
     timed_db_op("web.recent_paper_trades", || {
         let mut stmt = conn.prepare(
@@ -892,6 +1247,7 @@ pub fn recent_paper_trades(conn: &Connection, limit: usize) -> Result<Vec<PaperT
     })
 }
 
+#[allow(dead_code)] // Replaced by follow_worthy_rankings for unified funnel
 pub fn top_rankings(conn: &Connection, window_days: i64, limit: usize) -> Result<Vec<RankingRow>> {
     timed_db_op("web.top_rankings", || {
         let mut stmt = conn.prepare(
@@ -902,7 +1258,7 @@ pub fn top_rankings(conn: &Connection, window_days: i64, limit: usize) -> Result
                     COALESCE((SELECT SUM(pnl) FROM paper_trades pt
                               WHERE pt.proxy_wallet = ws.proxy_wallet AND pt.status != 'open'), 0)
             FROM wallet_scores_daily ws
-            WHERE ws.score_date = date('now') AND ws.window_days = ?1
+            WHERE ws.score_date = (SELECT MAX(score_date) FROM wallet_scores_daily) AND ws.window_days = ?1
             ORDER BY ws.wscore DESC
             LIMIT ?2",
         )?;
@@ -1114,6 +1470,55 @@ mod tests {
     }
 
     #[test]
+    fn test_suitable_personas_counts_evaluated_requires_30d_trade_age() {
+        use chrono::{Duration, Utc};
+        let conn = test_db();
+        // Two wallets, both active, both with persona (suitable = 2).
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xold', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xnew', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence) VALUES ('0xold', 'Informed Specialist', 0.9)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence) VALUES ('0xnew', 'Informed Specialist', 0.9)",
+            [],
+        )
+        .unwrap();
+        // 0xold: oldest trade 40 days ago -> counts as evaluated.
+        let ts_40d = (Utc::now() - Duration::days(40)).timestamp();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xold', '0xm', 'BUY', 10.0, 0.5, ?1, '0xtx_old')",
+            rusqlite::params![ts_40d],
+        )
+        .unwrap();
+        // 0xnew: oldest trade 5 days ago -> does not count as evaluated.
+        let ts_5d = (Utc::now() - Duration::days(5)).timestamp();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xnew', '0xm', 'BUY', 10.0, 0.5, ?1, '0xtx_new')",
+            rusqlite::params![ts_5d],
+        )
+        .unwrap();
+        let (suitable, evaluated) = suitable_personas_counts(&conn).unwrap();
+        assert_eq!(suitable, 2, "both wallets have persona");
+        assert_eq!(
+            evaluated, 1,
+            "only wallet with trade >= 30 days ago counts as evaluated"
+        );
+    }
+
+    #[test]
     fn test_system_status_empty_db() {
         let conn = test_db();
         let status = system_status(&conn, ":memory:").unwrap();
@@ -1125,20 +1530,20 @@ mod tests {
     fn test_system_status_phase_detection() {
         let conn = test_db();
         conn.execute(
-            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank)
+            "INSERT INTO market_scores (condition_id, score_date, mscore, rank)
              VALUES ('0xabc', date('now'), 0.8, 1)",
             [],
         )
         .unwrap();
         let status = system_status(&conn, ":memory:").unwrap();
-        assert_eq!(status.phase, "1: Market Discovery");
+        assert_eq!(status.phase, "1: Event Discovery");
     }
 
     #[test]
     fn test_system_status_phase_paper_trading() {
         let conn = test_db();
         conn.execute(
-            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank)
+            "INSERT INTO market_scores (condition_id, score_date, mscore, rank)
              VALUES ('0xabc', date('now'), 0.8, 1)",
             [],
         )
@@ -1180,7 +1585,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank)
+            "INSERT INTO market_scores (condition_id, score_date, mscore, rank)
              VALUES ('0xabc', date('now'), 0.85, 1)",
             [],
         )
@@ -1189,6 +1594,43 @@ mod tests {
         assert_eq!(markets.len(), 1);
         assert_eq!(markets[0].title, "BTC > 100k");
         assert_eq!(markets[0].rank, 1);
+    }
+
+    #[test]
+    fn test_top_events_empty() {
+        let conn = test_db();
+        let events = top_events(&conn, 50).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_top_events_with_data() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title, event_slug) VALUES ('0x1', 'BTC Yes', 'btc-150k')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title, event_slug) VALUES ('0x2', 'BTC No', 'btc-150k')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO market_scores (condition_id, score_date, mscore, rank)
+             VALUES ('0x1', date('now'), 0.9, 1), ('0x2', date('now'), 0.7, 2)",
+            [],
+        )
+        .unwrap();
+        let events = top_events(&conn, 50).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "BTC Yes");
+        assert_eq!(events[0].best_mscore, 0.9);
+        assert_eq!(events[0].market_count, 2);
+        assert_eq!(
+            events[0].polymarket_url.as_deref(),
+            Some("https://polymarket.com/event/btc-150k")
+        );
     }
 
     #[test]

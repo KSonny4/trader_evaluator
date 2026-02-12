@@ -17,7 +17,7 @@ Collect "preferably all" wallets by:
 - **Paginate market trades** — `trades_pages_per_market` (default 15) pages of 200 trades each
 - **Leaderboard discovery** — fetch `/v1/leaderboard` for multiple categories/time periods
 - **Continuous mode** — `wallet_discovery_mode = "continuous"` runs discovery in a loop (rate limit only)
-- **Config**: `top_n_markets = 50`, remove `max_wallets_per_market`, add `trades_pages_per_market`
+- **Config**: `top_n_events = 50`, remove `max_wallets_per_market`, add `trades_pages_per_market`
 
 ---
 

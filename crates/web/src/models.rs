@@ -23,6 +23,38 @@ pub struct PersonaFunnelCounts {
     pub follow_worthy_wallets: i64,
 }
 
+/// Unified funnel: Events → All wallets → Suitable personas → Actively paper traded → Worth following.
+pub struct UnifiedFunnelCounts {
+    /// Distinct events selected (top N written to market_scores)
+    pub events_selected: i64,
+    /// Total events evaluated before truncation (from scoring_stats, or events_selected when absent)
+    pub events_evaluated: i64,
+    pub all_wallets: i64,
+    pub suitable_personas: i64,
+    /// Wallets that passed Stage 1 and have been classified (persona or non-stage1 exclusion), with oldest trade at least 30 days ago (trade-based age, not scrape age).
+    pub personas_evaluated: i64,
+    /// Distinct wallets with an exclusion (Stage 1 or Stage 2).
+    pub personas_excluded: i64,
+    pub actively_paper_traded: i64,
+    pub worth_following: i64,
+}
+
+/// One stage in the unified funnel bar (counts only, no drop %).
+pub struct UnifiedFunnelStage {
+    pub label: String,
+    /// Display string (e.g. "50" or "50 / 127" for selected/evaluated)
+    pub count_display: String,
+    pub bg_color: String,
+}
+
+/// Wallet with persona for suitable-personas stage.
+pub struct SuitablePersonaRow {
+    pub proxy_wallet: String,
+    pub wallet_short: String,
+    pub persona: String,
+    pub classified_at: String,
+}
+
 /// One stage in the persona funnel bar.
 pub struct PersonaFunnelStage {
     pub label: String,
@@ -63,9 +95,21 @@ pub struct SystemStatus {
     pub db_size_mb: String,
     pub phase: String,
     pub jobs: Vec<JobHeartbeat>,
+    /// Events display: "50" or "50 / 127" (selected / evaluated)
+    pub events_display: String,
 }
 
-/// Row in the top markets table
+/// Row in the top events table (events = grouped by event_slug, or single market when no event_slug)
+pub struct EventRow {
+    pub rank: i64,
+    pub title: String,
+    pub event_key: String, // event_slug or condition_id
+    pub best_mscore: f64,
+    pub market_count: i64,
+    pub polymarket_url: Option<String>,
+}
+
+/// Row in the top markets table (legacy; kept for tests)
 pub struct MarketRow {
     pub rank: i64,
     pub title: String,
@@ -75,6 +119,8 @@ pub struct MarketRow {
     pub volume: f64,
     pub density_score: f64,
     pub end_date: Option<String>,
+    /// Polymarket URL (event or market), None if no slug
+    pub polymarket_url: Option<String>,
 }
 
 /// Wallet discovery overview counts
@@ -253,6 +299,58 @@ impl FunnelCounts {
                     bg_color: bg.to_string(),
                     drop_color,
                     info: infos[i].clone(),
+                }
+            })
+            .collect()
+    }
+}
+
+impl UnifiedFunnelCounts {
+    pub fn to_stages(&self) -> Vec<UnifiedFunnelStage> {
+        let events_display =
+            if self.events_evaluated > 0 && self.events_evaluated != self.events_selected {
+                format!("{} / {}", self.events_selected, self.events_evaluated)
+            } else {
+                self.events_selected.to_string()
+            };
+        let pairs: [(&str, String, i64); 5] = [
+            ("Events", events_display, self.events_selected),
+            (
+                "All wallets",
+                self.all_wallets.to_string(),
+                self.all_wallets,
+            ),
+            (
+                "Suitable personas wallets",
+                format!(
+                    "{} / {} / {}",
+                    self.suitable_personas, self.personas_evaluated, self.personas_excluded
+                ),
+                self.suitable_personas,
+            ),
+            (
+                "Actively paper traded",
+                self.actively_paper_traded.to_string(),
+                self.actively_paper_traded,
+            ),
+            (
+                "Worth following",
+                self.worth_following.to_string(),
+                self.worth_following,
+            ),
+        ];
+        pairs
+            .iter()
+            .map(|(label, count_display, count_num)| {
+                let bg = if *count_num > 0 {
+                    "bg-gray-800"
+                } else {
+                    "bg-gray-900"
+                };
+                UnifiedFunnelStage {
+                    label: (*label).to_string(),
+                    count_display: count_display.clone(),
+                    bg_color: bg.to_string(),
                 }
             })
             .collect()

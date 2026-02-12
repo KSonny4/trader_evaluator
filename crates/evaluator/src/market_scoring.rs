@@ -1,8 +1,9 @@
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MarketCandidate {
-    pub condition_id: String,
+    pub condition_id: String, // market (outcome)
     pub title: String,
+    pub event_slug: Option<String>, // event (e.g. sparta-slavia)
     pub liquidity: f64,
     pub volume_24h: f64,
     pub trades_24h: u32,
@@ -93,24 +94,60 @@ fn time_to_expiry_score(days: u32) -> f64 {
     clamp01(1.0 - (d - 30.0) / 60.0)
 }
 
+/// Score all markets with MScore. Truncation to top N is done by `rank_events`.
 #[allow(dead_code)]
-pub fn rank_markets(markets: Vec<MarketCandidate>, top_n: usize) -> Vec<ScoredMarket> {
+pub fn rank_markets(markets: Vec<MarketCandidate>) -> Vec<ScoredMarket> {
     let weights = ScoringWeights::default();
-    let mut scored: Vec<ScoredMarket> = markets
+    markets
         .into_iter()
         .map(|m| {
             let mscore = compute_mscore(&m, &weights);
             ScoredMarket { market: m, mscore }
         })
-        .collect();
+        .collect()
+}
 
-    scored.sort_by(|a, b| {
-        b.mscore
-            .partial_cmp(&a.mscore)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scored.truncate(top_n);
-    scored
+/// Event key: event_slug if present, else condition_id (singleton event).
+fn event_key(m: &ScoredMarket) -> String {
+    m.market
+        .event_slug
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| m.market.condition_id.clone())
+}
+
+/// Rank by EScore (best MScore per event), select top N events, return all markets with event_rank.
+/// Returns (total_events_evaluated, ranked_markets) for pipeline to write to market_scores
+/// and scoring_stats.
+pub fn rank_events(
+    scored: Vec<ScoredMarket>,
+    top_n_events: usize,
+) -> (usize, Vec<(i64, ScoredMarket)>) {
+    use std::collections::HashMap;
+    let mut by_event: HashMap<String, Vec<ScoredMarket>> = HashMap::new();
+    for sm in scored {
+        let key = event_key(&sm);
+        by_event.entry(key).or_default().push(sm);
+    }
+    let mut events: Vec<_> = by_event
+        .into_values()
+        .map(|markets| {
+            let escore = markets.iter().map(|sm| sm.mscore).fold(0.0_f64, f64::max);
+            (escore, markets)
+        })
+        .collect();
+    events.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let total_events_evaluated = events.len();
+    events.truncate(top_n_events);
+    let ranked = events
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, (_, markets))| {
+            let rank = (i + 1) as i64;
+            markets.into_iter().map(move |sm| (rank, sm))
+        })
+        .collect();
+    (total_events_evaluated, ranked)
 }
 
 #[cfg(test)]
@@ -122,6 +159,7 @@ mod tests {
         let market = MarketCandidate {
             condition_id: "0xabc".to_string(),
             title: "Will BTC go up?".to_string(),
+            event_slug: None,
             liquidity: 50000.0,
             volume_24h: 20000.0,
             trades_24h: 100,
@@ -146,6 +184,7 @@ mod tests {
         let market = MarketCandidate {
             condition_id: "0xabc".to_string(),
             title: "Dead market".to_string(),
+            event_slug: None,
             liquidity: 0.0,
             volume_24h: 0.0,
             trades_24h: 0,
@@ -159,11 +198,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rank_markets_returns_top_n() {
+    fn test_rank_events_selects_top_events() {
         let markets = vec![
             MarketCandidate {
                 condition_id: "0x1".to_string(),
                 title: "M1".to_string(),
+                event_slug: Some("evt-a".to_string()),
                 liquidity: 1000.0,
                 volume_24h: 500.0,
                 trades_24h: 10,
@@ -174,6 +214,7 @@ mod tests {
             MarketCandidate {
                 condition_id: "0x2".to_string(),
                 title: "M2".to_string(),
+                event_slug: Some("evt-a".to_string()),
                 liquidity: 50000.0,
                 volume_24h: 20000.0,
                 trades_24h: 100,
@@ -184,6 +225,7 @@ mod tests {
             MarketCandidate {
                 condition_id: "0x3".to_string(),
                 title: "M3".to_string(),
+                event_slug: Some("evt-b".to_string()),
                 liquidity: 200000.0,
                 volume_24h: 100000.0,
                 trades_24h: 300,
@@ -194,6 +236,7 @@ mod tests {
             MarketCandidate {
                 condition_id: "0x4".to_string(),
                 title: "M4".to_string(),
+                event_slug: None,
                 liquidity: 10000.0,
                 volume_24h: 2000.0,
                 trades_24h: 60,
@@ -204,6 +247,7 @@ mod tests {
             MarketCandidate {
                 condition_id: "0x5".to_string(),
                 title: "M5".to_string(),
+                event_slug: None,
                 liquidity: 0.0,
                 volume_24h: 0.0,
                 trades_24h: 0,
@@ -213,9 +257,12 @@ mod tests {
             },
         ];
 
-        let ranked = rank_markets(markets, 3);
+        let scored = rank_markets(markets);
+        let (total, ranked) = rank_events(scored, 2);
+        assert_eq!(total, 4); // evt-a, evt-b, 0x4, 0x5 (0x5 has mscore 0 but still an event)
         assert_eq!(ranked.len(), 3);
-        assert!(ranked[0].mscore >= ranked[1].mscore);
-        assert!(ranked[1].mscore >= ranked[2].mscore);
+        assert_eq!(ranked[0].0, 1);
+        assert_eq!(ranked[1].0, 2);
+        assert_eq!(ranked[2].0, 2);
     }
 }

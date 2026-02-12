@@ -21,13 +21,13 @@ pub fn funnel_stage_infos(cfg: &Config) -> [String; 6] {
     );
 
     let scored = format!(
-        "Daily MScore ranking: top_n_markets={} written to market_scores_daily.",
-        cfg.market_scoring.top_n_markets
+        "Daily EScore ranking: top_n_events={} (events = event_slug groupings).",
+        cfg.market_scoring.top_n_events
     );
 
     let wallets = format!(
-        "From top_n_markets={} scored markets: holders_per_market={} trades_pages_per_market={} include traders with >=min_total_trades={}; no cap, insert all.",
-        cfg.market_scoring.top_n_markets,
+        "From top_n_events={} scored events (domain→event→market): holders_per_market={} trades_pages_per_market={} include traders with >=min_total_trades={}; no cap, insert all.",
+        cfg.market_scoring.top_n_events,
         cfg.wallet_discovery.holders_per_market,
         cfg.wallet_discovery.trades_pages_per_market,
         cfg.wallet_discovery.min_total_trades
@@ -77,7 +77,7 @@ mod tests {
         assert!(infos[0].contains("min_daily_volume_usdc="));
         assert!(infos[0].contains("days_to_expiry=["));
 
-        assert!(infos[1].contains("top_n_markets="));
+        assert!(infos[1].contains("top_n_events="));
 
         assert!(infos[2].contains("holders_per_market="));
         assert!(infos[2].contains("min_total_trades="));

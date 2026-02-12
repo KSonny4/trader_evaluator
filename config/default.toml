@@ -24,14 +24,14 @@ portfolio_weekly_loss_pct = 8.0
 max_concurrent_positions = 20
 
 [market_scoring]
-top_n_markets = 50
+top_n_events = 50
 min_liquidity_usdc = 1000.0
 min_daily_volume_usdc = 5000.0
 min_daily_trades = 20
 min_unique_traders = 10
 max_days_to_expiry = 90
 min_days_to_expiry = 1
-refresh_interval_secs = 86400          # daily
+refresh_interval_secs = 3600           # hourly — re-evaluate top events
 weights_liquidity = 0.25
 weights_volume = 0.25
 weights_density = 0.20
@@ -41,6 +41,7 @@ weights_time_to_expiry = 0.15
 [wallet_discovery]
 min_total_trades = 5                   # prune wallets with < N trades
 holders_per_market = 20                # Polymarket API caps at 20
+# No per-run limit: process all markets from top events (rate limit only)
 refresh_interval_secs = 86400          # daily (ignored when mode=continuous)
 # pages of 200 trades each (API offset cap ~3000)
 trades_pages_per_market = 15
@@ -55,6 +56,7 @@ time_periods = ["WEEK", "MONTH"]
 pages_per_category = 20
 
 [ingestion]
+wallets_per_ingestion_run = 100000    # process all active wallets per run (rate limit only)
 trades_poll_interval_secs = 3600       # hourly
 activity_poll_interval_secs = 21600    # every 6 hours
 positions_poll_interval_secs = 86400   # daily
@@ -134,7 +136,7 @@ bot_swarm_min_trades_per_day = 200.0
 bot_swarm_max_avg_trade_size_usdc = 5.0
 jackpot_min_pnl_top1_share = 0.60
 jackpot_max_win_rate = 0.45
-topic_lane_min_top_category_ratio = 0.65
+topic_lane_min_top_domain_ratio = 0.65
 bonder_min_extreme_price_ratio = 0.60
 whale_min_avg_trade_size_usdc = 100.0
 # Stage 2 ROI gate: min ROI for followable (0 = disabled)

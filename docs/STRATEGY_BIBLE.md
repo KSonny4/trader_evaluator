@@ -21,10 +21,31 @@
 - Not trading our own signals — we are pure copy-traders
 
 **Scope:**
-- **Discover** wallets via top-20 MScore markets (the net we cast)
+- **Discover** wallets via top-50 EScore events (the net we cast)
 - **Follow** discovered wallets **everywhere** they trade (the strategy)
 - **High copy fidelity:** copy ALL their trades, manage risk at portfolio level only
-- **Market scoring is for DISCOVERY only.** Copying is wallet-centric, market-agnostic.
+- **Event scoring is for DISCOVERY only.** Copying is wallet-centric, market-agnostic.
+
+**Event vs market:** Polymarket **events** are the primary unit for discovery (e.g. "Will Bitcoin reach $150,000 in February?"). Each event has multiple outcome **markets** (condition_ids). We are **event-focused** for discovery: we rank and select top events. Markets remain important for copying (trades, positions, settlement) — we read and use them throughout the pipeline — but discovery casts the net at the event level.
+
+### Domain hierarchy (canonical terminology)
+
+**Use these terms consistently in code, docs, and UI.** Polymarket uses different names; we map them as follows:
+
+| Our term | Polymarket field | Example | Definition |
+|----------|------------------|---------|------------|
+| **Domain** | `category` | Sport, Politics, Crypto | Top-level topic (Gamma API `category`) |
+| **Sub-domain** | — | Football, US Elections | Finer topic within domain (when distinguishable) |
+| **Event** | `eventSlug` | sparta-slavia | Specific competition/match (e.g. Sparta vs Slavia) |
+| **Market** | `conditionId` | 0xabc… | Outcome market within event (e.g. "Who will win?") |
+
+**Hierarchy:** Domain → (Sub-domain) → Event → Market
+
+- **Domain** = broad topic (Sports, Politics, Crypto, Culture, etc.). Stored in `markets.category`.
+- **Event** = specific occurrence (match, election, resolution deadline). Identified by `event_slug`. When null, we treat the market as a singleton event.
+- **Market** = tradable outcome (Yes/No, or multi-way). Identified by `condition_id`. Trades, positions, and copying operate at market level.
+
+**Wallet traits:** `TOPIC_LANE=<domain>` means the wallet has edge in that domain (e.g. `TOPIC_LANE=Sports`). We use `top_domain` and `top_domain_ratio` in wallet features.
 
 ---
 
@@ -32,8 +53,8 @@
 
 ```
 All Polymarket wallets (~1M+)
-    ↓ [Market Selection: top-20 MScore markets]
-Wallets active on those markets (~500+)
+    ↓ [Event Selection: top-50 EScore events]
+Wallets active on those events (~500+)
     ↓ [Stage 1: Fast automated filters — runs inline during discovery]
 Candidate wallets (~50-100)
     ↓ [Stage 2: Deep analysis — runs async as background job]
@@ -54,14 +75,33 @@ The dashboard and code use **6 implementation funnel stages** that map to the 5 
 
 | # | Canonical label (short) | Phase | What it measures (one line) |
 |---|-------------------------|-------|-----------------------------|
-| 1 | Markets | 1 Market Discovery | Open Gamma markets meeting filters |
-| 2 | Scored | 1 Market Discovery | MScore top-n written today |
+| 1 | Events | 1 Event Discovery | Distinct events (grouped by event_slug) |
+| 2 | Scored | 1 Event Discovery | EScore top-n events (aggregate of market MScore) |
 | 3 | Wallets | 2 Wallet Discovery | Discovered wallets (watchlist) |
 | 4 | Tracked | 3 Long-Term Tracking | Wallets with is_active=1 |
 | 5 | Paper | 4 Paper Trading | Paper trades created (mirror engine) |
 | 6 | Ranked | 5 Wallet Ranking | Wallets with WScore today |
 
-**Phase names (for "Stage N" headers and phase string):** Market Discovery, Wallet Discovery, Long-Term Tracking, Paper Trading, Wallet Ranking.
+**Phase names (for "Stage N" headers and phase string):** Event Discovery, Wallet Discovery, Long-Term Tracking, Paper Trading, Wallet Ranking.
+
+**Event focus:** The dashboard and funnel show **events** (not raw markets). Events are grouped by `event_slug`; markets without an event_slug are treated as singleton events. EScore = best MScore among markets in that event. See §Event Discovery & EScore for full definition.
+
+### Event Discovery & EScore
+
+**EScore (Event Score)** is the primary metric for event discovery. It determines which events we use to discover wallets.
+
+| Concept | Definition |
+|---------|------------|
+| **Event** | A Polymarket event (e.g. "Will Bitcoin reach $150,000 in February?") identified by `event_slug`. When `event_slug` is null, we treat the market as a singleton event. |
+| **EScore** | `max(MScore)` over all markets in that event. The best MScore among the event's outcome markets. |
+| **Usage** | Rank events by EScore; select top-50 for wallet discovery. Pipeline stores MScore per market; we aggregate to EScore when grouping by event. |
+
+**How EScore is used:**
+1. **Discovery:** Select top-50 events by EScore. Wallets active on those events' markets become candidates.
+2. **Dashboard:** Funnel "Events" stage = count of distinct events (grouped by `event_slug` or `condition_id`).
+3. **UI list:** Show top-50 events ordered by EScore; display the event question (from market `question` field, e.g. "Will Bitcoin reach $150,000 in February?").
+
+**UI display:** When `event_slug` exists we show true events (one row per event, multiple markets grouped). When `event_slug` is null we show markets as singleton events — the row is a market, but we label it "event" for consistency. The title shown is the market's `question` (Gamma API), which is the event-level question; for multi-outcome events, markets in the same event share that question.
 
 ---
 
@@ -75,7 +115,7 @@ Only three personas advance to paper trading. Everything else is excluded.
 | **Consistent Generalist** | unique_markets > 20, win_rate 52-60%, low drawdown, Sharpe > 1 | If `TOPIC_LANE` exists: treat as “generalist with a strong lane” and evaluate per-topic | Mirror | SECONDARY |
 | **Patient Accumulator** | avg_hold_time > 48h, large positions (>90th percentile), < 5 trades/week | If `TOPIC_LANE` exists: copy only in-lane unless out-of-lane performance is comparable | Mirror with 24h+ delay | SLOW but reliable |
 
-**Topic lane definition:** A wallet’s “lane” is the dominant market category they trade (e.g. politics/Trump, sports/football). Lane is a **trait** (`TOPIC_LANE=<category>`), not a persona. We use it to avoid copying a specialist outside their proven domain.
+**Topic lane definition:** A wallet’s “lane” is the dominant **domain** they trade (e.g. Politics, Sports, Crypto). Lane is a **trait** (`TOPIC_LANE=<domain>`), not a persona. We use it to avoid copying a specialist outside their proven domain.
 
 ### Classification thresholds (configurable in `default.toml`)
 
@@ -111,7 +151,7 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 
 | Filter | Config Key | Default | Why |
 |--------|-----------|---------|-----|
-| Wallet age | `stage1_min_wallet_age_days` | 30 | New wallets = insufficient data or sniper risk |
+| Wallet age | `stage1_min_wallet_age_days` | 30 | Age = days since oldest trade in `trades_raw` (not discovery time). New wallets = insufficient data or sniper risk |
 | Minimum trades | `stage1_min_total_trades` | 10 | Can't classify with fewer |
 | Basic activity | `stage1_max_inactive_days` | 30 | Dead wallets waste resources |
 | Not a known bot | Check against `known_bots` list | — | Automated accounts are unfollowable |
@@ -136,12 +176,12 @@ We also store **traits** that refine how we follow a wallet without changing whe
 
 | Trait | Meaning | How it is used |
 |------|---------|----------------|
-| **Topic lane** | Wallet has edge only in one category (sports/politics/crypto/weather/...) | Rank and optionally copy **only within that lane** |
+| **Topic lane** | Wallet has edge only in one domain (Sports/Politics/Crypto/...) | Rank and optionally copy **only within that lane** |
 | **Bonder** | High-probability grinder: trades concentrated near price 0.0/1.0 with longer holds | More copyable at 30s-120s delays; prefer them |
 | **Whale** | Large sizing and/or slow accumulation | Tighten slippage/impact checks; avoid lying to ourselves about fills |
 
 Traits are stored in `wallet_persona_traits` as:
-- `TOPIC_LANE=<category>`
+- `TOPIC_LANE=<domain>`
 - `BONDER=1`
 - `WHALE=1`
 
@@ -365,7 +405,7 @@ Our order placed (total: ~20-50s after their trade)
 | Phase | Name | Exit Criteria (ALL must pass) | Min Duration |
 |-------|------|------------------------------|-------------|
 | 0 | Foundation | Compiles, APIs reachable, all tests pass | — |
-| 1 | Market Discovery | MScore for >50 markets, top-20 selected, 3 consecutive scoring days | 3 days |
+| 1 | Event Discovery | EScore for events, top-50 selected, 3 consecutive scoring days | 3 days |
 | 2 | Wallet Discovery | Stage 1 + Stage 2 running, every wallet has persona OR exclusion, zero unclassified wallets | — |
 | 3 | Long-Term Tracking | 7 days continuous ingestion, <1hr lag, no data gaps | 7 days |
 | 4 | Paper Trading | 7+ days paper trading, all risk gates active, settlement working, copy fidelity >80% for all wallets | 7 days |
@@ -460,7 +500,9 @@ Paper Portfolio ($1,000 simulated bankroll)
 
 ## Appendix A: Key Formulas
 
-### MScore (Market Score)
+### MScore (Market Score) & EScore (Event Score)
+
+MScore is computed per **market** (condition_id). **EScore** = `max(MScore)` over markets in that event. See §Event Discovery & EScore for full definition and usage.
 
 ```
 MScore = 0.25 * liquidity_factor

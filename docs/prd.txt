@@ -96,7 +96,7 @@ For order book and trade mechanics and future execution/reconciliation:
   - https://docs.polymarket.com/developers/CLOB/introduction
 
 ### 6.3 Polymarket Gamma API (secondary)
-For market discovery metadata if needed:
+For event discovery metadata if needed:
 - Gamma "Get markets":
   - https://docs.polymarket.com/developers/gamma-markets-api/get-markets
 
@@ -354,7 +354,7 @@ A ranked list of wallets with:
 - activity_raw (append-only)
 - positions_snapshots
 - holders_snapshots
-- market_scores_daily
+- market_scores
 - wallet_features_daily
 - paper_trades
 - paper_positions
@@ -388,7 +388,7 @@ Mitigation:
 ---
 
 ## 18) Acceptance Criteria
-1) System outputs top 20 "follow-worthy markets" daily with explainable MScore.
+1) System outputs top 50 "follow-worthy events" daily with explainable EScore (max MScore per event).
 2) For each selected market, system extracts at least 50 candidate wallets (holders + traders) where data allows.
 3) For each watched wallet:
    - continuous activity timeline (as ingested)

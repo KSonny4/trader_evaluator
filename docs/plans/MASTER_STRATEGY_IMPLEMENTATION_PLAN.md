@@ -3003,7 +3003,7 @@ git commit -am "feat: proportional sizing in mirror copy (Strategy Bible §6)"
 - Rate limits: `/book` = 1500 req/10s, `/books` = 500 req/10s
 - Response: `{ bids: [{price, size}], asks: [{price, size}], market: condition_id, asset_id: token_id, hash, timestamp }`
 
-**Key mapping:** Book endpoints use `token_id` (outcome token), NOT `condition_id` (market). Each market has 2 tokens (Yes/No). We need to map condition_id → token_ids via the Gamma API `tokens` array, which is already fetched during market discovery.
+**Key mapping:** Book endpoints use `token_id` (outcome token), NOT `condition_id` (market). Each market has 2 tokens (Yes/No). We need to map condition_id → token_ids via the Gamma API `tokens` array, which is already fetched during event discovery.
 
 **Files:**
 - Modify: `crates/common/src/polymarket.rs` — add CLOB client methods
@@ -3203,7 +3203,7 @@ ALTER TABLE markets ADD COLUMN yes_token_id TEXT;
 ALTER TABLE markets ADD COLUMN no_token_id TEXT;
 ```
 
-Populate `yes_token_id` and `no_token_id` during market discovery from the Gamma API `tokens` array.
+Populate `yes_token_id` and `no_token_id` during event discovery from the Gamma API `tokens` array.
 
 Add config:
 
@@ -3519,7 +3519,7 @@ ws_ping_interval_secs = 30
 Wire into `main.rs`:
 
 ```rust
-// After market scoring, gather token_ids for top-20 markets
+// After market scoring, gather token_ids for top-50 events' markets
 // Spawn: tokio::spawn(book_stream_manager.run(token_ids))
 ```
 

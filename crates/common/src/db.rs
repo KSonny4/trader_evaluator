@@ -37,8 +37,10 @@ impl AsyncDb {
                 .call(|conn| -> std::result::Result<(), rusqlite::Error> {
                     conn.busy_timeout(std::time::Duration::from_secs(1))?;
                     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+                    migrate_rename_market_scores_daily_to_market_scores(conn)?;
                     conn.execute_batch(SCHEMA)?;
                     migrate_markets_is_crypto_15m(conn)?;
+                    migrate_wallet_features_domain_columns(conn)?;
                     migrate_wallet_features_ag_columns(conn)?;
                     // For normal runtime operations we still want a longer busy_timeout.
                     conn.busy_timeout(std::time::Duration::from_secs(30))?;
@@ -158,11 +160,37 @@ impl Database {
     }
 
     pub fn run_migrations(&self) -> Result<()> {
+        migrate_rename_market_scores_daily_to_market_scores(&self.conn)
+            .map_err(anyhow::Error::from)?;
         self.conn.execute_batch(SCHEMA)?;
         migrate_markets_is_crypto_15m(&self.conn).map_err(anyhow::Error::from)?;
+        migrate_wallet_features_domain_columns(&self.conn).map_err(anyhow::Error::from)?;
         migrate_wallet_features_ag_columns(&self.conn).map_err(anyhow::Error::from)?;
         Ok(())
     }
+}
+
+/// Rename table market_scores_daily → market_scores (for existing DBs).
+fn migrate_rename_market_scores_daily_to_market_scores(
+    conn: &Connection,
+) -> std::result::Result<(), rusqlite::Error> {
+    let old_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='market_scores_daily'",
+        [],
+        |row| row.get(0),
+    )?;
+    let new_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='market_scores'",
+        [],
+        |row| row.get(0),
+    )?;
+    if old_exists > 0 && new_exists == 0 {
+        conn.execute(
+            "ALTER TABLE market_scores_daily RENAME TO market_scores",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 /// Add is_crypto_15m column to markets if missing (for existing DBs created before Task 14).
@@ -192,8 +220,8 @@ fn migrate_wallet_features_ag_columns(
         ("mid_fill_ratio", "REAL NOT NULL DEFAULT 0.0"),
         ("extreme_price_ratio", "REAL NOT NULL DEFAULT 0.0"),
         ("burstiness_top_1h_ratio", "REAL NOT NULL DEFAULT 0.0"),
-        ("top_category", "TEXT"),
-        ("top_category_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("top_domain", "TEXT"),
+        ("top_domain_ratio", "REAL NOT NULL DEFAULT 0.0"),
     ];
     for (name, ty) in required {
         let has: i64 = conn.query_row(
@@ -207,6 +235,31 @@ fn migrate_wallet_features_ag_columns(
                 [],
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Rename top_category -> top_domain (domain hierarchy terminology).
+/// Skip if top_domain already exists (e.g. from a previous ag_columns add), to avoid duplicate column.
+fn migrate_wallet_features_domain_columns(
+    conn: &Connection,
+) -> std::result::Result<(), rusqlite::Error> {
+    let has_old: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('wallet_features_daily') WHERE name='top_category'",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_new: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('wallet_features_daily') WHERE name='top_domain'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_old > 0 && has_new == 0 {
+        conn.execute(
+            "ALTER TABLE wallet_features_daily RENAME COLUMN top_category TO top_domain",
+            [],
+        )?;
+        conn.execute("ALTER TABLE wallet_features_daily RENAME COLUMN top_category_ratio TO top_domain_ratio", [])?;
     }
     Ok(())
 }
@@ -232,15 +285,15 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
 );
 
 CREATE TABLE IF NOT EXISTS markets (
-    condition_id TEXT PRIMARY KEY,
+    condition_id TEXT PRIMARY KEY,  -- market (outcome within event)
     title TEXT NOT NULL,
     slug TEXT,
     description TEXT,
     end_date TEXT,
     liquidity REAL,
     volume REAL,
-    category TEXT,
-    event_slug TEXT,
+    category TEXT,                 -- domain (Polymarket: Sports, Politics, Crypto)
+    event_slug TEXT,               -- event (e.g. sparta-slavia)
     outcomes_json TEXT,              -- raw JSON of outcome tokens
     is_crypto_15m INTEGER NOT NULL DEFAULT 0,  -- 1 = quartic taker fee applies
     first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -323,9 +376,9 @@ CREATE TABLE IF NOT EXISTS holders_snapshots (
     snapshot_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS market_scores_daily (
+CREATE TABLE IF NOT EXISTS market_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    condition_id TEXT NOT NULL,
+    condition_id TEXT NOT NULL,     -- market; we aggregate to event via event_slug
     score_date TEXT NOT NULL,
     mscore REAL NOT NULL,
     liquidity_score REAL,
@@ -336,6 +389,18 @@ CREATE TABLE IF NOT EXISTS market_scores_daily (
     rank INTEGER,
     notes TEXT,
     UNIQUE(condition_id, score_date)
+);
+
+CREATE TABLE IF NOT EXISTS scoring_stats (
+    score_date TEXT PRIMARY KEY,
+    total_events_evaluated INTEGER NOT NULL,
+    top_events_selected INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discovery_scheduler_state (
+    key TEXT PRIMARY KEY,
+    value_int INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS wallet_features_daily (
@@ -362,8 +427,8 @@ CREATE TABLE IF NOT EXISTS wallet_features_daily (
     mid_fill_ratio REAL NOT NULL DEFAULT 0.0,
     extreme_price_ratio REAL NOT NULL DEFAULT 0.0,
     burstiness_top_1h_ratio REAL NOT NULL DEFAULT 0.0,
-    top_category TEXT,
-    top_category_ratio REAL NOT NULL DEFAULT 0.0,
+    top_domain TEXT,               -- dominant domain (wallet's lane)
+    top_domain_ratio REAL NOT NULL DEFAULT 0.0,
     UNIQUE(proxy_wallet, feature_date, window_days)
 );
 
@@ -482,7 +547,7 @@ CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_created_at ON paper_trades(created_at);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_triggered_by_trade_id ON paper_trades(triggered_by_trade_id);
 CREATE INDEX IF NOT EXISTS idx_wallets_discovered_at ON wallets(discovered_at);
-CREATE INDEX IF NOT EXISTS idx_market_scores_date_rank ON market_scores_daily(score_date, rank);
+CREATE INDEX IF NOT EXISTS idx_market_scores_date_rank ON market_scores(score_date, rank);
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date ON wallet_scores_daily(score_date);
 CREATE INDEX IF NOT EXISTS idx_wallet_scores_date_window_wscore ON wallet_scores_daily(score_date, window_days, wscore DESC);
 CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
@@ -543,7 +608,9 @@ mod tests {
         assert!(tables.contains(&"activity_raw".to_string()));
         assert!(tables.contains(&"positions_snapshots".to_string()));
         assert!(tables.contains(&"holders_snapshots".to_string()));
-        assert!(tables.contains(&"market_scores_daily".to_string()));
+        assert!(tables.contains(&"market_scores".to_string()));
+        assert!(tables.contains(&"scoring_stats".to_string()));
+        assert!(tables.contains(&"discovery_scheduler_state".to_string()));
         assert!(tables.contains(&"wallet_features_daily".to_string()));
         assert!(tables.contains(&"paper_trades".to_string()));
         assert!(tables.contains(&"paper_positions".to_string()));
@@ -619,8 +686,8 @@ mod tests {
             "mid_fill_ratio",
             "extreme_price_ratio",
             "burstiness_top_1h_ratio",
-            "top_category",
-            "top_category_ratio",
+            "top_domain",
+            "top_domain_ratio",
         ] {
             assert!(
                 cols.contains(&col.to_string()),

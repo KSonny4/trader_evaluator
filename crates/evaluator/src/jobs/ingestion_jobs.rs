@@ -7,32 +7,50 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
     db: &AsyncDb,
     pager: &P,
     limit: u32,
+    wallets_limit: u32,
 ) -> Result<(u64, u64)> {
+    // Put wallets that already have recent trades first; then wallets with no trades or too-old
+    // trades so we (re)download for them.
     let wallets: Vec<String> = db
-        .call_named("run_trades_ingestion.wallets_select", |conn| {
+        .call_named("run_trades_ingestion.wallets_select", move |conn| {
             let mut stmt = conn.prepare(
                 "
-                SELECT proxy_wallet
-                FROM wallets
-                WHERE is_active = 1
-                ORDER BY discovered_at DESC
-                LIMIT 500
+                SELECT w.proxy_wallet
+                FROM wallets w
+                WHERE w.is_active = 1
+                ORDER BY
+                  CASE
+                    WHEN (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) > 0
+                     AND (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
+                          FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) <= 30
+                    THEN 0
+                    ELSE 1
+                  END,
+                  w.discovered_at DESC
+                LIMIT ?1
                 ",
             )?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([i64::from(wallets_limit)], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .await?;
 
+    let total = wallets.len();
+    if total > 0 {
+        tracing::info!(wallets = total, first = %wallets[0], "trades_ingestion: processing wallets");
+    }
     let mut pages = 0_u64;
     let mut inserted = 0_u64;
-    for w in wallets {
-        match crate::ingestion::ingest_trades_for_wallet(db, pager, &w, limit).await {
+    for (i, w) in wallets.iter().enumerate() {
+        match crate::ingestion::ingest_trades_for_wallet(db, pager, w, limit).await {
             Ok((p, ins)) => {
                 pages += p;
                 inserted += ins;
+                if (i + 1) % 100 == 0 || i == 0 {
+                    tracing::info!(n = i + 1, total, inserted, "trades_ingestion: progress");
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -51,20 +69,30 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
     db: &AsyncDb,
     pager: &P,
     limit: u32,
+    wallets_limit: u32,
 ) -> Result<u64> {
+    // Same as trades: wallets with recent trades first; then no trades or too old (re)download.
     let wallets: Vec<String> = db
-        .call_named("run_activity_ingestion.wallets_select", |conn| {
+        .call_named("run_activity_ingestion.wallets_select", move |conn| {
             let mut stmt = conn.prepare(
                 "
-                SELECT proxy_wallet
-                FROM wallets
-                WHERE is_active = 1
-                ORDER BY discovered_at DESC
-                LIMIT 500
+                SELECT w.proxy_wallet
+                FROM wallets w
+                WHERE w.is_active = 1
+                ORDER BY
+                  CASE
+                    WHEN (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) > 0
+                     AND (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
+                          FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) <= 30
+                    THEN 0
+                    ELSE 1
+                  END,
+                  w.discovered_at DESC
+                LIMIT ?1
                 ",
             )?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([i64::from(wallets_limit)], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -140,20 +168,21 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
     db: &AsyncDb,
     pager: &P,
     limit: u32,
+    wallets_limit: u32,
 ) -> Result<u64> {
     let wallets: Vec<String> = db
-        .call_named("run_positions_snapshot.wallets_select", |conn| {
+        .call_named("run_positions_snapshot.wallets_select", move |conn| {
             let mut stmt = conn.prepare(
                 "
                 SELECT proxy_wallet
                 FROM wallets
                 WHERE is_active = 1
                 ORDER BY discovered_at DESC
-                LIMIT 500
+                LIMIT ?1
                 ",
             )?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map([i64::from(wallets_limit)], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -236,8 +265,8 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
             let mut stmt = conn.prepare(
                 "
                 SELECT condition_id
-                FROM market_scores_daily
-                WHERE score_date = date('now')
+                FROM market_scores
+                WHERE score_date = (SELECT MAX(score_date) FROM market_scores)
                 ORDER BY rank ASC
                 LIMIT 20
                 ",
@@ -367,7 +396,9 @@ mod tests {
         .unwrap();
 
         let pager = OnePagePager;
-        let (_pages, inserted) = run_trades_ingestion_once(&db, &pager, 100).await.unwrap();
+        let (_pages, inserted) = run_trades_ingestion_once(&db, &pager, 100, 500)
+            .await
+            .unwrap();
         assert_eq!(inserted, 1);
     }
 }

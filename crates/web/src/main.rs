@@ -13,8 +13,9 @@ use axum::routing::get;
 use axum::{Form, Router};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use models::{
-    ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow, PersonaFunnelStage,
-    RankingRow, SystemStatus, TrackingHealth, WalletJourney, WalletOverview, WalletRow,
+    EventRow, ExcludedWalletRow, FunnelStage, MarketRow, PaperSummary, PaperTradeRow,
+    PersonaFunnelStage, RankingRow, SuitablePersonaRow, SystemStatus, TrackingHealth,
+    UnifiedFunnelStage, WalletJourney, WalletRow,
 };
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
@@ -372,15 +373,52 @@ struct PersonaFunnelBarTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "partials/unified_funnel_bar.html")]
+struct UnifiedFunnelBarTemplate {
+    stages: Vec<UnifiedFunnelStage>,
+}
+
+#[derive(Template)]
 #[template(path = "partials/markets.html")]
 struct MarketsTemplate {
     markets: Vec<MarketRow>,
 }
 
 #[derive(Template)]
+#[template(path = "partials/events.html")]
+struct EventsTemplate {
+    events: Vec<EventRow>,
+    events_selected: i64,
+    events_evaluated: i64,
+}
+
+#[derive(Template)]
 #[template(path = "partials/wallets.html")]
 struct WalletsTemplate {
-    overview: WalletOverview,
+    wallets: Vec<WalletRow>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/suitable_personas.html")]
+struct SuitablePersonasTemplate {
+    personas: Vec<SuitablePersonaRow>,
+    suitable_count: i64,
+    evaluated_count: i64,
+    excluded_count: i64,
+    recent_exclusions: Vec<ExcludedWalletRow>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/personas_summary_bar.html")]
+struct PersonasSummaryBarTemplate {
+    suitable_count: i64,
+    evaluated_count: i64,
+    excluded_count: i64,
+}
+
+#[derive(Template)]
+#[template(path = "partials/paper_traded_wallets.html")]
+struct PaperTradedWalletsTemplate {
     wallets: Vec<WalletRow>,
 }
 
@@ -560,31 +598,14 @@ async fn status_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
 }
 
-async fn funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let funnel_stage_infos = state.funnel_stage_infos.clone();
+async fn unified_funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), move |conn| {
-        let counts = queries::funnel_counts(conn)?;
-        Ok(counts.to_stages(&funnel_stage_infos))
-    })
-    .await
-    {
-        Ok(stages) => Html(FunnelBarTemplate { stages }.to_string()).into_response(),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("DB unavailable: {e}"),
-        )
-            .into_response(),
-    }
-}
-
-async fn persona_funnel_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match with_db(state.clone(), move |conn| {
-        let counts = queries::persona_funnel_counts(conn)?;
+        let counts = queries::unified_funnel_counts(conn)?;
         Ok(counts.to_stages())
     })
     .await
     {
-        Ok(stages) => Html(PersonaFunnelBarTemplate { stages }.to_string()).into_response(),
+        Ok(stages) => Html(UnifiedFunnelBarTemplate { stages }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -604,17 +625,35 @@ async fn markets_partial(State(state): State<Arc<AppState>>) -> impl IntoRespons
     }
 }
 
+async fn events_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match with_db(state.clone(), move |conn| {
+        let events = queries::top_events(conn, 10)?;
+        let (events_selected, events_evaluated) = queries::events_counts(conn)?;
+        Ok(EventsTemplate {
+            events,
+            events_selected,
+            events_evaluated,
+        })
+    })
+    .await
+    {
+        Ok(tmpl) => Html(tmpl.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), move |conn| {
-        let overview = queries::wallet_overview(conn)?;
-        let wallets = queries::recent_wallets(conn, 20)?;
-        Ok((overview, wallets))
+        let wallets = queries::recent_wallets(conn, 10)?;
+        Ok(wallets)
     })
     .await
     {
-        Ok((overview, wallets)) => {
-            Html(WalletsTemplate { overview, wallets }.to_string()).into_response()
-        }
+        Ok(wallets) => Html(WalletsTemplate { wallets }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -623,15 +662,33 @@ async fn wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoRespons
     }
 }
 
-async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn suitable_personas_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), move |conn| {
-        let health = queries::tracking_health(conn)?;
-        let stale = queries::stale_wallets(conn)?;
-        Ok((health, stale))
+        let personas = queries::suitable_personas_wallets(conn, 20)?;
+        let (suitable_count, evaluated_count) = queries::suitable_personas_counts(conn)?;
+        let excluded_count = queries::excluded_wallets_count(conn)?;
+        let recent_exclusions = queries::excluded_wallets_latest(conn, 5, 0)?;
+        Ok((
+            personas,
+            suitable_count,
+            evaluated_count,
+            excluded_count,
+            recent_exclusions,
+        ))
     })
     .await
     {
-        Ok((health, stale)) => Html(TrackingTemplate { health, stale }.to_string()).into_response(),
+        Ok((personas, suitable_count, evaluated_count, excluded_count, recent_exclusions)) => Html(
+            SuitablePersonasTemplate {
+                personas,
+                suitable_count,
+                evaluated_count,
+                excluded_count,
+                recent_exclusions,
+            }
+            .to_string(),
+        )
+        .into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -640,28 +697,39 @@ async fn tracking_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
     }
 }
 
-async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let bankroll = state.paper_bankroll_usdc;
-    let max_total_exposure_pct = state.max_total_exposure_pct;
-    let max_daily_loss_pct = state.max_daily_loss_pct;
-    let max_concurrent_positions = state.max_concurrent_positions;
-
+async fn personas_summary_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), move |conn| {
-        let summary = queries::paper_summary(
-            conn,
-            bankroll,
-            max_total_exposure_pct,
-            max_daily_loss_pct,
-            max_concurrent_positions,
-        )?;
-        let trades = queries::recent_paper_trades(conn, 20)?;
-        Ok((summary, trades))
+        let (suitable_count, evaluated_count) = queries::suitable_personas_counts(conn)?;
+        let excluded_count = queries::excluded_wallets_count(conn)?;
+        Ok((suitable_count, evaluated_count, excluded_count))
     })
     .await
     {
-        Ok((summary, trades)) => {
-            Html(PaperTemplate { summary, trades }.to_string()).into_response()
-        }
+        Ok((suitable_count, evaluated_count, excluded_count)) => Html(
+            PersonasSummaryBarTemplate {
+                suitable_count,
+                evaluated_count,
+                excluded_count,
+            }
+            .to_string(),
+        )
+        .into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn paper_traded_wallets_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match with_db(state.clone(), move |conn| {
+        let wallets = queries::paper_traded_wallets_list(conn, 20)?;
+        Ok(wallets)
+    })
+    .await
+    {
+        Ok(wallets) => Html(PaperTradedWalletsTemplate { wallets }.to_string()).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -672,7 +740,7 @@ async fn paper_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match with_db(state.clone(), move |conn| {
-        queries::top_rankings(conn, 30, 20)
+        queries::follow_worthy_rankings(conn, None)
     })
     .await
     {
@@ -837,12 +905,19 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/excluded", get(excluded_page))
         .route("/journey/{wallet}", get(journey_page))
         .route("/partials/status", get(status_partial))
-        .route("/partials/funnel", get(funnel_partial))
-        .route("/partials/persona_funnel", get(persona_funnel_partial))
+        .route("/partials/unified_funnel", get(unified_funnel_partial))
         .route("/partials/markets", get(markets_partial))
+        .route("/partials/events", get(events_partial))
         .route("/partials/wallets", get(wallets_partial))
-        .route("/partials/tracking", get(tracking_partial))
-        .route("/partials/paper", get(paper_partial))
+        .route(
+            "/partials/suitable_personas",
+            get(suitable_personas_partial),
+        )
+        .route("/partials/personas_summary", get(personas_summary_partial))
+        .route(
+            "/partials/paper_traded_wallets",
+            get(paper_traded_wallets_partial),
+        )
         .route("/partials/rankings", get(rankings_partial))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1657,12 +1732,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_funnel_partial_returns_200() {
+    async fn test_unified_funnel_partial_returns_200() {
         let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/funnel")
+                    .uri("/partials/unified_funnel")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1672,12 +1747,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_funnel_partial_contains_stages() {
+    async fn test_unified_funnel_partial_contains_stages() {
         let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/funnel")
+                    .uri("/partials/unified_funnel")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1687,25 +1762,11 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Markets"));
-        assert!(html.contains("Scored"));
-        assert!(html.contains("Wallets"));
-        assert!(html.contains("Ranked"));
-    }
-
-    #[tokio::test]
-    async fn test_persona_funnel_partial_returns_200() {
-        let app = create_test_app();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/partials/persona_funnel")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert!(html.contains("Events"));
+        assert!(html.contains("All wallets"));
+        assert!(html.contains("Suitable personas wallets"));
+        assert!(html.contains("Actively paper traded"));
+        assert!(html.contains("Worth following"));
     }
 
     #[tokio::test]
@@ -1923,7 +1984,41 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("No markets scored today"));
+        assert!(html.contains("No markets scored."));
+    }
+
+    #[tokio::test]
+    async fn test_events_partial_returns_200() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_events_partial_empty_shows_message() {
+        let app = create_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/partials/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("No events scored."));
     }
 
     #[tokio::test]
@@ -1942,7 +2037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wallets_partial_contains_overview() {
+    async fn test_wallets_partial_contains_table_or_empty_message() {
         let app = create_test_app();
         let response = app
             .oneshot(
@@ -1957,18 +2052,19 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Total"));
-        assert!(html.contains("Active"));
-        assert!(html.contains("Holders"));
+        assert!(
+            html.contains("Wallet") && html.contains("Source")
+                || html.contains("No wallets discovered yet")
+        );
     }
 
     #[tokio::test]
-    async fn test_tracking_partial_returns_200() {
+    async fn test_suitable_personas_partial_returns_200() {
         let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/tracking")
+                    .uri("/partials/suitable_personas")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1978,34 +2074,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tracking_partial_contains_data_types() {
+    async fn test_personas_summary_partial_returns_200_and_counts() {
         let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/tracking")
+                    .uri("/partials/personas_summary")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Trades"));
-        assert!(html.contains("Activity"));
-        assert!(html.contains("Positions"));
-        assert!(html.contains("Holders"));
+        assert!(
+            html.contains("data-tip="),
+            "personas summary should have tooltips"
+        );
+        assert!(
+            html.contains("text-green-400")
+                && html.contains("text-amber-400")
+                && html.contains("text-red-400")
+        );
     }
 
     #[tokio::test]
-    async fn test_paper_partial_returns_200() {
+    async fn test_paper_traded_wallets_partial_returns_200() {
         let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/paper")
+                    .uri("/partials/paper_traded_wallets")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2015,12 +2117,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_paper_partial_empty_shows_message() {
+    async fn test_paper_traded_wallets_partial_empty_shows_message() {
         let app = create_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/partials/paper")
+                    .uri("/partials/paper_traded_wallets")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2030,7 +2132,7 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("No paper trades yet"));
+        assert!(html.contains("No wallets actively paper traded yet"));
     }
 
     #[tokio::test]
@@ -2052,11 +2154,13 @@ mod tests {
     async fn test_all_partials_return_200() {
         let routes = vec![
             "/partials/status",
-            "/partials/funnel",
+            "/partials/unified_funnel",
             "/partials/markets",
+            "/partials/events",
             "/partials/wallets",
-            "/partials/tracking",
-            "/partials/paper",
+            "/partials/suitable_personas",
+            "/partials/personas_summary",
+            "/partials/paper_traded_wallets",
             "/partials/rankings",
         ];
         for route in routes {
@@ -2085,11 +2189,11 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("hx-get=\"/partials/status\""));
-        assert!(html.contains("hx-get=\"/partials/funnel\""));
-        assert!(html.contains("hx-get=\"/partials/markets\""));
+        assert!(html.contains("hx-get=\"/partials/unified_funnel\""));
+        assert!(html.contains("hx-get=\"/partials/events\""));
         assert!(html.contains("hx-get=\"/partials/wallets\""));
-        assert!(html.contains("hx-get=\"/partials/tracking\""));
-        assert!(html.contains("hx-get=\"/partials/paper\""));
+        assert!(html.contains("hx-get=\"/partials/suitable_personas\""));
+        assert!(html.contains("hx-get=\"/partials/paper_traded_wallets\""));
         assert!(html.contains("hx-get=\"/partials/rankings\""));
         assert!(html.contains("every 30s"));
         assert!(html.contains("every 60s"));
@@ -2111,7 +2215,7 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("No wallet scores for today"));
+        assert!(html.contains("No wallet scores."));
     }
 
     #[tokio::test]

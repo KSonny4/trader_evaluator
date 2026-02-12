@@ -63,7 +63,7 @@ pub struct FlowCounts {
 pub fn compute_flow_counts(conn: &Connection) -> Result<FlowCounts> {
     let markets_fetched: i64 = conn.query_row("SELECT COUNT(*) FROM markets", [], |r| r.get(0))?;
     let markets_scored_today: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now')",
+        "SELECT COUNT(*) FROM market_scores WHERE score_date = date('now')",
         [],
         |r| r.get(0),
     )?;
@@ -169,7 +169,7 @@ mod tests {
             .unwrap();
         db.conn
             .execute(
-                "INSERT INTO market_scores_daily (condition_id, score_date, mscore, rank) VALUES ('c1', date('now'), 1.0, 1)",
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('c1', date('now'), 1.0, 1)",
                 [],
             )
             .unwrap();

@@ -56,20 +56,32 @@ async fn main() -> Result<()> {
     ));
 
     // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
+    // Order: event_scoring first (wallet_discovery reads market_scores). Then run
+    // wallet_discovery, leaderboard_discovery, and recovery in parallel (they are independent).
+    // Finally wallet_rules (needs wallets to exist).
     tracing::info!("bootstrap: seeding markets and wallets");
 
-    match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
-        Ok(n) => tracing::info!(inserted = n, "bootstrap: market_scoring done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: market_scoring failed"),
+    match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
     }
 
-    match jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref()).await {
+    let (wallet_res, leaderboard_res, recovery_res) = tokio::join!(
+        jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref()),
+        jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
+        jobs::run_recovery_once(&db, cfg.as_ref()),
+    );
+    match wallet_res {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
     }
-    match jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()).await {
+    match leaderboard_res {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: leaderboard_discovery done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
+    }
+    match recovery_res {
+        Ok(n) => tracing::info!(paper_trades = n, "recovery done"),
+        Err(e) => tracing::error!(error = %e, "recovery failed"),
     }
 
     match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
@@ -77,19 +89,10 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
     }
 
-    // Recovery: process any work that was in progress when the process was last killed.
-    // Paper tick is idempotent (keyed by triggered_by_trade_id); ingestion jobs use
-    // INSERT OR IGNORE so the next scheduled run will catch up.
-    tracing::info!("recovery: processing any in-flight paper trades");
-    match jobs::run_recovery_once(&db, cfg.as_ref()).await {
-        Ok(n) => tracing::info!(paper_trades = n, "recovery done"),
-        Err(e) => tracing::error!(error = %e, "recovery failed"),
-    }
-
     tracing::info!("bootstrap done — starting scheduler (ingestion runs immediately)");
 
     // ── Periodic scheduler ──
-    let (market_scoring_tx, mut market_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (event_scoring_tx, mut event_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (wallet_discovery_tx, mut wallet_discovery_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (trades_ingestion_tx, mut trades_ingestion_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (activity_ingestion_tx, mut activity_ingestion_rx) = tokio::sync::mpsc::channel::<()>(8);
@@ -109,9 +112,9 @@ async fn main() -> Result<()> {
         .eq_ignore_ascii_case("continuous");
 
     let mut scheduler_jobs = vec![scheduler::JobSpec {
-        name: "market_scoring".to_string(),
+        name: "event_scoring".to_string(),
         interval: std::time::Duration::from_secs(cfg.market_scoring.refresh_interval_secs),
-        tick: market_scoring_tx,
+        tick: event_scoring_tx,
         run_immediately: false,
     }];
     if !discovery_continuous {
@@ -167,9 +170,9 @@ async fn main() -> Result<()> {
         },
         scheduler::JobSpec {
             name: "persona_classification".to_string(),
-            interval: std::time::Duration::from_secs(86400),
+            interval: std::time::Duration::from_secs(3600), // every hour
             tick: persona_classification_tx,
-            run_immediately: false,
+            run_immediately: true,
         },
         scheduler::JobSpec {
             name: "wal_checkpoint".to_string(),
@@ -191,12 +194,12 @@ async fn main() -> Result<()> {
         let cfg = cfg.clone();
         let db = db.clone();
         async move {
-            while market_scoring_rx.recv().await.is_some() {
-                let span = tracing::info_span!("job_run", job = "market_scoring");
+            while event_scoring_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "event_scoring");
                 let _g = span.enter();
-                match jobs::run_market_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
-                    Ok(n) => tracing::info!(inserted = n, "market_scoring done"),
-                    Err(e) => tracing::error!(error = %e, "market_scoring failed"),
+                match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+                    Ok(n) => tracing::info!(inserted = n, "event_scoring done"),
+                    Err(e) => tracing::error!(error = %e, "event_scoring failed"),
                 }
             }
         }
@@ -277,12 +280,14 @@ async fn main() -> Result<()> {
 
     tokio::spawn({
         let api = api.clone();
+        let cfg = cfg.clone();
         let db = db.clone();
         async move {
             while trades_ingestion_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "trades_ingestion");
                 let _g = span.enter();
-                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200).await {
+                let w = cfg.ingestion.wallets_per_ingestion_run;
+                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200, w).await {
                     Ok((_pages, inserted)) => {
                         tracing::info!(inserted, "trades_ingestion done");
                     }
@@ -294,12 +299,14 @@ async fn main() -> Result<()> {
 
     tokio::spawn({
         let api = api.clone();
+        let cfg = cfg.clone();
         let db = db.clone();
         async move {
             while activity_ingestion_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "activity_ingestion");
                 let _g = span.enter();
-                match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200).await {
+                let w = cfg.ingestion.wallets_per_ingestion_run;
+                match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200, w).await {
                     Ok(inserted) => tracing::info!(inserted, "activity_ingestion done"),
                     Err(e) => tracing::error!(error = %e, "activity_ingestion failed"),
                 }
@@ -309,12 +316,14 @@ async fn main() -> Result<()> {
 
     tokio::spawn({
         let api = api.clone();
+        let cfg = cfg.clone();
         let db = db.clone();
         async move {
             while positions_snapshot_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "positions_snapshot");
                 let _g = span.enter();
-                match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200).await {
+                let w = cfg.ingestion.wallets_per_ingestion_run;
+                match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200, w).await {
                     Ok(inserted) => tracing::info!(inserted, "positions_snapshot done"),
                     Err(e) => tracing::error!(error = %e, "positions_snapshot failed"),
                 }

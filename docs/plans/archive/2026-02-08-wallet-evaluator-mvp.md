@@ -476,7 +476,7 @@ mod tests {
         assert!(tables.contains(&"activity_raw".to_string()));
         assert!(tables.contains(&"positions_snapshots".to_string()));
         assert!(tables.contains(&"holders_snapshots".to_string()));
-        assert!(tables.contains(&"market_scores_daily".to_string()));
+        assert!(tables.contains(&"market_scores".to_string()));
         assert!(tables.contains(&"wallet_features_daily".to_string()));
         assert!(tables.contains(&"paper_trades".to_string()));
         assert!(tables.contains(&"paper_positions".to_string()));
@@ -627,7 +627,7 @@ CREATE TABLE IF NOT EXISTS holders_snapshots (
     snapshot_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS market_scores_daily (
+CREATE TABLE IF NOT EXISTS market_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     condition_id TEXT NOT NULL,
     score_date TEXT NOT NULL,
@@ -1015,9 +1015,9 @@ check-phase-1: check-phase-0
 	@echo "=== Phase 1: Market Discovery ==="
 	@$(DB_CMD) "SELECT COUNT(*) FROM markets" | \
 		awk '{if ($$1 == 0) {print "FAIL: no markets"; exit 1} else print "OK: " $$1 " markets"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now')" | \
+	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores WHERE score_date = date('now')" | \
 		awk '{if ($$1 == 0) {print "FAIL: no market scores today"; exit 1} else print "OK: " $$1 " market scores today"}'
-	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores_daily WHERE score_date = date('now') AND rank <= 20" | \
+	@$(DB_CMD) "SELECT COUNT(*) FROM market_scores WHERE score_date = date('now') AND rank <= 20" | \
 		awk '{print "OK: " $$1 " top-20 markets selected"}'
 	@echo "Phase 1: PASSED"
 
@@ -1080,7 +1080,7 @@ check-tables:
 status:
 	@echo "=== Pipeline Status ==="
 	@$(DB_CMD) "SELECT 'markets:            ' || COUNT(*) FROM markets"
-	@$(DB_CMD) "SELECT 'market scores today: ' || COUNT(*) FROM market_scores_daily WHERE score_date = date('now')"
+	@$(DB_CMD) "SELECT 'market scores today: ' || COUNT(*) FROM market_scores WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'wallets:            ' || COUNT(*) FROM wallets"
 	@$(DB_CMD) "SELECT 'wallet personas:    ' || COUNT(*) FROM wallet_personas"
 	@$(DB_CMD) "SELECT 'wallet exclusions:  ' || COUNT(*) FROM wallet_exclusions"

@@ -528,6 +528,17 @@ mod tests {
     }
 
     #[test]
+    fn test_effective_event_slug_from_events_array() {
+        let json = include_str!("../../../tests/fixtures/gamma_markets_sample.json");
+        let markets: Vec<GammaMarket> = serde_json::from_str(json).unwrap();
+        let m = &markets[0];
+        assert_eq!(
+            m.effective_event_slug().as_deref(),
+            Some("will-joe-biden-get-coronavirus-before-the-election")
+        );
+    }
+
+    #[test]
     fn test_parse_fixture_trades() {
         let json = include_str!("../../../tests/fixtures/trades_sample.json");
         let trades: Vec<ApiTrade> = serde_json::from_str(json).unwrap();

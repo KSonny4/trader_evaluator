@@ -131,7 +131,14 @@ impl CopyStrategy {
     }
 }
 
+/// Nested event from Gamma API markets response (events array).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GammaEventRef {
+    pub slug: Option<String>,
+}
+
 /// Market from Gamma API.
+/// Event slug: use `eventSlug` if present, else `events[0].slug` (Gamma nests event in events array).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GammaMarket {
     #[serde(rename = "conditionId")]
@@ -151,11 +158,31 @@ pub struct GammaMarket {
     /// 24-hour trading volume.
     #[serde(rename = "volume24hr", default, deserialize_with = "de_opt_string_any")]
     pub volume_24hr: Option<String>,
+    /// Domain (Polymarket category: Sports, Politics, Crypto, etc.)
     pub category: Option<String>,
+    /// Event slug (e.g. sparta-slavia) — identifies the event
     #[serde(rename = "eventSlug")]
     pub event_slug: Option<String>,
+    #[serde(default)]
+    pub events: Option<Vec<GammaEventRef>>,
     #[serde(rename = "negRisk")]
     pub neg_risk: Option<bool>,
+}
+
+impl GammaMarket {
+    /// Event slug for grouping: eventSlug, or events[0].slug when eventSlug is null.
+    pub fn effective_event_slug(&self) -> Option<String> {
+        self.event_slug
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.events
+                    .as_ref()
+                    .and_then(|e| e.first())
+                    .and_then(|e| e.slug.clone())
+                    .filter(|s| !s.is_empty())
+            })
+    }
 }
 
 /// Trade from Data API /trades.
