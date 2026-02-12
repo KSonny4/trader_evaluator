@@ -94,10 +94,10 @@ data_api_url = "https://data-api.polymarket.com"
 gamma_api_url = "https://gamma-api.polymarket.com"
 
 [personas]
-# Stage 1 fast filters
-stage1_min_wallet_age_days = 30
+# Stage 1 fast filters (longer window = more history before classifying)
+stage1_min_wallet_age_days = 45
 stage1_min_total_trades = 10
-stage1_max_inactive_days = 30
+stage1_max_inactive_days = 45
 # Known bot proxy addresses to exclude (e.g. "0x...")
 known_bots = []
 # Informed Specialist

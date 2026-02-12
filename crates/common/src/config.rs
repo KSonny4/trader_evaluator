@@ -326,7 +326,8 @@ mod tests {
     #[test]
     fn test_persona_config_loads() {
         let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
-        assert_eq!(config.personas.stage1_min_wallet_age_days, 30);
+        assert_eq!(config.personas.stage1_min_wallet_age_days, 45);
+        assert_eq!(config.personas.stage1_max_inactive_days, 45);
         assert_eq!(config.personas.stage1_min_total_trades, 10);
         assert!(config.personas.specialist_min_win_rate > 0.0);
         assert!(config.personas.generalist_min_sharpe > 0.0);

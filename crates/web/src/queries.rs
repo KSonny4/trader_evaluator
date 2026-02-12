@@ -193,7 +193,7 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
         let all_wallets: i64 = conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
         let suitable_personas: i64 =
             conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
-        // Evaluated = active, passed Stage 1, classified (persona or Stage 2 exclusion), and oldest trade >= 30 days ago.
+        // Evaluated = active, passed Stage 1, classified, and oldest trade >= 45 days ago (matches stage1_min_wallet_age_days).
         let personas_evaluated: i64 = conn.query_row(
             "
             SELECT COUNT(*)
@@ -209,7 +209,7 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
                            WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
               )
               AND (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
-                   FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 30
+                   FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 45
             ",
             [],
             |r| r.get(0),
@@ -250,7 +250,7 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
 }
 
 /// Returns (suitable_count, evaluated_count) for the suitable personas section.
-/// Evaluated counts only wallets whose oldest trade is at least 30 days ago (trade-based age, not scrape age).
+/// Evaluated = wallets whose oldest trade is at least 45 days ago (matches stage1_min_wallet_age_days).
 pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
     let suitable: i64 = conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
     let evaluated: i64 = conn.query_row(
@@ -268,7 +268,7 @@ pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
                        WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
           )
           AND (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
-               FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 30
+               FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= 45
         ",
         [],
         |r| r.get(0),
@@ -1494,12 +1494,12 @@ mod tests {
             [],
         )
         .unwrap();
-        // 0xold: oldest trade 40 days ago -> counts as evaluated.
-        let ts_40d = (Utc::now() - Duration::days(40)).timestamp();
+        // 0xold: oldest trade 50 days ago -> counts as evaluated (threshold 45 days).
+        let ts_50d = (Utc::now() - Duration::days(50)).timestamp();
         conn.execute(
             "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash)
              VALUES ('0xold', '0xm', 'BUY', 10.0, 0.5, ?1, '0xtx_old')",
-            rusqlite::params![ts_40d],
+            rusqlite::params![ts_50d],
         )
         .unwrap();
         // 0xnew: oldest trade 5 days ago -> does not count as evaluated.
@@ -1514,7 +1514,7 @@ mod tests {
         assert_eq!(suitable, 2, "both wallets have persona");
         assert_eq!(
             evaluated, 1,
-            "only wallet with trade >= 30 days ago counts as evaluated"
+            "only wallet with oldest trade >= 45 days ago counts as evaluated"
         );
     }
 
