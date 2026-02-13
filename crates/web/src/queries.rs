@@ -1097,16 +1097,16 @@ fn wallet_positions_summary(
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([proxy_wallet], |r| {
         Ok((
-            r.get::<_, String>(0)?,          // condition_id
-            r.get::<_, Option<String>>(1)?,  // title
-            r.get::<_, Option<String>>(2)?,  // outcome
-            r.get::<_, f64>(3)?,             // net_shares
-            r.get::<_, f64>(4)?,             // avg_entry_price
-            r.get::<_, f64>(5)?,             // total_bet
-            r.get::<_, i64>(6)?,             // trade_count
-            r.get::<_, Option<String>>(7)?,  // event_slug
-            r.get::<_, Option<String>>(8)?,  // slug
-            r.get::<_, i64>(9)?,             // is_active
+            r.get::<_, String>(0)?,         // condition_id
+            r.get::<_, Option<String>>(1)?, // title
+            r.get::<_, Option<String>>(2)?, // outcome
+            r.get::<_, f64>(3)?,            // net_shares
+            r.get::<_, f64>(4)?,            // avg_entry_price
+            r.get::<_, f64>(5)?,            // total_bet
+            r.get::<_, i64>(6)?,            // trade_count
+            r.get::<_, Option<String>>(7)?, // event_slug
+            r.get::<_, Option<String>>(8)?, // slug
+            r.get::<_, i64>(9)?,            // is_active
         ))
     })?;
 
@@ -1116,8 +1116,18 @@ fn wallet_positions_summary(
     let mut closed_count = 0;
 
     for row in rows {
-        let (condition_id, market_title, outcome, net_shares, avg_entry_price, total_bet,
-             trade_count, event_slug, slug, is_active) = row?;
+        let (
+            condition_id,
+            market_title,
+            outcome,
+            net_shares,
+            avg_entry_price,
+            total_bet,
+            trade_count,
+            event_slug,
+            slug,
+            is_active,
+        ) = row?;
 
         let pm_url = polymarket_url(event_slug.as_deref(), slug.as_deref());
         let position = WalletPositionRow {
@@ -3197,7 +3207,9 @@ mod tests {
         for i in 0..25 {
             let cond_id = format!("0xactive{i}");
             conn.execute(
-                &format!("INSERT INTO markets (condition_id, title) VALUES ('{cond_id}', 'Market {i}')"),
+                &format!(
+                    "INSERT INTO markets (condition_id, title) VALUES ('{cond_id}', 'Market {i}')"
+                ),
                 [],
             )
             .unwrap();
@@ -3212,7 +3224,9 @@ mod tests {
         for i in 0..15 {
             let cond_id = format!("0xclosed{i}");
             conn.execute(
-                &format!("INSERT INTO markets (condition_id, title) VALUES ('{cond_id}', 'Market {i}')"),
+                &format!(
+                    "INSERT INTO markets (condition_id, title) VALUES ('{cond_id}', 'Market {i}')"
+                ),
                 [],
             )
             .unwrap();
@@ -3233,12 +3247,26 @@ mod tests {
         let summary = wallet_positions_summary(&conn, "0xlimit", 20).unwrap();
 
         // Counts should include ALL positions
-        assert_eq!(summary.active_count, 25, "count should include all 25 active positions");
-        assert_eq!(summary.closed_count, 15, "count should include all 15 closed positions");
+        assert_eq!(
+            summary.active_count, 25,
+            "count should include all 25 active positions"
+        );
+        assert_eq!(
+            summary.closed_count, 15,
+            "count should include all 15 closed positions"
+        );
 
         // But data arrays should respect limit
-        assert_eq!(summary.active_positions.len(), 20, "should limit active data to 20");
-        assert_eq!(summary.closed_positions.len(), 15, "closed has <20 so all included");
+        assert_eq!(
+            summary.active_positions.len(),
+            20,
+            "should limit active data to 20"
+        );
+        assert_eq!(
+            summary.closed_positions.len(),
+            15,
+            "closed has <20 so all included"
+        );
     }
 
     /// Characterization test for unified_funnel_counts before CTE optimization.
@@ -3291,6 +3319,9 @@ mod tests {
         let counts = unified_funnel_counts(&conn).unwrap();
         assert_eq!(counts.all_wallets, 2);
         assert_eq!(counts.suitable_personas, 2);
-        assert_eq!(counts.personas_evaluated, 1, "only old wallet should be evaluated (>= 45 days)");
+        assert_eq!(
+            counts.personas_evaluated, 1,
+            "only old wallet should be evaluated (>= 45 days)"
+        );
     }
 }

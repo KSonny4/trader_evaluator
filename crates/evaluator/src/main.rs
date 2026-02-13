@@ -2,6 +2,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 mod cli;
+mod event_bus;
+mod events;
 mod flow_metrics;
 mod ingestion;
 mod jobs;
@@ -53,6 +55,14 @@ async fn main() -> Result<()> {
         cfg.ingestion.max_retries,
         std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
     ));
+
+    // ── Event Bus: Initialize if enabled (Phase 1 infrastructure, not yet used) ──
+    let _event_bus = if cfg.events.enabled {
+        tracing::info!("event bus enabled (capacity={})", cfg.events.bus_capacity);
+        Some(Arc::new(event_bus::EventBus::new(cfg.events.bus_capacity)))
+    } else {
+        None
+    };
 
     // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
     // Order: event_scoring first (wallet_discovery reads market_scores). Then run

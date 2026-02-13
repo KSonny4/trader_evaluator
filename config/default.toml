@@ -189,9 +189,17 @@ frequency_change_multiplier = 3.0
 size_change_multiplier = 10.0
 
 # Dashboard: cookie-based session auth when auth_password is set
+# Dashboard: cookie-based session auth when auth_password is set
 [web]
 port = 8080
 host = "127.0.0.1"
 auth_password = "recognize-parade-finalist-flatbed-stumble"
 # Trader microservice URL (when set, enables /trader/* proxy routes and "Follow" buttons)
 # trader_api_url = "http://aws-trader:8081"
+
+# Event-driven architecture (Phase 1: Infrastructure)
+# Feature flags OFF by default - zero behavior change
+[events]
+enabled = false              # Master kill switch - when false, event bus not initialized
+log_to_db = false            # Persist events to event_log table
+bus_capacity = 1000          # Buffer size for broadcast channels

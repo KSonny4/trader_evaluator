@@ -546,6 +546,13 @@ CREATE TABLE IF NOT EXISTS job_status (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS event_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,          -- pipeline, operational
+    event_data TEXT NOT NULL,          -- JSON serialized event
+    emitted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet_timestamp ON trades_raw(proxy_wallet, timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
@@ -569,6 +576,8 @@ CREATE INDEX IF NOT EXISTS idx_wallet_scores_date_window_wscore ON wallet_scores
 CREATE INDEX IF NOT EXISTS idx_wallet_personas_wallet ON wallet_personas(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_exclusions_wallet ON wallet_exclusions(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_persona_traits_wallet ON wallet_persona_traits(proxy_wallet);
+CREATE INDEX IF NOT EXISTS idx_event_log_emitted_at ON event_log(emitted_at);
+CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log(event_type);
 CREATE INDEX IF NOT EXISTS idx_wallet_rules_events_wallet ON wallet_rules_events(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_wallet_rules_events_phase_created_at ON wallet_rules_events(phase, created_at);
 
@@ -636,6 +645,7 @@ mod tests {
         assert!(tables.contains(&"wallet_persona_traits".to_string()));
         assert!(tables.contains(&"wallet_rules_state".to_string()));
         assert!(tables.contains(&"wallet_rules_events".to_string()));
+        assert!(tables.contains(&"event_log".to_string()));
     }
 
     #[test]
