@@ -102,7 +102,7 @@ cargo run -p evaluator -- rankings # CLI: WScore rankings
 - Always use git worktrees: `make worktree NAME=<name>`
 - TDD always (red-green-refactor). No production code without failing test.
 - CI must pass: test + clippy + fmt + coverage.
-- Agents NEVER push to `main` or merge PRs.
+- **Merging policy:** Agents can merge PRs when: (1) code review passes (if required by "NO PR WITHOUT CODE REVIEW" rule), (2) all tests pass, (3) following rapid-merge-workflow skill. Never push directly to `main` or merge without code review.
 - After merge: `make worktree-clean NAME=<name>`
 - First-time: `make setup-hooks`
 - **Always use `superpowers` skills** (brainstorming, TDD, systematic-debugging, verification-before-completion, requesting-code-review, etc.)
