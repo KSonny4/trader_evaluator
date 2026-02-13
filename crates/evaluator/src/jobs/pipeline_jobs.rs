@@ -688,6 +688,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         .min(TRADES_PAGES_CAP);
 
     let mut inserted = 0_u64;
+    let mut all_new_wallets = Vec::new();
     for (idx, condition_id) in markets.iter().enumerate() {
         if (idx + 1) % 10 == 0 || idx == 0 {
             tracing::info!(
@@ -755,11 +756,12 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
             .collect();
 
         let cid = condition_id.clone();
-        let page_inserted: u64 = db
+        let (page_inserted, new_wallets): (u64, Vec<String>) = db
             .call_named("wallet_discovery.insert_wallets_page", move |conn| {
                 let tx = conn.transaction()?;
 
                 let mut ins = 0_u64;
+                let mut newly_inserted = Vec::new();
                 for (proxy_wallet, discovered_from) in wallets_to_insert {
                     let changed = tx.execute(
                         "
@@ -768,16 +770,20 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
                         VALUES
                             (?1, ?2, ?3, 1)
                         ",
-                        rusqlite::params![proxy_wallet, discovered_from, cid],
+                        rusqlite::params![&proxy_wallet, &discovered_from, &cid],
                     )?;
-                    ins += changed as u64;
+                    if changed > 0 {
+                        newly_inserted.push(proxy_wallet);
+                        ins += 1;
+                    }
                 }
                 tx.commit()?;
-                Ok(ins)
+                Ok((ins, newly_inserted))
             })
             .await?;
 
         inserted += page_inserted;
+        all_new_wallets.extend(new_wallets);
     }
 
     metrics::counter!("evaluator_wallets_discovered_total").increment(inserted);
@@ -2472,5 +2478,100 @@ mod tests {
             meta_json.get("skipped").is_some(),
             "metadata should indicate skipping"
         );
+    }
+
+    #[tokio::test]
+    async fn test_wallet_discovery_tracks_new_wallets() {
+        use common::types::{ApiHolder, ApiHolderResponse, ApiTrade};
+
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert market score
+        db.call(|conn| {
+            Ok(conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('0xmarket', date('now'), 0.9, 1)",
+                [],
+            )?)
+        })
+        .await
+        .unwrap();
+
+        // Pre-insert one wallet as "existing"
+        db.call(|conn| {
+            Ok(conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xold', 'HOLDER', 1)",
+                [],
+            )?)
+        })
+        .await
+        .unwrap();
+
+        // Setup fake fetchers
+        let holders = FakeHoldersFetcher {
+            resp: vec![ApiHolderResponse {
+                token: None,
+                holders: vec![
+                    ApiHolder {
+                        proxy_wallet: Some("0xold".to_string()),
+                        amount: Some(100.0),
+                        asset: None,
+                        pseudonym: None,
+                        name: None,
+                        outcome_index: None,
+                    },
+                    ApiHolder {
+                        proxy_wallet: Some("0xnew1".to_string()),
+                        amount: Some(50.0),
+                        asset: None,
+                        pseudonym: None,
+                        name: None,
+                        outcome_index: None,
+                    },
+                ],
+            }],
+            raw: b"[]".to_vec(),
+        };
+
+        // Create trades from 0xnew2 (will exceed min_total_trades=5)
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![
+                ApiTrade {
+                    proxy_wallet: Some("0xnew2".to_string()),
+                    condition_id: Some("0xmarket".to_string()),
+                    ..Default::default()
+                },
+                ApiTrade {
+                    proxy_wallet: Some("0xnew2".to_string()),
+                    condition_id: Some("0xmarket".to_string()),
+                    ..Default::default()
+                },
+                ApiTrade {
+                    proxy_wallet: Some("0xnew2".to_string()),
+                    condition_id: Some("0xmarket".to_string()),
+                    ..Default::default()
+                },
+                ApiTrade {
+                    proxy_wallet: Some("0xnew2".to_string()),
+                    condition_id: Some("0xmarket".to_string()),
+                    ..Default::default()
+                },
+                ApiTrade {
+                    proxy_wallet: Some("0xnew2".to_string()),
+                    condition_id: Some("0xmarket".to_string()),
+                    ..Default::default()
+                },
+            ],
+            raw: b"[]".to_vec(),
+        };
+
+        // Discovery should insert 2 new wallets (0xnew1, 0xnew2)
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2, "should insert 2 new wallets");
+
+        // TODO: Verify that new_wallets list contains 0xnew1 and 0xnew2
+        // This will be validated when we add the spawn logic in next task
     }
 }
