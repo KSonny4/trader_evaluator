@@ -1447,8 +1447,18 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
             // Build feature map
             let mut feature_map = std::collections::HashMap::new();
             for (wallet, age, result) in features_results {
-                if let Ok(features) = result {
-                    feature_map.insert(wallet, (age, features));
+                match result {
+                    Ok(features) => {
+                        feature_map.insert(wallet, (age, features));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            proxy_wallet = %wallet,
+                            error = %e,
+                            "parallel path: compute_wallet_features failed"
+                        );
+                        // Still continues - consistent with serial behavior
+                    }
                 }
             }
 
