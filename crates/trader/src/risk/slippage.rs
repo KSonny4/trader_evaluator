@@ -60,6 +60,7 @@ pub async fn get_avg_slippage_cents(
 
 /// Check if slippage KILL trigger should fire (Strategy Bible §7.3).
 /// Returns true if avg slippage exceeds threshold.
+#[allow(dead_code)] // Used in tests; risk check uses get_avg_slippage_cents directly
 pub async fn should_kill_for_slippage(
     db: &Arc<TraderDb>,
     proxy_wallet: &str,

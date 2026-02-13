@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 /// Portfolio summary for API responses.
 #[derive(Debug, Serialize)]
+#[allow(dead_code)] // Used in tests and available for API
 pub struct PortfolioSummary {
     pub total_exposure_usd: f64,
     pub daily_pnl: f64,
@@ -15,6 +16,7 @@ pub struct PortfolioSummary {
 }
 
 /// Get portfolio summary from risk state.
+#[allow(dead_code)] // Used in tests and available for API
 pub async fn get_portfolio_summary(db: &Arc<TraderDb>) -> Result<PortfolioSummary> {
     let summary = db
         .call(|conn| {

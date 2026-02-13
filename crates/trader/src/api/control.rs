@@ -1,8 +1,9 @@
 use axum::{extract::State, http::StatusCode, Json};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::api::AppState;
+use crate::config::RiskConfig;
 
 #[derive(Serialize)]
 pub struct ControlResponse {
@@ -76,5 +77,20 @@ pub async fn get_risk(
 
     Ok(Json(RiskResponse {
         portfolio: risk_state,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateRiskRequest {
+    pub risk: RiskConfig,
+}
+
+pub async fn update_risk(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateRiskRequest>,
+) -> Result<Json<ControlResponse>, StatusCode> {
+    state.risk.update_config(req.risk).await;
+    Ok(Json(ControlResponse {
+        message: "risk parameters updated".to_string(),
     }))
 }

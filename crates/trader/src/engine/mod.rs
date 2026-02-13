@@ -1,13 +1,12 @@
 pub mod detector;
-#[allow(dead_code)]
 pub mod mirror;
-#[allow(dead_code)]
 pub mod settlement;
 pub mod watcher;
 
 use crate::config::TraderConfig;
 use crate::db::TraderDb;
 use crate::polymarket::TraderPolymarketClient;
+use crate::risk::RiskManager;
 use crate::types::{TradingMode, WalletStatus};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -20,43 +19,47 @@ use tracing::{error, info, warn};
 /// Handle to a running wallet watcher task.
 struct WatcherHandle {
     cancel: CancellationToken,
+    #[allow(dead_code)] // Stored for graceful shutdown via join
     handle: JoinHandle<()>,
 }
 
 /// Information about a followed wallet loaded from DB.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FollowedWallet {
     pub proxy_wallet: String,
+    #[allow(dead_code)] // Loaded from DB for future display
     pub label: Option<String>,
+    #[allow(dead_code)] // Loaded from DB for lifecycle management
     pub status: WalletStatus,
     pub trading_mode: TradingMode,
+    #[allow(dead_code)] // Loaded from DB for per-wallet risk overrides
     pub max_exposure_pct: Option<f64>,
     pub estimated_bankroll_usd: Option<f64>,
     pub last_trade_seen_hash: Option<String>,
 }
 
 /// The wallet engine orchestrates all wallet watchers.
-#[allow(dead_code)]
 pub struct WalletEngine {
     db: Arc<TraderDb>,
     client: Arc<TraderPolymarketClient>,
     config: Arc<TraderConfig>,
+    risk: Arc<RiskManager>,
     watchers: HashMap<String, WatcherHandle>,
     halted: Arc<AtomicBool>,
 }
 
-#[allow(dead_code)]
 impl WalletEngine {
     pub fn new(
         db: Arc<TraderDb>,
         client: Arc<TraderPolymarketClient>,
         config: Arc<TraderConfig>,
+        risk: Arc<RiskManager>,
     ) -> Self {
         Self {
             db,
             client,
             config,
+            risk,
             watchers: HashMap::new(),
             halted: Arc::new(AtomicBool::new(false)),
         }
@@ -184,17 +187,33 @@ impl WalletEngine {
             .await
             .context("failed to resume wallet")?;
 
-        // If no watcher running, spawn one
+        // If no watcher running, load metadata from DB and spawn one
         if !self.watchers.contains_key(proxy_wallet) {
-            let wallet = FollowedWallet {
-                proxy_wallet: proxy_wallet.to_string(),
-                label: None,
-                status: WalletStatus::Active,
-                trading_mode: TradingMode::Paper,
-                max_exposure_pct: None,
-                estimated_bankroll_usd: None,
-                last_trade_seen_hash: None,
-            };
+            let addr = proxy_wallet.to_string();
+            let wallet = self
+                .db
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT proxy_wallet, label, trading_mode, max_exposure_pct, estimated_bankroll_usd, last_trade_seen_hash
+                         FROM followed_wallets WHERE proxy_wallet = ?1",
+                        [&addr],
+                        |row| {
+                            let mode_str: String = row.get(2)?;
+                            Ok(FollowedWallet {
+                                proxy_wallet: row.get(0)?,
+                                label: row.get(1)?,
+                                status: WalletStatus::Active,
+                                trading_mode: TradingMode::from_str_loose(&mode_str)
+                                    .unwrap_or(TradingMode::Paper),
+                                max_exposure_pct: row.get(3)?,
+                                estimated_bankroll_usd: row.get(4)?,
+                                last_trade_seen_hash: row.get(5)?,
+                            })
+                        },
+                    )
+                })
+                .await
+                .context("failed to load wallet metadata for resume")?;
             self.spawn_watcher(wallet)?;
         }
 
@@ -223,6 +242,7 @@ impl WalletEngine {
     }
 
     /// Shut down all watchers gracefully.
+    #[allow(dead_code)] // Used in tests for clean shutdown
     pub async fn shutdown(&mut self) {
         info!(
             count = self.watchers.len(),
@@ -248,11 +268,12 @@ impl WalletEngine {
         let db = Arc::clone(&self.db);
         let client = Arc::clone(&self.client);
         let config = Arc::clone(&self.config);
+        let risk = Arc::clone(&self.risk);
         let halted = Arc::clone(&self.halted);
         let cancel_clone = cancel.clone();
 
         let handle = tokio::spawn(async move {
-            watcher::run_watcher(db, client, config, wallet, halted, cancel_clone).await;
+            watcher::run_watcher(db, client, config, risk, wallet, halted, cancel_clone).await;
         });
 
         self.watchers.insert(addr, WatcherHandle { cancel, handle });
@@ -299,16 +320,21 @@ mod tests {
         TraderConfig::from_str(&content).unwrap()
     }
 
-    #[tokio::test]
-    async fn test_follow_and_unfollow_wallet() {
-        let db = Arc::new(TraderDb::open_memory().await.unwrap());
+    fn test_engine(db: Arc<TraderDb>) -> (WalletEngine, Arc<TraderPolymarketClient>) {
         let client = Arc::new(TraderPolymarketClient::new(
             "https://data-api.polymarket.com",
             200,
         ));
         let config = Arc::new(test_config());
+        let risk = Arc::new(RiskManager::new(Arc::clone(&db), config.risk.clone()));
+        let engine = WalletEngine::new(db, Arc::clone(&client), config, risk);
+        (engine, client)
+    }
 
-        let mut engine = WalletEngine::new(db.clone(), client, config);
+    #[tokio::test]
+    async fn test_follow_and_unfollow_wallet() {
+        let db = Arc::new(TraderDb::open_memory().await.unwrap());
+        let (mut engine, _client) = test_engine(Arc::clone(&db));
 
         // Follow a wallet
         engine
@@ -359,13 +385,7 @@ mod tests {
     #[tokio::test]
     async fn test_halt_and_resume() {
         let db = Arc::new(TraderDb::open_memory().await.unwrap());
-        let client = Arc::new(TraderPolymarketClient::new(
-            "https://data-api.polymarket.com",
-            200,
-        ));
-        let config = Arc::new(test_config());
-
-        let engine = WalletEngine::new(db, client, config);
+        let (engine, _client) = test_engine(db);
 
         assert!(!engine.is_halted());
         engine.halt_all();
@@ -377,13 +397,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_watchers_empty() {
         let db = Arc::new(TraderDb::open_memory().await.unwrap());
-        let client = Arc::new(TraderPolymarketClient::new(
-            "https://data-api.polymarket.com",
-            200,
-        ));
-        let config = Arc::new(test_config());
-
-        let mut engine = WalletEngine::new(db, client, config);
+        let (mut engine, _client) = test_engine(db);
         engine.restore_watchers().await.unwrap();
         assert_eq!(engine.watcher_count(), 0);
 
@@ -393,13 +407,7 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_follow_replaces() {
         let db = Arc::new(TraderDb::open_memory().await.unwrap());
-        let client = Arc::new(TraderPolymarketClient::new(
-            "https://data-api.polymarket.com",
-            200,
-        ));
-        let config = Arc::new(test_config());
-
-        let mut engine = WalletEngine::new(db, client, config);
+        let (mut engine, _client) = test_engine(db);
 
         engine
             .follow_wallet(

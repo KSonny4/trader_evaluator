@@ -2,24 +2,37 @@ pub mod control;
 pub mod trades;
 pub mod wallets;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::db::TraderDb;
 use crate::engine::WalletEngine;
+use crate::risk::RiskManager;
 
 /// Shared application state available to all handlers.
 pub struct AppState {
-    pub db: TraderDb,
+    pub db: Arc<TraderDb>,
     pub engine: Mutex<WalletEngine>,
+    pub risk: Arc<RiskManager>,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    pub api_key: Option<String>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
+    // Health endpoint is always public (no auth)
+    let public = Router::new().route("/api/health", get(health));
+
+    // Protected routes require bearer token (if api_key is configured)
+    let protected = Router::new()
         .route("/api/status", get(status))
         // Wallet management
         .route(
@@ -45,8 +58,52 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Control
         .route("/api/halt", axum::routing::post(control::halt))
         .route("/api/resume", axum::routing::post(control::resume))
-        .route("/api/risk", get(control::get_risk))
-        .with_state(state)
+        .route(
+            "/api/risk",
+            get(control::get_risk).put(control::update_risk),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    public.merge(protected).with_state(state)
+}
+
+/// Bearer token auth middleware. Skipped when no api_key is configured.
+async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let Some(api_key) = &state.api_key else {
+        return next.run(req).await; // No key configured = dev mode
+    };
+
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(header) if header.starts_with("Bearer ") => {
+            let token = &header[7..];
+            if constant_time_eq(token.as_bytes(), api_key.as_bytes()) {
+                next.run(req).await
+            } else {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// Constant-time comparison to prevent timing attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[derive(Serialize)]
@@ -120,6 +177,7 @@ mod tests {
     use super::*;
     use crate::config::TraderConfig;
     use crate::polymarket::TraderPolymarketClient;
+    use crate::risk::RiskManager;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -132,14 +190,21 @@ mod tests {
         ));
         let config = Arc::new(config);
 
-        let engine_db = TraderDb::open_memory().await.unwrap();
-        let engine = WalletEngine::new(Arc::new(engine_db), client, config);
+        let db = Arc::new(TraderDb::open_memory().await.unwrap());
+        let risk = Arc::new(RiskManager::new(Arc::clone(&db), config.risk.clone()));
+        let engine = WalletEngine::new(
+            Arc::clone(&db),
+            client,
+            Arc::clone(&config),
+            Arc::clone(&risk),
+        );
 
-        let state_db = TraderDb::open_memory().await.unwrap();
         let state = Arc::new(AppState {
-            db: state_db,
+            db: Arc::clone(&db),
             engine: Mutex::new(engine),
+            risk,
             started_at: chrono::Utc::now(),
+            api_key: None, // No auth in tests
         });
         let app = router(Arc::clone(&state));
         (app, state)

@@ -63,6 +63,60 @@ pub async fn update_portfolio_risk_state(
     Ok(())
 }
 
+/// Reduce per-wallet exposure after settlement.
+/// Called when positions are closed (market resolved).
+pub async fn reduce_exposure(
+    db: &Arc<TraderDb>,
+    wallet: &str,
+    settled_size_usd: f64,
+) -> Result<()> {
+    let addr = wallet.to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE risk_state SET
+                total_exposure_usd = MAX(0.0, total_exposure_usd - ?1),
+                open_positions = (SELECT COUNT(*) FROM trader_positions WHERE proxy_wallet = ?2),
+                updated_at = ?3
+             WHERE key = ?2",
+            rusqlite::params![settled_size_usd, addr, now],
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
+}
+
+/// Reduce portfolio-level exposure after settlement.
+pub async fn reduce_portfolio_exposure(
+    db: &Arc<TraderDb>,
+    settled_size_usd: f64,
+    pnl_delta: f64,
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE risk_state SET
+                total_exposure_usd = MAX(0.0, total_exposure_usd - ?1),
+                daily_pnl = daily_pnl + ?2,
+                weekly_pnl = weekly_pnl + ?3,
+                current_pnl = current_pnl + ?4,
+                peak_pnl = MAX(peak_pnl, current_pnl + ?4),
+                open_positions = (SELECT COUNT(*) FROM trader_positions),
+                updated_at = ?5
+             WHERE key = 'portfolio'",
+            rusqlite::params![settled_size_usd, pnl_delta, pnl_delta, pnl_delta, now],
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +162,74 @@ mod tests {
 
         assert!((exposure - 55.0).abs() < f64::EPSILON);
         assert!((pnl - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_reduce_wallet_exposure() {
+        let db = Arc::new(TraderDb::open_memory().await.unwrap());
+
+        // Add initial exposure
+        update_wallet_risk_state(&db, "0xtest", 50.0, 0.0)
+            .await
+            .unwrap();
+
+        // Reduce by settlement
+        reduce_exposure(&db, "0xtest", 25.0).await.unwrap();
+
+        let exposure: f64 = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT total_exposure_usd FROM risk_state WHERE key = '0xtest'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert!((exposure - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_reduce_portfolio_exposure() {
+        let db = Arc::new(TraderDb::open_memory().await.unwrap());
+
+        update_portfolio_risk_state(&db, 100.0, 0.0).await.unwrap();
+        reduce_portfolio_exposure(&db, 40.0, 10.0).await.unwrap();
+
+        let (exposure, pnl): (f64, f64) = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT total_exposure_usd, daily_pnl FROM risk_state WHERE key = 'portfolio'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert!((exposure - 60.0).abs() < f64::EPSILON);
+        assert!((pnl - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_reduce_exposure_floors_at_zero() {
+        let db = Arc::new(TraderDb::open_memory().await.unwrap());
+
+        update_wallet_risk_state(&db, "0xtest", 10.0, 0.0)
+            .await
+            .unwrap();
+        reduce_exposure(&db, "0xtest", 50.0).await.unwrap();
+
+        let exposure: f64 = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT total_exposure_usd FROM risk_state WHERE key = '0xtest'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(exposure.abs() < f64::EPSILON);
     }
 }

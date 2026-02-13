@@ -3,9 +3,7 @@ mod config;
 mod db;
 mod engine;
 mod polymarket;
-#[allow(dead_code)]
 mod risk;
-#[allow(dead_code)]
 mod types;
 
 use anyhow::Result;
@@ -37,22 +35,29 @@ async fn main() -> Result<()> {
         config.polymarket.rate_limit_delay_ms,
     ));
 
-    // Create wallet engine
+    // Create wallet engine with risk manager
     let engine_db = Arc::new(db::TraderDb::open(&config.database.path).await?);
+    let risk_manager = Arc::new(risk::RiskManager::new(
+        Arc::clone(&engine_db),
+        config.risk.clone(),
+    ));
     let mut engine_instance = engine::WalletEngine::new(
         Arc::clone(&engine_db),
         Arc::clone(&client),
         Arc::clone(&config),
+        Arc::clone(&risk_manager),
     );
 
     // Restore watchers for active wallets
     engine_instance.restore_watchers().await?;
 
-    // Build app state
+    // Build app state — share the same DB as the engine
     let state = Arc::new(api::AppState {
-        db: db::TraderDb::open(&config.database.path).await?,
+        db: Arc::clone(&engine_db),
         engine: Mutex::new(engine_instance),
+        risk: Arc::clone(&risk_manager),
         started_at: chrono::Utc::now(),
+        api_key: config.server.api_key.clone(),
     });
 
     // Build router

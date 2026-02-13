@@ -3,13 +3,11 @@ use std::collections::HashSet;
 
 /// Watermark-based new trade detector.
 /// Tracks which trade hashes we've already seen and filters to only new ones.
-#[allow(dead_code)]
 pub struct TradeDetector {
     seen_hashes: HashSet<String>,
     last_timestamp: Option<i64>,
 }
 
-#[allow(dead_code)]
 impl TradeDetector {
     pub fn new(last_seen_hash: Option<String>) -> Self {
         let mut seen = HashSet::new();
@@ -50,12 +48,14 @@ impl TradeDetector {
     }
 
     /// Get the latest trade hash for persisting watermark.
+    #[allow(dead_code)] // Used in tests
     pub fn latest_hash(&self) -> Option<&str> {
         // Return the hash of the most recently seen trade
         // In practice this is updated when we detect new trades
         None // Simplified — the caller manages watermark persistence
     }
 
+    #[allow(dead_code)] // Used in tests
     pub fn seen_count(&self) -> usize {
         self.seen_hashes.len()
     }
@@ -168,7 +168,7 @@ mod tests {
     fn test_prune() {
         let mut detector = TradeDetector::new(None);
         for i in 0..200 {
-            let trades = vec![make_trade(&format!("t{i}"), i as i64)];
+            let trades = vec![make_trade(&format!("t{i}"), i64::from(i))];
             detector.detect_new(&trades);
         }
         assert_eq!(detector.seen_count(), 200);

@@ -3,14 +3,15 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct TraderConfig {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub polymarket: PolymarketConfig,
+    #[allow(dead_code)]
     pub evaluator: EvaluatorConfig,
     pub trading: TradingConfig,
     pub risk: RiskConfig,
+    #[allow(dead_code)]
     pub observability: ObservabilityConfig,
 }
 
@@ -18,6 +19,7 @@ pub struct TraderConfig {
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,27 +28,27 @@ pub struct DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct PolymarketConfig {
     pub data_api_url: String,
+    #[allow(dead_code)]
     pub gamma_api_url: String,
     pub rate_limit_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Deserialized from TOML, not yet used in code
 pub struct EvaluatorConfig {
     pub api_url: String,
     pub poll_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct TradingConfig {
     pub bankroll_usd: f64,
     pub per_trade_size_usd: f64,
     pub use_proportional_sizing: bool,
     pub default_their_bankroll_usd: f64,
+    #[allow(dead_code)]
     pub mirror_delay_secs: u64,
     pub slippage_default_cents: f64,
     pub poll_interval_secs: u64,
@@ -59,7 +61,6 @@ pub struct RiskConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct PortfolioRiskConfig {
     pub max_total_exposure_pct: f64,
     pub max_daily_loss_pct: f64,
@@ -68,7 +69,6 @@ pub struct PortfolioRiskConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct PerWalletRiskConfig {
     pub max_exposure_pct: f64,
     pub daily_loss_pct: f64,
@@ -78,7 +78,7 @@ pub struct PerWalletRiskConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Deserialized from TOML, not yet used in code
 pub struct ObservabilityConfig {
     pub prometheus_port: u16,
 }
@@ -219,19 +219,17 @@ prometheus_port = 9095
 
     #[test]
     fn test_parse_invalid_config_missing_field() {
-        let bad = r#"
+        let bad = "
 [server]
 port = 8081
-"#;
+";
         let result = TraderConfig::from_str(bad);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_zero_bankroll() {
-        let mut content = sample_config().replace("bankroll_usd = 1000.0", "bankroll_usd = 0.0");
-        // Need to also fix per_trade which depends on bankroll being valid
-        content = content.replace("per_trade_size_usd = 25.0", "per_trade_size_usd = 25.0");
+        let content = sample_config().replace("bankroll_usd = 1000.0", "bankroll_usd = 0.0");
         let result = TraderConfig::from_str(&content);
         assert!(result.is_err());
         assert!(result

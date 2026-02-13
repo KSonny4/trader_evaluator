@@ -1,6 +1,7 @@
 [server]
 port = 8081
 host = "0.0.0.0"
+# api_key = "your-secret-api-key-here"  # Uncomment to enable bearer token auth
 
 [database]
 path = "data/trader.db"

@@ -33,10 +33,37 @@ pub(crate) struct MessageResponse {
     pub message: String,
 }
 
+fn is_valid_eth_address(addr: &str) -> bool {
+    addr.len() == 42 && addr.starts_with("0x") && addr[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 pub async fn follow_wallet(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FollowRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, (StatusCode, Json<MessageResponse>)> {
+    if !is_valid_eth_address(&req.proxy_wallet) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(MessageResponse {
+                message: "invalid wallet address: must be 42-char hex string starting with 0x"
+                    .to_string(),
+            }),
+        ));
+    }
+
+    if let Some(ref mode_str) = req.trading_mode {
+        if TradingMode::from_str_loose(mode_str).is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(MessageResponse {
+                    message: format!(
+                        "invalid trading_mode: {mode_str} (expected 'paper' or 'live')"
+                    ),
+                }),
+            ));
+        }
+    }
+
     let mode = req
         .trading_mode
         .as_deref()
@@ -54,7 +81,14 @@ pub async fn follow_wallet(
             mode,
         )
         .await
-        .map_err(|_db_err| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_db_err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(MessageResponse {
+                    message: "failed to follow wallet".to_string(),
+                }),
+            )
+        })?;
 
     Ok((
         StatusCode::CREATED,

@@ -11,12 +11,12 @@ pub struct TraderPolymarketClient {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct RawTrade {
     #[serde(rename = "proxyWallet", alias = "proxy_wallet")]
     pub proxy_wallet: Option<String>,
     #[serde(rename = "conditionId", alias = "condition_id")]
     pub condition_id: Option<String>,
+    #[allow(dead_code)] // Present in API response
     pub asset: Option<String>,
     #[serde(deserialize_with = "de_opt_string_any", default)]
     pub size: Option<String>,
@@ -54,8 +54,9 @@ impl TraderPolymarketClient {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<RawTrade>> {
+        let encoded_wallet = urlencoding::encode(wallet);
         let url = format!(
-            "{}/trades?user={wallet}&limit={limit}&offset={offset}",
+            "{}/trades?user={encoded_wallet}&limit={limit}&offset={offset}",
             self.data_api_url
         );
 
@@ -89,6 +90,37 @@ impl TraderPolymarketClient {
 
         debug!(wallet = wallet, count = trades.len(), "fetched trades");
         Ok(trades)
+    }
+
+    /// Check if a market has resolved. Returns Some(settle_price) if resolved, None otherwise.
+    /// Uses the Gamma API markets endpoint.
+    pub async fn check_market_resolution(&self, url: &str) -> Option<f64> {
+        let resp = self.client.get(url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let markets: Vec<serde_json::Value> = resp.json().await.ok()?;
+        let market = markets.first()?;
+
+        // Check if market is resolved
+        let closed = market.get("closed")?.as_bool()?;
+        if !closed {
+            return None;
+        }
+
+        // Get the resolution price (1.0 = Yes won, 0.0 = No won)
+        let price_str = market.get("outcomePrices")?.as_str()?;
+        let prices: Vec<f64> = serde_json::from_str(price_str).ok()?;
+        // If the first outcome price is >= 0.99, it resolved Yes (1.0); if <= 0.01, resolved No (0.0)
+        let settle_price = prices.first().copied()?;
+        if settle_price >= 0.99 {
+            Some(1.0)
+        } else if settle_price <= 0.01 {
+            Some(0.0)
+        } else {
+            None // Market closed but not fully resolved yet
+        }
     }
 
     /// Compute a stable hash for a trade to use as watermark.

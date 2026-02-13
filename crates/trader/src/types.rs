@@ -29,6 +29,7 @@ impl Side {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // Domain type used in tests and for future API responses
 pub enum TradeStatus {
     Open,
     SettledWin,
@@ -46,6 +47,7 @@ impl fmt::Display for TradeStatus {
 }
 
 impl TradeStatus {
+    #[allow(dead_code)] // Used in tests
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s {
             "open" => Some(Self::Open),
@@ -143,6 +145,7 @@ impl fmt::Display for FidelityOutcome {
 
 /// A trade observed on Polymarket for a followed wallet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Domain type for future API/display use
 pub struct ObservedTrade {
     pub proxy_wallet: String,
     pub condition_id: String,
@@ -157,6 +160,7 @@ pub struct ObservedTrade {
 
 /// A paper/live trade we executed in response to an observed trade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Domain type for future API/display use
 pub struct ExecutedTrade {
     pub id: i64,
     pub proxy_wallet: String,

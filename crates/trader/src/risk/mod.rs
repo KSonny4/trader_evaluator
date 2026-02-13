@@ -59,6 +59,31 @@ impl RiskManager {
             bankroll_usd,
         )?;
 
+        // Slippage kill check (recent 20 trades window, threshold = 5 cents)
+        let slippage_threshold = 5.0;
+        let slippage_window = 20;
+        if let Ok(avg_slippage) =
+            slippage::get_avg_slippage_cents(&self.db, proxy_wallet, slippage_window).await
+        {
+            if avg_slippage > slippage_threshold {
+                return Err(RiskRejection::SlippageKill {
+                    avg_slippage,
+                    threshold: slippage_threshold,
+                });
+            }
+        }
+
+        // Copy fidelity check
+        let min_fidelity = config.per_wallet.min_copy_fidelity_pct;
+        if let Ok(fidelity_pct) = fidelity::get_copy_fidelity_pct(&self.db, proxy_wallet).await {
+            if fidelity_pct < min_fidelity {
+                return Err(RiskRejection::LowFidelity {
+                    fidelity_pct,
+                    min_required: min_fidelity,
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -154,15 +179,18 @@ impl RiskManager {
         info!("risk config updated at runtime");
     }
 
+    #[allow(dead_code)] // Used in tests and runtime config queries
     pub async fn get_config(&self) -> RiskConfig {
         self.config.read().await.clone()
     }
 
+    #[allow(dead_code)] // Used in tests and emergency halt
     pub fn halt(&self) {
         self.halted.store(true, std::sync::atomic::Ordering::SeqCst);
         warn!("risk manager: HALT activated");
     }
 
+    #[allow(dead_code)] // Used in tests
     pub fn resume(&self) {
         self.halted
             .store(false, std::sync::atomic::Ordering::SeqCst);
