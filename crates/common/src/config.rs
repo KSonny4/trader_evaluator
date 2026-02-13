@@ -189,6 +189,9 @@ pub struct Web {
     pub port: u16,
     pub host: String,
     pub auth_password: Option<String>,
+    /// Base URL of the trader microservice (e.g. "http://aws-trader:8081").
+    /// When set, the dashboard proxies /trader/** routes and shows "Follow" buttons.
+    pub trader_api_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -44,8 +44,10 @@ pub struct AppState {
     pub login_rate_limiter: Arc<LoginRateLimiter>,
     /// Gamma API base URL for Polymarket profile fetch (optional; when set, wallet display uses profile name).
     pub gamma_api_url: Option<String>,
-    /// HTTP client for outbound requests (e.g. Polymarket profile).
+    /// HTTP client for outbound requests (e.g. Polymarket profile, trader proxy).
     pub http_client: Option<reqwest::Client>,
+    /// Base URL of the trader microservice (e.g. "http://aws-trader:8081").
+    pub trader_api_url: Option<String>,
 }
 
 /// Open a read-only connection to the evaluator DB.
@@ -362,6 +364,7 @@ struct JourneyTemplate {
 #[template(path = "wallet_scorecard.html")]
 struct ScorecardTemplate {
     journey: WalletJourney,
+    trader_connected: bool,
 }
 
 #[derive(Template)]
@@ -948,7 +951,15 @@ async fn scorecard_page(
                     journey.wallet_display_label = name;
                 }
             }
-            Html(ScorecardTemplate { journey }.to_string()).into_response()
+            let trader_connected = state.trader_api_url.is_some();
+            Html(
+                ScorecardTemplate {
+                    journey,
+                    trader_connected,
+                }
+                .to_string(),
+            )
+            .into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (
@@ -1158,6 +1169,125 @@ async fn spawn_derived_gauges_updater(state: Arc<AppState>) {
     }
 }
 
+// --- Recommended Wallets API (for trader microservice to poll) ---
+
+/// Wallet recommendation returned by GET /api/recommended-wallets.
+/// The trader microservice polls this to discover wallets to follow.
+#[derive(Serialize)]
+struct RecommendedWallet {
+    proxy_wallet: String,
+    wscore: f64,
+    edge_score: f64,
+    consistency_score: f64,
+    follow_mode: String,
+    trade_count: i64,
+    paper_pnl: f64,
+}
+
+async fn recommended_wallets_api(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<RecommendedWallet>>, StatusCode> {
+    let rankings = with_db(state, move |conn| {
+        queries::follow_worthy_rankings(conn, Some(50))
+    })
+    .await
+    .map_err(|_db_err| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let wallets = rankings
+        .into_iter()
+        .map(|r| RecommendedWallet {
+            proxy_wallet: r.proxy_wallet,
+            wscore: r.wscore,
+            edge_score: r.edge_score,
+            consistency_score: r.consistency_score,
+            follow_mode: r.follow_mode,
+            trade_count: r.trade_count,
+            paper_pnl: r.paper_pnl,
+        })
+        .collect();
+    Ok(Json(wallets))
+}
+
+// --- Trader Proxy ---
+
+/// Forward GET/POST/DELETE requests to the trader microservice.
+/// Path: /trader/api/* -> trader_api_url/api/*
+async fn trader_proxy(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> Result<Response, StatusCode> {
+    let trader_url = state
+        .trader_api_url
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let client = state
+        .http_client
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Strip /trader prefix: /trader/api/wallets -> /api/wallets
+    let path = req
+        .uri()
+        .path()
+        .strip_prefix("/trader")
+        .unwrap_or(req.uri().path());
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let target_url = format!("{}{}{}", trader_url.trim_end_matches('/'), path, query);
+
+    let method = req.method().clone();
+    let mut builder = match method {
+        Method::GET => client.get(&target_url),
+        Method::POST => client.post(&target_url),
+        Method::PUT => client.put(&target_url),
+        Method::DELETE => client.delete(&target_url),
+        _ => return Err(StatusCode::METHOD_NOT_ALLOWED),
+    };
+
+    // Forward content-type and body for POST/PUT
+    if method == Method::POST || method == Method::PUT {
+        if let Some(ct) = req.headers().get(header::CONTENT_TYPE) {
+            builder = builder.header(header::CONTENT_TYPE, ct.clone());
+        }
+        let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 64)
+            .await
+            .map_err(|_body_err| StatusCode::BAD_REQUEST)?;
+        builder = builder.body(body_bytes);
+    }
+
+    let resp = builder
+        .send()
+        .await
+        .map_err(|_req_err| StatusCode::BAD_GATEWAY)?;
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body_bytes = resp
+        .bytes()
+        .await
+        .map_err(|_read_err| StatusCode::BAD_GATEWAY)?;
+
+    Ok(Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body_bytes))
+        .unwrap())
+}
+
+// --- Trader Dashboard Pages ---
+
+#[derive(Template)]
+#[template(path = "trader_overview.html")]
+struct TraderOverviewTemplate {
+    trader_connected: bool,
+}
+
+async fn trader_overview_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let trader_connected = state.trader_api_url.is_some();
+    Html(TraderOverviewTemplate { trader_connected }.to_string()).into_response()
+}
+
 // --- Router ---
 
 pub fn create_router() -> Router {
@@ -1207,6 +1337,12 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
             get(paper_traded_wallets_partial),
         )
         .route("/partials/rankings", get(rankings_partial))
+        // Recommended wallets API (for trader microservice to poll)
+        .route("/api/recommended-wallets", get(recommended_wallets_api))
+        // Trader dashboard pages
+        .route("/trader", get(trader_overview_page))
+        // Trader proxy routes (forward to trader microservice)
+        .route("/trader/api/{*rest}", axum::routing::any(trader_proxy))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -1256,6 +1392,7 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(3))
         .build()
         .ok();
+    let trader_api_url = config.web.as_ref().and_then(|w| w.trader_api_url.clone());
     let state = Arc::new(AppState {
         db_path,
         auth_password,
@@ -1270,6 +1407,7 @@ async fn main() -> Result<()> {
         max_concurrent_positions: i64::from(config.risk.max_concurrent_positions),
         gamma_api_url: Some(config.polymarket.gamma_api_url.clone()),
         http_client,
+        trader_api_url,
     });
 
     tokio::spawn(spawn_derived_gauges_updater(state.clone()));
@@ -1366,6 +1504,7 @@ mod tests {
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             gamma_api_url: None,
             http_client: None,
+            trader_api_url: None,
         });
         create_router_with_state(state)
     }
@@ -1396,6 +1535,7 @@ mod tests {
             max_concurrent_positions: i64::from(cfg.risk.max_concurrent_positions),
             gamma_api_url: None,
             http_client: None,
+            trader_api_url: None,
         });
         create_router_with_state(state)
     }
@@ -1426,6 +1566,7 @@ mod tests {
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
             gamma_api_url: None,
             http_client: None,
+            trader_api_url: None,
         });
         create_router_with_state(state)
     }
@@ -2132,6 +2273,7 @@ mod tests {
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
             gamma_api_url: None,
             http_client: None,
+            trader_api_url: None,
         });
         let app = create_router_with_state(state);
 
@@ -2236,6 +2378,7 @@ mod tests {
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
             gamma_api_url: None,
             http_client: None,
+            trader_api_url: None,
         });
         let app = create_router_with_state(state);
 
@@ -2550,6 +2693,7 @@ mod tests {
             login_rate_limiter: Arc::new(LoginRateLimiter::new()),
             gamma_api_url: None,
             http_client: None,
+            trader_api_url: None,
         });
         let app = create_router_with_state(state);
 

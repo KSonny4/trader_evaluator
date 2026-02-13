@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block title %}Trader Overview{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-end justify-between gap-4">
+        <div>
+            <h2 class="text-xl font-semibold text-gray-100">Trader Microservice</h2>
+            <p class="text-sm text-gray-500">Paper & live copy-trading engine</p>
+        </div>
+        <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back to Dashboard</a>
+    </div>
+
+    {% if !trader_connected %}
+    <div class="bg-yellow-900/30 border border-yellow-700 rounded-lg p-4">
+        <div class="text-yellow-400 font-medium">Trader not configured</div>
+        <div class="text-sm text-yellow-500 mt-1">Set <code class="text-yellow-300">trader_api_url</code> in <code class="text-yellow-300">[web]</code> config to connect to the trader microservice.</div>
+    </div>
+    {% else %}
+
+    <!-- Status -->
+    <div id="trader-status" class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-lg font-semibold text-gray-200 mb-3">Status</h3>
+        <div id="status-content" class="text-gray-500 text-sm">Loading...</div>
+    </div>
+
+    <!-- Risk -->
+    <div id="trader-risk" class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-lg font-semibold text-gray-200 mb-3">Risk</h3>
+        <div id="risk-content" class="text-gray-500 text-sm">Loading...</div>
+    </div>
+
+    <!-- Followed Wallets -->
+    <div class="bg-gray-900 rounded-lg p-4">
+        <div class="flex items-center justify-between mb-3">
+            <h3 class="text-lg font-semibold text-gray-200">Followed Wallets</h3>
+        </div>
+        <div id="wallets-content" class="text-gray-500 text-sm">Loading...</div>
+    </div>
+
+    <!-- Recent Trades -->
+    <div class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-lg font-semibold text-gray-200 mb-3">Recent Trades</h3>
+        <div id="trades-content" class="text-gray-500 text-sm">Loading...</div>
+    </div>
+
+    <!-- PnL -->
+    <div class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-lg font-semibold text-gray-200 mb-3">PnL Summary</h3>
+        <div id="pnl-content" class="text-gray-500 text-sm">Loading...</div>
+    </div>
+
+    <script>
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function fetchJson(path) {
+        return fetch('/trader/api' + path).then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        });
+    }
+
+    function loadStatus() {
+        fetchJson('/status').then(data => {
+            var html = '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Running</div><div class="text-sm text-gray-200">' + (data.running ? 'Yes' : 'No') + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Halted</div><div class="text-sm ' + (data.halted ? 'text-red-400' : 'text-green-400') + '">' + (data.halted ? 'YES' : 'No') + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Followed Wallets</div><div class="text-sm text-gray-200">' + data.followed_wallets + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Open Positions</div><div class="text-sm text-gray-200">' + data.open_positions + '</div></div>';
+            html += '</div>';
+            document.getElementById('status-content').innerHTML = html;
+        }).catch(function(e) {
+            document.getElementById('status-content').innerHTML = '<span class="text-red-400">Failed to load: ' + escapeHtml(e.message) + '</span>';
+        });
+    }
+
+    function loadRisk() {
+        fetchJson('/risk').then(data => {
+            var p = data.portfolio;
+            var html = '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Total Exposure</div><div class="text-sm text-gray-200">$' + p.total_exposure_usd.toFixed(2) + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Daily PnL</div><div class="text-sm ' + (p.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400') + '">$' + p.daily_pnl.toFixed(2) + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Weekly PnL</div><div class="text-sm ' + (p.weekly_pnl >= 0 ? 'text-green-400' : 'text-red-400') + '">$' + p.weekly_pnl.toFixed(2) + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Total PnL</div><div class="text-sm ' + (p.total_pnl >= 0 ? 'text-green-400' : 'text-red-400') + '">$' + p.total_pnl.toFixed(2) + '</div></div>';
+            html += '</div>';
+            document.getElementById('risk-content').innerHTML = html;
+        }).catch(function(e) {
+            document.getElementById('risk-content').innerHTML = '<span class="text-red-400">Failed to load: ' + escapeHtml(e.message) + '</span>';
+        });
+    }
+
+    function loadWallets() {
+        fetchJson('/wallets').then(data => {
+            if (!data.length) {
+                document.getElementById('wallets-content').innerHTML = '<span class="italic">No wallets followed yet.</span>';
+                return;
+            }
+            var html = '<div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead class="bg-gray-800 text-gray-400"><tr>';
+            html += '<th class="py-2 px-3">Wallet</th><th class="py-2 px-3">Status</th><th class="py-2 px-3">Mode</th><th class="py-2 px-3">Added</th>';
+            html += '</tr></thead><tbody class="text-gray-300 divide-y divide-gray-800">';
+            data.forEach(function(w) {
+                var short = w.proxy_wallet.slice(0, 6) + '...' + w.proxy_wallet.slice(-4);
+                html += '<tr class="hover:bg-gray-800/50">';
+                html += '<td class="py-2 px-3 font-mono text-blue-400">' + escapeHtml(short) + '</td>';
+                html += '<td class="py-2 px-3">' + escapeHtml(w.status) + '</td>';
+                html += '<td class="py-2 px-3">' + escapeHtml(w.trading_mode) + '</td>';
+                html += '<td class="py-2 px-3 text-xs text-gray-500">' + escapeHtml(w.added_at) + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table></div>';
+            document.getElementById('wallets-content').innerHTML = html;
+        }).catch(function(e) {
+            document.getElementById('wallets-content').innerHTML = '<span class="text-red-400">Failed to load: ' + escapeHtml(e.message) + '</span>';
+        });
+    }
+
+    function loadTrades() {
+        fetchJson('/trades?limit=20').then(data => {
+            if (!data.length) {
+                document.getElementById('trades-content').innerHTML = '<span class="italic">No trades yet.</span>';
+                return;
+            }
+            var html = '<div class="overflow-x-auto"><table class="w-full text-sm text-left"><thead class="bg-gray-800 text-gray-400"><tr>';
+            html += '<th class="py-2 px-3">Wallet</th><th class="py-2 px-3">Side</th><th class="py-2 px-3 text-right">Size</th><th class="py-2 px-3 text-right">Entry</th><th class="py-2 px-3">Status</th><th class="py-2 px-3 text-right">PnL</th>';
+            html += '</tr></thead><tbody class="text-gray-300 divide-y divide-gray-800">';
+            data.forEach(function(t) {
+                var short = t.proxy_wallet.slice(0, 6) + '...' + t.proxy_wallet.slice(-4);
+                var pnlClass = t.pnl != null ? (t.pnl >= 0 ? 'text-green-400' : 'text-red-400') : 'text-gray-500';
+                var pnlDisplay = t.pnl != null ? '$' + t.pnl.toFixed(2) : '—';
+                html += '<tr class="hover:bg-gray-800/50">';
+                html += '<td class="py-2 px-3 font-mono text-blue-400">' + escapeHtml(short) + '</td>';
+                html += '<td class="py-2 px-3">' + escapeHtml(t.side) + '</td>';
+                html += '<td class="py-2 px-3 text-right font-mono">$' + t.our_size_usd.toFixed(2) + '</td>';
+                html += '<td class="py-2 px-3 text-right font-mono">' + t.our_entry_price.toFixed(4) + '</td>';
+                html += '<td class="py-2 px-3">' + escapeHtml(t.status) + '</td>';
+                html += '<td class="py-2 px-3 text-right font-mono ' + pnlClass + '">' + pnlDisplay + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table></div>';
+            document.getElementById('trades-content').innerHTML = html;
+        }).catch(function(e) {
+            document.getElementById('trades-content').innerHTML = '<span class="text-red-400">Failed to load: ' + escapeHtml(e.message) + '</span>';
+        });
+    }
+
+    function loadPnl() {
+        fetchJson('/pnl').then(data => {
+            var html = '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Total PnL</div><div class="text-sm ' + (data.total_pnl >= 0 ? 'text-green-400' : 'text-red-400') + '">$' + data.total_pnl.toFixed(2) + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Realized PnL</div><div class="text-sm ' + (data.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400') + '">$' + data.realized_pnl.toFixed(2) + '</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Win Rate</div><div class="text-sm text-gray-200">' + (data.win_rate * 100).toFixed(1) + '%</div></div>';
+            html += '<div class="bg-gray-800/50 rounded-lg p-3"><div class="text-xs text-gray-500">Record</div><div class="text-sm text-gray-200">' + data.win_count + 'W / ' + data.loss_count + 'L (' + data.open_trades + ' open)</div></div>';
+            html += '</div>';
+            document.getElementById('pnl-content').innerHTML = html;
+        }).catch(function(e) {
+            document.getElementById('pnl-content').innerHTML = '<span class="text-red-400">Failed to load: ' + escapeHtml(e.message) + '</span>';
+        });
+    }
+
+    // Load all sections
+    loadStatus();
+    loadRisk();
+    loadWallets();
+    loadTrades();
+    loadPnl();
+
+    // Refresh every 30 seconds
+    setInterval(function() { loadStatus(); loadRisk(); loadPnl(); }, 30000);
+    setInterval(function() { loadWallets(); loadTrades(); }, 60000);
+    </script>
+    {% endif %}
+</div>
+{% endblock %}

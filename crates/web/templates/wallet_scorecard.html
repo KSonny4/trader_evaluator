@@ -7,7 +7,12 @@
             <h2 class="text-xl font-semibold text-gray-100">Wallet scorecard</h2>
             <a href="https://polymarket.com/profile/{{ journey.proxy_wallet }}" target="_blank" rel="noopener" class="text-sm text-blue-400 hover:text-blue-300 font-mono" title="{{ journey.proxy_wallet }}">{{ journey.wallet_display_label }}</a>
         </div>
-        <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
+        <div class="flex items-center gap-3">
+            {% if trader_connected %}
+            <button id="follow-btn" onclick="followOnTrader()" class="text-sm bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded-md transition-colors">Follow on Trader</button>
+            {% endif %}
+            <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
+        </div>
     </div>
 
     <!-- Summary Cards -->
@@ -444,5 +449,35 @@ function switchSubTab(subtab) {
     setupObserver('closed-sentinel', 'closed-positions-tbody', 'closed-positions-container', 'closed-positions', renderClosedRow);
     setupObserver('activity-sentinel', 'activity-tbody', 'activity-container', 'activity', renderActivityRow);
 })();
+
+{% if trader_connected %}
+function followOnTrader() {
+    var btn = document.getElementById('follow-btn');
+    btn.disabled = true;
+    btn.textContent = 'Following...';
+    btn.className = 'text-sm bg-gray-600 text-gray-300 px-3 py-1.5 rounded-md cursor-not-allowed';
+
+    fetch('/trader/api/wallets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy_wallet: '{{ journey.proxy_wallet }}' })
+    }).then(function(r) {
+        if (r.ok) {
+            btn.textContent = 'Followed';
+            btn.className = 'text-sm bg-green-900 text-green-300 px-3 py-1.5 rounded-md cursor-default';
+        } else {
+            return r.json().then(function(data) {
+                btn.textContent = data.message || 'Error';
+                btn.className = 'text-sm bg-red-800 text-red-200 px-3 py-1.5 rounded-md';
+                btn.disabled = false;
+            });
+        }
+    }).catch(function(e) {
+        btn.textContent = 'Error';
+        btn.className = 'text-sm bg-red-800 text-red-200 px-3 py-1.5 rounded-md';
+        btn.disabled = false;
+    });
+}
+{% endif %}
 </script>
 {% endblock %}
