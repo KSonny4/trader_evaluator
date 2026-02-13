@@ -531,6 +531,16 @@ CREATE TABLE IF NOT EXISTS wallet_rules_events (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS job_status (
+    job_name TEXT PRIMARY KEY,
+    status TEXT NOT NULL,              -- running, idle, failed
+    last_run_at TEXT,
+    duration_ms INTEGER,
+    last_error TEXT,
+    metadata TEXT,                     -- JSON with progress info
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet ON trades_raw(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_wallet_timestamp ON trades_raw(proxy_wallet, timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_raw_market ON trades_raw(condition_id);
