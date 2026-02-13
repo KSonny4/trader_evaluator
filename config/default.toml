@@ -102,6 +102,13 @@ stage1_min_total_trades = 10
 stage1_max_inactive_days = 45
 # Known bot proxy addresses to exclude (e.g. "0x...")
 known_bots = []
+
+# Parallelization (Phase 3)
+# Enable parallel feature computation for faster classification
+parallel_enabled = true
+# Number of concurrent tasks for feature computation
+# Higher = faster but more memory/CPU. Recommended: 4-8
+parallel_tasks = 8
 # Informed Specialist
 specialist_max_active_positions = 5    # max currently open positions
 specialist_min_concentration = 0.60    # min % of volume in top 3 markets
