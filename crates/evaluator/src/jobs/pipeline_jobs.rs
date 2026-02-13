@@ -992,7 +992,7 @@ pub async fn run_leaderboard_discovery_once<L: super::fetcher_traits::Leaderboar
 /// persona run will classify them.
 pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     let now_epoch = chrono::Utc::now().timestamp();
-    let window_days = 30_u32;
+    let window_days = 180_u32;
     let persona_config = PersonaConfig::from_personas(&cfg.personas);
     let stage1_config = Stage1Config {
         min_wallet_age_days: cfg.personas.stage1_min_wallet_age_days,

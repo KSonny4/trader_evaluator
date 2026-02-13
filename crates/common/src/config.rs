@@ -211,6 +211,7 @@ pub struct Personas {
     // Patient Accumulator
     pub accumulator_min_hold_hours: f64,
     pub accumulator_max_trades_per_week: f64,
+    pub accumulator_min_roi: f64,
     // Execution Master (exclusion)
     pub execution_master_pnl_ratio: f64,
     // Tail Risk Seller (exclusion)
@@ -341,6 +342,7 @@ mod tests {
         assert!(config.personas.topic_lane_min_top_domain_ratio > 0.0);
         assert!(config.personas.bonder_min_extreme_price_ratio > 0.0);
         assert!(config.personas.whale_min_avg_trade_size_usdc > 0.0);
+        assert!(config.personas.accumulator_min_roi > 0.0);
     }
 
     #[test]

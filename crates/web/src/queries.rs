@@ -628,6 +628,55 @@ fn format_unix_timestamp(secs: i64) -> String {
     }
 }
 
+/// Format a number with comma thousands separator.
+fn format_with_commas(n: f64) -> String {
+    let s = format!("{n:.0}");
+    let mut result = String::new();
+    let (start, ch) = if s.starts_with('-') {
+        (1, "-")
+    } else {
+        (0, "")
+    };
+    result.push_str(ch);
+    let digits: Vec<char> = s.chars().skip(start).collect();
+    let len = digits.len();
+    for (i, c) in digits.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(*c);
+    }
+    result
+}
+
+/// Format price (0–1) as cents for display, e.g. 0.06 -> "6c", 0.67 -> "67c".
+fn format_price_cents(price: f64) -> String {
+    let cents = (price * 100.0).round() as i32;
+    format!("{cents}c")
+}
+
+/// Build a Polymarket URL from event_slug (preferred) or market slug.
+fn polymarket_url(event_slug: Option<&str>, slug: Option<&str>) -> Option<String> {
+    if let Some(es) = event_slug {
+        if !es.is_empty() {
+            return Some(format!("https://polymarket.com/event/{es}"));
+        }
+    }
+    if let Some(s) = slug {
+        if !s.is_empty() {
+            return Some(format!("https://polymarket.com/market/{s}"));
+        }
+    }
+    None
+}
+
+/// Build a Polygonscan URL from a transaction hash.
+fn polygonscan_url(tx_hash: Option<&str>) -> Option<String> {
+    tx_hash
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("https://polygonscan.com/tx/{h}"))
+}
+
 /// Parse a SQLite datetime string and return age in seconds from now
 fn age_seconds_from_timestamp(ts: &str) -> i64 {
     // SQLite returns either "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS"
@@ -957,6 +1006,274 @@ pub fn excluded_wallets_latest(
     })
 }
 
+/// Total number of positions (condition_id + outcome groups) for a wallet.
+pub fn wallet_positions_count(conn: &Connection, proxy_wallet: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "
+        SELECT COUNT(*) FROM (
+            SELECT 1 FROM trades_raw WHERE proxy_wallet = ?1 GROUP BY condition_id, outcome
+        )
+        ",
+        [proxy_wallet],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// Count of active positions (net_shares > 0.5) for a wallet.
+fn wallet_active_positions_count(conn: &Connection, proxy_wallet: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "
+        SELECT COUNT(*) FROM (
+            SELECT
+              SUM(CASE WHEN side = 'BUY' THEN size ELSE 0 END)
+                - SUM(CASE WHEN side = 'SELL' THEN size ELSE 0 END) AS net_shares
+            FROM trades_raw WHERE proxy_wallet = ?1
+            GROUP BY condition_id, outcome
+            HAVING net_shares > 0.5
+        )
+        ",
+        [proxy_wallet],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// Count of closed positions (net_shares <= 0.5) for a wallet.
+fn wallet_closed_positions_count(conn: &Connection, proxy_wallet: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "
+        SELECT COUNT(*) FROM (
+            SELECT
+              SUM(CASE WHEN side = 'BUY' THEN size ELSE 0 END)
+                - SUM(CASE WHEN side = 'SELL' THEN size ELSE 0 END) AS net_shares
+            FROM trades_raw WHERE proxy_wallet = ?1
+            GROUP BY condition_id, outcome
+            HAVING net_shares <= 0.5
+        )
+        ",
+        [proxy_wallet],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// Internal: query positions with a HAVING filter for active/closed split.
+fn wallet_positions_filtered(
+    conn: &Connection,
+    proxy_wallet: &str,
+    offset: u32,
+    limit: u32,
+    having_clause: &str,
+) -> Result<Vec<WalletPositionRow>> {
+    let limit = limit.min(100);
+    let sql = format!(
+        "
+        SELECT
+          tr.condition_id,
+          m.title,
+          tr.outcome,
+          SUM(CASE WHEN tr.side = 'BUY' THEN tr.size ELSE 0 END)
+            - SUM(CASE WHEN tr.side = 'SELL' THEN tr.size ELSE 0 END) AS net_shares,
+          CASE WHEN SUM(CASE WHEN tr.side = 'BUY' THEN tr.size ELSE 0 END) > 0
+            THEN SUM(CASE WHEN tr.side = 'BUY' THEN tr.size * tr.price ELSE 0 END)
+                 / SUM(CASE WHEN tr.side = 'BUY' THEN tr.size ELSE 0 END)
+            ELSE 0 END AS avg_entry_price,
+          SUM(CASE WHEN tr.side = 'BUY' THEN tr.size * tr.price ELSE 0 END) AS total_bet,
+          COUNT(*) AS trade_count,
+          m.event_slug,
+          m.slug
+        FROM trades_raw tr
+        LEFT JOIN markets m ON m.condition_id = tr.condition_id
+        WHERE tr.proxy_wallet = ?1
+        GROUP BY tr.condition_id, tr.outcome
+        {having_clause}
+        ORDER BY MAX(tr.timestamp) DESC
+        LIMIT ?2 OFFSET ?3
+        "
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params![proxy_wallet, i64::from(limit), i64::from(offset)],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+            ))
+        },
+    )?;
+    let positions: Vec<WalletPositionRow> = rows
+        .map(|row| {
+            let (
+                condition_id,
+                market_title,
+                outcome,
+                net_shares,
+                avg_entry_price,
+                total_bet,
+                trade_count,
+                event_slug,
+                slug,
+            ) = row?;
+            let pm_url = polymarket_url(event_slug.as_deref(), slug.as_deref());
+            Ok(WalletPositionRow {
+                condition_id,
+                market_title,
+                outcome,
+                shares_display: format_with_commas(net_shares),
+                avg_price_display: format_price_cents(avg_entry_price),
+                total_bet_display: format!("${total_bet:.2}"),
+                trade_count: trade_count as u32,
+                polymarket_url: pm_url,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(positions)
+}
+
+/// Paginated active positions (net_shares > 0.5) for a wallet.
+pub fn wallet_active_positions_page(
+    conn: &Connection,
+    proxy_wallet: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<WalletPositionRow>, usize)> {
+    timed_db_op("web.wallet_active_positions_page", || {
+        let total = wallet_active_positions_count(conn, proxy_wallet)?;
+        let positions =
+            wallet_positions_filtered(conn, proxy_wallet, offset, limit, "HAVING net_shares > 0.5")?;
+        Ok((positions, total))
+    })
+}
+
+/// Paginated closed positions (net_shares <= 0.5) for a wallet.
+pub fn wallet_closed_positions_page(
+    conn: &Connection,
+    proxy_wallet: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<WalletPositionRow>, usize)> {
+    timed_db_op("web.wallet_closed_positions_page", || {
+        let total = wallet_closed_positions_count(conn, proxy_wallet)?;
+        let positions =
+            wallet_positions_filtered(conn, proxy_wallet, offset, limit, "HAVING net_shares <= 0.5")?;
+        Ok((positions, total))
+    })
+}
+
+/// Paginated positions for a wallet (grouped by condition_id, outcome). Returns (positions, total_count).
+/// Backward-compatible: returns ALL positions (active + closed).
+pub fn wallet_positions_page(
+    conn: &Connection,
+    proxy_wallet: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<WalletPositionRow>, usize)> {
+    timed_db_op("web.wallet_positions_page", || {
+        let total = wallet_positions_count(conn, proxy_wallet)?;
+        let positions = wallet_positions_filtered(conn, proxy_wallet, offset, limit, "")?;
+        Ok((positions, total))
+    })
+}
+
+/// Total number of activity rows for a wallet.
+pub fn wallet_activity_count(conn: &Connection, proxy_wallet: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM activity_raw WHERE proxy_wallet = ?1",
+        [proxy_wallet],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// Paginated activity feed for a wallet (from activity_raw). Returns (activities, total_count).
+pub fn wallet_activity_page(
+    conn: &Connection,
+    proxy_wallet: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<WalletActivityRow>, usize)> {
+    timed_db_op("web.wallet_activity_page", || {
+        let total = wallet_activity_count(conn, proxy_wallet)?;
+        let limit = i64::from(limit.min(100));
+        let offset = i64::from(offset);
+
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+              a.activity_type,
+              a.condition_id,
+              m.title,
+              a.outcome,
+              a.size,
+              a.usdc_size,
+              a.timestamp,
+              a.transaction_hash,
+              m.event_slug,
+              m.slug
+            FROM activity_raw a
+            LEFT JOIN markets m ON m.condition_id = a.condition_id
+            WHERE a.proxy_wallet = ?1
+            ORDER BY a.timestamp DESC
+            LIMIT ?2 OFFSET ?3
+            ",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![proxy_wallet, limit, offset], |r| {
+            Ok((
+                r.get::<_, String>(0)?,    // activity_type
+                r.get::<_, Option<String>>(1)?,  // condition_id
+                r.get::<_, Option<String>>(2)?,  // market_title
+                r.get::<_, Option<String>>(3)?,  // outcome
+                r.get::<_, Option<f64>>(4)?,     // size (shares)
+                r.get::<_, Option<f64>>(5)?,     // usdc_size
+                r.get::<_, i64>(6)?,             // timestamp
+                r.get::<_, Option<String>>(7)?,  // transaction_hash
+                r.get::<_, Option<String>>(8)?,  // event_slug
+                r.get::<_, Option<String>>(9)?,  // slug
+            ))
+        })?;
+        let activities: Vec<WalletActivityRow> = rows
+            .map(|row| {
+                let (
+                    activity_type,
+                    condition_id,
+                    market_title,
+                    outcome,
+                    size,
+                    usdc_size,
+                    timestamp_sec,
+                    transaction_hash,
+                    event_slug,
+                    slug,
+                ) = row?;
+                let timestamp_display = format_unix_timestamp(timestamp_sec);
+                let ps_url = polygonscan_url(transaction_hash.as_deref());
+                let pm_url = polymarket_url(event_slug.as_deref(), slug.as_deref());
+                Ok(WalletActivityRow {
+                    activity_type,
+                    condition_id,
+                    market_title,
+                    outcome,
+                    shares_display: size.map_or_else(|| "-".to_string(), |s| format!("{s:.2}")),
+                    usdc_amount_display: usdc_size
+                        .map_or_else(|| "-".to_string(), |u| format!("${u:.2}")),
+                    timestamp_display,
+                    polygonscan_url: ps_url,
+                    polymarket_url: pm_url,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((activities, total))
+    })
+}
+
 pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<WalletJourney>> {
     timed_db_op("web.wallet_journey", || {
         let discovered_at: Option<String> = conn
@@ -991,6 +1308,12 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             )
             .optional()?;
 
+        let first_classified_at: Option<String> = conn.query_row(
+            "SELECT MIN(classified_at) FROM wallet_personas WHERE proxy_wallet = ?1",
+            [proxy_wallet],
+            |r| r.get::<_, Option<String>>(0),
+        )?;
+
         let exclusion_row: Option<(String, Option<f64>, Option<f64>, String)> = conn
             .query_row(
                 "
@@ -1004,6 +1327,15 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
+
+        let pipeline_state: String = conn
+            .query_row(
+                "SELECT state FROM wallet_rules_state WHERE proxy_wallet = ?1",
+                [proxy_wallet],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "CANDIDATE".to_string());
 
         let paper_pnl: f64 = conn.query_row(
             "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open'",
@@ -1054,15 +1386,24 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             |r| r.get::<_, Option<String>>(0),
         )?;
 
+        let first_entered_paper_at: Option<String> = conn.query_row(
+            "SELECT MIN(created_at) FROM wallet_rules_events WHERE proxy_wallet = ?1 AND phase = 'discovery' AND allow = 1",
+            [proxy_wallet],
+            |r| r.get::<_, Option<String>>(0),
+        )?;
+
         let mut events: Vec<JourneyEvent> = vec![JourneyEvent {
             at: discovered_at.clone(),
             label: "Discovered".to_string(),
             detail: "Wallet discovered".to_string(),
         }];
 
-        if let Some((persona, confidence, classified_at)) = &persona_row {
+        if let Some((persona, confidence, latest_classified_at)) = &persona_row {
+            let at = first_classified_at
+                .clone()
+                .unwrap_or_else(|| latest_classified_at.clone());
             events.push(JourneyEvent {
-                at: classified_at.clone(),
+                at,
                 label: "Stage 2 PASSED".to_string(),
                 detail: format!("{persona} (confidence: {confidence:.2})"),
             });
@@ -1080,15 +1421,31 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             });
         }
 
-        if let Some(at) = first_paper_trade_at {
+        let had_first_trade = first_paper_trade_at.is_some();
+        let paper_trading_started_at =
+            first_paper_trade_at.or_else(|| first_entered_paper_at.clone());
+        if let Some(at) = paper_trading_started_at {
+            let detail = if had_first_trade {
+                "First paper trade created".to_string()
+            } else {
+                "Eligible for paper trading (no mirrored trade yet)".to_string()
+            };
             events.push(JourneyEvent {
                 at,
                 label: "Paper trading started".to_string(),
-                detail: "First paper trade created".to_string(),
+                detail,
             });
         }
 
         events.sort_by(|a, b| a.at.cmp(&b.at));
+
+        let (active_positions, total_active_positions_count) =
+            wallet_active_positions_page(conn, proxy_wallet, 0, 20)?;
+        let (closed_positions, total_closed_positions_count) =
+            wallet_closed_positions_page(conn, proxy_wallet, 0, 20)?;
+
+        let (activities, total_activities_count) =
+            wallet_activity_page(conn, proxy_wallet, 0, 20)?;
 
         let total_trades_count: usize = conn.query_row(
             "SELECT COUNT(*) FROM trades_raw WHERE proxy_wallet = ?1",
@@ -1099,7 +1456,7 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
         let trades: Vec<WalletTradeRow> = {
             let mut stmt = conn.prepare(
                 "
-                SELECT tr.id, tr.condition_id, m.title, tr.side, tr.size, tr.price, tr.timestamp, tr.outcome
+                SELECT tr.id, tr.condition_id, m.title, tr.side, tr.size, tr.price, tr.timestamp, tr.outcome, tr.transaction_hash
                 FROM trades_raw tr
                 LEFT JOIN markets m ON m.condition_id = tr.condition_id
                 WHERE tr.proxy_wallet = ?1
@@ -1117,12 +1474,14 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
                     r.get::<_, f64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             })?;
             rows.map(|row| {
-                let (id, condition_id, market_title, side, size, price, timestamp_sec, outcome) =
+                let (id, condition_id, market_title, side, size, price, timestamp_sec, outcome, tx_hash) =
                     row?;
                 let timestamp_display = format_unix_timestamp(timestamp_sec);
+                let ps_url = polygonscan_url(tx_hash.as_deref());
                 Ok(WalletTradeRow {
                     id,
                     condition_id,
@@ -1132,6 +1491,7 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
                     price_display: format!("{price:.2}"),
                     timestamp_display,
                     outcome,
+                    polygonscan_url: ps_url,
                 })
             })
             .collect::<Result<Vec<_>>>()?
@@ -1151,11 +1511,18 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             persona,
             confidence_display,
             exclusion_reason,
+            pipeline_state,
             paper_pnl_display,
             exposure_display,
             copy_fidelity_display,
             follower_slippage_display,
             events,
+            active_positions,
+            total_active_positions_count,
+            closed_positions,
+            total_closed_positions_count,
+            activities,
+            total_activities_count,
             trades,
             total_trades_count,
         }))
@@ -1181,7 +1548,7 @@ pub fn wallet_trades_page(
 
         let mut stmt = conn.prepare(
             "
-            SELECT tr.id, tr.condition_id, m.title, tr.side, tr.size, tr.price, tr.timestamp, tr.outcome
+            SELECT tr.id, tr.condition_id, m.title, tr.side, tr.size, tr.price, tr.timestamp, tr.outcome, tr.transaction_hash
             FROM trades_raw tr
             LEFT JOIN markets m ON m.condition_id = tr.condition_id
             WHERE tr.proxy_wallet = ?1
@@ -1199,13 +1566,15 @@ pub fn wallet_trades_page(
                 r.get::<_, f64>(5)?,
                 r.get::<_, i64>(6)?,
                 r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         })?;
         let trades: Vec<WalletTradeRow> = rows
             .map(|row| {
-                let (id, condition_id, market_title, side, size, price, timestamp_sec, outcome) =
+                let (id, condition_id, market_title, side, size, price, timestamp_sec, outcome, tx_hash) =
                     row?;
                 let timestamp_display = format_unix_timestamp(timestamp_sec);
+                let ps_url = polygonscan_url(tx_hash.as_deref());
                 Ok(WalletTradeRow {
                     id,
                     condition_id,
@@ -1215,6 +1584,7 @@ pub fn wallet_trades_page(
                     price_display: format!("{price:.2}"),
                     timestamp_display,
                     outcome,
+                    polygonscan_url: ps_url,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1899,6 +2269,64 @@ mod tests {
         assert_eq!(rankings.len(), 2);
         assert_eq!(rankings[0].rank, 1);
         assert!(rankings[0].wscore > rankings[1].wscore);
+    }
+
+    #[test]
+    fn test_wallet_active_positions_only_positive_shares() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, outcome, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xw', '0xm', 'Yes', 'BUY', 10.0, 0.5, 100, '0xtx1')",
+            [],
+        )
+        .unwrap();
+        // Net shares = 10.0 (active)
+
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, outcome, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xw', '0xm2', 'No', 'BUY', 10.0, 0.5, 100, '0xtx2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, outcome, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xw', '0xm2', 'No', 'SELL', 10.0, 0.6, 101, '0xtx3')",
+            [],
+        )
+        .unwrap();
+        // Net shares = 0.0 (closed)
+
+        let (active, count) = wallet_active_positions_page(&conn, "0xw", 0, 10).unwrap();
+        assert_eq!(count, 1); // Only 0xm is active
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].condition_id, "0xm");
+
+        let (closed, count_closed) = wallet_closed_positions_page(&conn, "0xw", 0, 10).unwrap();
+        assert_eq!(count_closed, 1); // Only 0xm2 is closed
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].condition_id, "0xm2");
+    }
+
+    #[test]
+    fn test_wallet_activity_from_activity_raw() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO activity_raw (proxy_wallet, activity_type, condition_id, size, usdc_size, timestamp, transaction_hash)
+             VALUES ('0xw', 'Buy', '0xm', 10.0, 5.0, 100, '0xtx')",
+            [],
+        )
+        .unwrap();
+
+        let (activity, count) = wallet_activity_page(&conn, "0xw", 0, 10).unwrap();
+        assert_eq!(count, 1);
+        let a = &activity[0];
+        assert_eq!(a.activity_type, "Buy");
+        assert_eq!(a.shares_display, "10.00");
+        assert_eq!(a.usdc_amount_display, "$5.00");
+        assert_eq!(
+            a.polygonscan_url.as_deref(),
+            Some("https://polygonscan.com/tx/0xtx")
+        );
     }
 
     #[test]

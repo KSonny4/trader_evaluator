@@ -192,10 +192,20 @@ check-tables:
 	@$(DB_CMD) ".tables" | grep -q raw_api_responses || (echo "FAIL: raw_api_responses table missing" && exit 1)
 	@echo "OK: core tables exist"
 
-# === Local reset and run ===
-# Keep DB, delete everything except markets and wallets, then start evaluator and web.
+# === Local run ===
+# Start evaluator in background, then web in foreground. Ctrl+C stops web (evaluator keeps running).
 LOCAL_DB ?= data/evaluator.db
 
+run:
+	@mkdir -p data
+	@echo "Starting evaluator in background..."
+	@cargo run -p evaluator &
+	@sleep 3
+	@echo "Starting web (Ctrl+C to stop)..."
+	@cargo run -p web
+
+# === Local reset and run ===
+# Keep DB, delete everything except markets and wallets, then start evaluator and web.
 reset-and-run:
 	@mkdir -p data
 	@./scripts/reset_db_keep_markets_wallets.sh $(LOCAL_DB)
@@ -225,3 +235,17 @@ status:
 	@$(DB_CMD) "SELECT 'wallet scores today:' || COUNT(*) FROM wallet_scores_daily WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'last trade ingested: ' || COALESCE(MAX(ingested_at), 'never') FROM trades_raw"
 	@$(DB_CMD) "SELECT 'DB size:            ' || (page_count * page_size / 1024 / 1024) || ' MB' FROM pragma_page_count(), pragma_page_size()"
+
+# === Reclassify (after persona logic changes) ===
+# Clears persona state so the next pipeline run re-evaluates all wallets with current code/config.
+
+# Local: clear tables in data/evaluator.db. Restart evaluator (and web) yourself if they're running.
+reclassify-local:
+	@test -f $(LOCAL_DB) || (echo "DB not found: $(LOCAL_DB)"; exit 1)
+	@sqlite3 $(LOCAL_DB) "DELETE FROM wallet_exclusions; DELETE FROM wallet_personas; DELETE FROM wallet_persona_traits;" 2>/dev/null || true
+	@echo "Cleared persona state in $(LOCAL_DB). Restart evaluator (and web) so next run reclassifies."
+
+# Server: run prod script (stops services, clears, starts services).
+reclassify:
+	@echo "Server: sudo bash /opt/evaluator/scripts/prod_clear_persona_state.sh"
+	@echo "Local:  make reclassify-local   (then restart evaluator/web if running)"

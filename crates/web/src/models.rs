@@ -237,6 +237,20 @@ pub struct JourneyEvent {
     pub detail: String,
 }
 
+/// One aggregated position (grouped by condition_id + outcome) for the wallet scorecard.
+#[derive(serde::Serialize)]
+pub struct WalletPositionRow {
+    pub condition_id: String,
+    pub market_title: Option<String>,
+    pub outcome: Option<String>,
+    pub shares_display: String,
+    pub avg_price_display: String,
+    pub total_bet_display: String,
+    pub trade_count: u32,
+    /// Polymarket URL for this market (event or market page)
+    pub polymarket_url: Option<String>,
+}
+
 /// One row from trades_raw for the wallet scorecard.
 #[derive(serde::Serialize)]
 pub struct WalletTradeRow {
@@ -248,6 +262,24 @@ pub struct WalletTradeRow {
     pub price_display: String,
     pub timestamp_display: String,
     pub outcome: Option<String>,
+    /// Polygonscan URL for this trade's on-chain transaction
+    pub polygonscan_url: Option<String>,
+}
+
+/// One activity row from activity_raw for the wallet scorecard Activity tab.
+#[derive(serde::Serialize)]
+pub struct WalletActivityRow {
+    pub activity_type: String,
+    pub condition_id: Option<String>,
+    pub market_title: Option<String>,
+    pub outcome: Option<String>,
+    pub shares_display: String,
+    pub usdc_amount_display: String,
+    pub timestamp_display: String,
+    /// Polygonscan URL for this activity's on-chain transaction
+    pub polygonscan_url: Option<String>,
+    /// Polymarket URL for this market (event or market page)
+    pub polymarket_url: Option<String>,
 }
 
 pub struct WalletJourney {
@@ -261,12 +293,23 @@ pub struct WalletJourney {
     pub persona: Option<String>,
     pub confidence_display: Option<String>,
     pub exclusion_reason: Option<String>,
+    /// Wallet rules engine state: CANDIDATE, PAPER_TRADING, APPROVED, STOPPED.
+    pub pipeline_state: String,
     pub paper_pnl_display: String,
     pub exposure_display: String,
     pub copy_fidelity_display: String,
     pub follower_slippage_display: String,
     pub events: Vec<JourneyEvent>,
-    /// Trades from trades_raw for this wallet (newest first; initial page loads first 20).
+    /// Active positions (net_shares > 0.5) — initial page of 20.
+    pub active_positions: Vec<WalletPositionRow>,
+    pub total_active_positions_count: usize,
+    /// Closed positions (net_shares <= 0.5) — initial page of 20.
+    pub closed_positions: Vec<WalletPositionRow>,
+    pub total_closed_positions_count: usize,
+    /// Activity feed from activity_raw — initial page of 20.
+    pub activities: Vec<WalletActivityRow>,
+    pub total_activities_count: usize,
+    /// Trades from trades_raw for this wallet (newest first; for collapsible "All trades" detail).
     pub trades: Vec<WalletTradeRow>,
     /// Total number of trades in trades_raw for this wallet (for "All trades (N)" and load-more).
     pub total_trades_count: usize,

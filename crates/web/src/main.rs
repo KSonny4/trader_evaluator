@@ -898,6 +898,37 @@ struct WalletTradesResponse {
     total: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct WalletActivityQuery {
+    offset: u32,
+    #[serde(default = "default_positions_limit")]
+    limit: u32,
+}
+
+#[derive(Serialize)]
+struct WalletActivityResponse {
+    activities: Vec<models::WalletActivityRow>,
+    total: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WalletPositionsQuery {
+    #[serde(default)]
+    offset: u32,
+    #[serde(default = "default_positions_limit")]
+    limit: u32,
+}
+
+fn default_positions_limit() -> u32 {
+    20
+}
+
+#[derive(Serialize)]
+struct WalletPositionsResponse {
+    positions: Vec<models::WalletPositionRow>,
+    total: u64,
+}
+
 async fn scorecard_page(
     State(state): State<Arc<AppState>>,
     Path(wallet): Path<String>,
@@ -943,6 +974,114 @@ async fn wallet_trades_json(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(WalletTradesResponse {
                 trades: vec![],
+                total: 0,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn wallet_positions_json(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+    Query(q): Query<WalletPositionsQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.min(100);
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_positions_page(conn, &wallet, q.offset, limit)
+    })
+    .await
+    {
+        Ok((positions, total)) => Json(WalletPositionsResponse {
+            positions,
+            total: total as u64,
+        })
+        .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(WalletPositionsResponse {
+                positions: vec![],
+                total: 0,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn wallet_active_positions_json(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+    Query(q): Query<WalletPositionsQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.min(100);
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_active_positions_page(conn, &wallet, q.offset, limit)
+    })
+    .await
+    {
+        Ok((positions, total)) => Json(WalletPositionsResponse {
+            positions,
+            total: total as u64,
+        })
+        .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(WalletPositionsResponse {
+                positions: vec![],
+                total: 0,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn wallet_closed_positions_json(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+    Query(q): Query<WalletPositionsQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.min(100);
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_closed_positions_page(conn, &wallet, q.offset, limit)
+    })
+    .await
+    {
+        Ok((positions, total)) => Json(WalletPositionsResponse {
+            positions,
+            total: total as u64,
+        })
+        .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(WalletPositionsResponse {
+                positions: vec![],
+                total: 0,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn wallet_activity_json(
+    State(state): State<Arc<AppState>>,
+    Path(wallet): Path<String>,
+    Query(q): Query<WalletActivityQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.min(100);
+    match with_db(state.clone(), move |conn| {
+        queries::wallet_activity_page(conn, &wallet, q.offset, limit)
+    })
+    .await
+    {
+        Ok((activities, total)) => Json(WalletActivityResponse {
+            activities,
+            total: total as u64,
+        })
+        .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(WalletActivityResponse {
+                activities: vec![],
                 total: 0,
             }),
         )
@@ -1042,6 +1181,16 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
         .route("/journey/{wallet}", get(journey_page))
         .route("/wallet/{wallet}", get(scorecard_page))
         .route("/wallet/{wallet}/trades", get(wallet_trades_json))
+        .route("/wallet/{wallet}/positions", get(wallet_positions_json))
+        .route(
+            "/wallet/{wallet}/active-positions",
+            get(wallet_active_positions_json),
+        )
+        .route(
+            "/wallet/{wallet}/closed-positions",
+            get(wallet_closed_positions_json),
+        )
+        .route("/wallet/{wallet}/activity", get(wallet_activity_json))
         .route("/partials/status", get(status_partial))
         .route("/partials/async_funnel", get(async_funnel_partial))
         .route("/partials/unified_funnel", get(unified_funnel_partial))

@@ -30,6 +30,160 @@ pub struct WalletFeatures {
     pub top_domain_ratio: f64,
 }
 
+/// Paired round-trip stats: wins, losses, and hold durations (seconds) for each closed position.
+struct PairedStats {
+    wins: u32,
+    losses: u32,
+    hold_seconds: Vec<f64>,
+    /// (timestamp of close, pnl) for daily series
+    closed_pnls: Vec<(i64, f64)>,
+}
+
+/// Pair BUY and SELL trades within each condition_id (FIFO). Compute win/loss from actual PnL,
+/// hold time per position, and closed PnLs for drawdown/Sharpe.
+type MarketBuysSells = (Vec<(f64, f64, i64)>, Vec<(f64, f64, i64)>);
+
+fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Result<PairedStats> {
+    #[derive(Debug)]
+    struct Trade {
+        condition_id: String,
+        side: String,
+        size: f64,
+        price: f64,
+        timestamp: i64,
+    }
+    let rows: Vec<Trade> = conn
+        .prepare(
+            "SELECT condition_id, side, size, price, timestamp
+             FROM trades_raw
+             WHERE proxy_wallet = ?1 AND timestamp >= ?2
+             ORDER BY condition_id, timestamp",
+        )?
+        .query_map(rusqlite::params![proxy_wallet, cutoff], |row| {
+            Ok(Trade {
+                condition_id: row.get(0)?,
+                side: row.get(1)?,
+                size: row.get(2)?,
+                price: row.get(3)?,
+                timestamp: row.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut wins = 0u32;
+    let mut losses = 0u32;
+    let mut hold_seconds: Vec<f64> = Vec::new();
+    let mut closed_pnls: Vec<(i64, f64)> = Vec::new();
+
+    let mut by_market: std::collections::HashMap<String, MarketBuysSells> =
+        std::collections::HashMap::new();
+    for t in &rows {
+        let (buys, sells) = by_market
+            .entry(t.condition_id.clone())
+            .or_insert_with(|| (Vec::new(), Vec::new()));
+        if t.side == "BUY" {
+            buys.push((t.size, t.price, t.timestamp));
+        } else if t.side == "SELL" {
+            sells.push((t.size, t.price, t.timestamp));
+        }
+    }
+
+    for (_cid, (buys, sells)) in by_market {
+        let n = buys.len().min(sells.len());
+        for i in 0..n {
+            let (buy_size, buy_price, buy_ts) = buys[i];
+            let (sell_size, sell_price, sell_ts) = sells[i];
+            let size = buy_size.min(sell_size);
+            if size <= 0.0 {
+                continue;
+            }
+            let pnl = (sell_price - buy_price) * size;
+            if pnl > 0.0 {
+                wins += 1;
+            } else {
+                losses += 1;
+            }
+            hold_seconds.push((sell_ts - buy_ts) as f64);
+            closed_pnls.push((sell_ts, pnl));
+        }
+    }
+
+    Ok(PairedStats {
+        wins,
+        losses,
+        hold_seconds,
+        closed_pnls,
+    })
+}
+
+/// Build daily PnL from (timestamp, pnl) closed positions, then compute max drawdown % and Sharpe ratio.
+fn drawdown_and_sharpe_from_daily_pnl(closed_pnls: &[(i64, f64)]) -> Result<(f64, f64)> {
+    if closed_pnls.is_empty() {
+        return Ok((0.0, 0.0));
+    }
+    // Group by day (UTC day from timestamp).
+    let mut daily: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    for (ts, pnl) in closed_pnls {
+        let day = ts / 86400;
+        *daily.entry(day).or_insert(0.0) += *pnl;
+    }
+    let mut days: Vec<i64> = daily.keys().copied().collect();
+    days.sort_unstable();
+    let daily_pnl: Vec<f64> = days.iter().map(|d| daily[d]).collect();
+
+    // Equity curve (cumulative PnL).
+    let mut equity = Vec::with_capacity(daily_pnl.len());
+    let mut cum = 0.0;
+    for p in &daily_pnl {
+        cum += *p;
+        equity.push(cum);
+    }
+
+    // Max drawdown: (peak - trough) / peak when peak > 0, as percentage.
+    let mut max_drawdown_pct = 0.0f64;
+    let mut peak = 0.0f64;
+    for &e in &equity {
+        if e > peak {
+            peak = e;
+        }
+        if peak > 0.0 {
+            let dd = 100.0 * (peak - e) / peak;
+            if dd > max_drawdown_pct {
+                max_drawdown_pct = dd;
+            }
+        }
+    }
+
+    // Sharpe: daily returns = daily_pnl[i] / equity[i-1], then mean/std annualized.
+    if equity.len() < 2 {
+        return Ok((max_drawdown_pct, 0.0));
+    }
+    let mut returns: Vec<f64> = Vec::with_capacity(equity.len() - 1);
+    for i in 1..equity.len() {
+        let prev = equity[i - 1];
+        if prev.abs() > 1e-12 {
+            returns.push(daily_pnl[i] / prev);
+        } else {
+            returns.push(0.0);
+        }
+    }
+    let n = returns.len() as f64;
+    if n < 1.0 {
+        return Ok((max_drawdown_pct, 0.0));
+    }
+    let mean_ret: f64 = returns.iter().sum::<f64>() / n;
+    let variance = returns.iter().map(|r| (r - mean_ret).powi(2)).sum::<f64>() / n;
+    let std_ret = variance.sqrt();
+    let sharpe_ratio = if std_ret > 1e-12 {
+        // Annualize: multiply by sqrt(252) for daily data.
+        (mean_ret / std_ret) * (252.0_f64).sqrt()
+    } else {
+        0.0
+    };
+
+    Ok((max_drawdown_pct, sharpe_ratio))
+}
+
 /// Prefer paper PnL (our copy) when settled paper trades exist; otherwise fallback to positions_snapshots.
 fn total_pnl_from_paper_or_positions(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> f64 {
     let paper_pnl: f64 = conn
@@ -92,27 +246,10 @@ pub fn compute_wallet_features(
         |row| row.get(0),
     )?;
 
-    // Win/loss counting: a "win" is a SELL at price > 0.5 (directional bet won)
-    // This is a rough heuristic — proper PnL requires settlement data
-    let win_count: u32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM trades_raw
-             WHERE proxy_wallet = ?1 AND timestamp >= ?2
-             AND side = 'SELL' AND price > 0.5",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    let loss_count: u32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM trades_raw
-             WHERE proxy_wallet = ?1 AND timestamp >= ?2
-             AND side = 'SELL' AND price <= 0.5",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
+    // Win/loss and hold times from actual per-position PnL (BUY-SELL pairing, FIFO per market).
+    let paired = paired_trade_stats(conn, proxy_wallet, cutoff)?;
+    let win_count = paired.wins;
+    let loss_count = paired.losses;
 
     let avg_position_size: f64 = conn
         .query_row(
@@ -137,14 +274,16 @@ pub fn compute_wallet_features(
         0.0
     };
 
-    // Avg hold time: approximate from time between BUY and next SELL in same market
-    // For now, default to 0 — will be refined when we have proper position tracking
-    let avg_hold_time_hours = 0.0;
+    // Avg hold time from paired BUY-SELL round-trips (hours).
+    let avg_hold_time_hours = if paired.hold_seconds.is_empty() {
+        0.0
+    } else {
+        let sum: f64 = paired.hold_seconds.iter().sum();
+        (sum / paired.hold_seconds.len() as f64) / 3600.0
+    };
 
-    // Max drawdown and Sharpe: require daily return series
-    // For now, placeholders — will be computed from paper trades when available
-    let max_drawdown_pct = 0.0;
-    let sharpe_ratio = 0.0;
+    // Max drawdown and Sharpe from daily PnL series (built from closed positions).
+    let (max_drawdown_pct, sharpe_ratio) = drawdown_and_sharpe_from_daily_pnl(&paired.closed_pnls)?;
 
     // Active positions: count of currently open paper_positions
     let active_positions: u32 = conn
@@ -531,6 +670,51 @@ mod tests {
         let f = compute_wallet_features(&db.conn, "0xabc", 30, now).unwrap();
         assert_eq!(f.top_domain.as_deref(), Some("sports"));
         assert!(f.top_domain_ratio > 0.8);
+    }
+
+    #[test]
+    fn test_win_loss_from_actual_pnl_bonder_loses() {
+        // Bonder: buy at 0.99, sell at 0.98 => losing trade. Old heuristic (SELL > 0.5) would count as win.
+        let now = 1_700_000_000i64;
+        let db = setup_db_with_trades(&[
+            ("0xbonder", "m1", "BUY", 10.0, 0.99, now - 100),
+            ("0xbonder", "m1", "SELL", 10.0, 0.98, now - 99),
+            ("0xbonder", "m1", "BUY", 10.0, 0.98, now - 98),
+            ("0xbonder", "m1", "SELL", 10.0, 0.97, now - 97),
+        ]);
+        let f = compute_wallet_features(&db.conn, "0xbonder", 30, now).unwrap();
+        assert_eq!(
+            f.win_count, 0,
+            "bonder selling below buy price should be 0 wins"
+        );
+        assert_eq!(f.loss_count, 2, "both round-trips lose money");
+    }
+
+    #[test]
+    fn test_win_loss_from_actual_pnl_real_wins() {
+        // Buy low, sell high => wins
+        let now = 1_700_000_000i64;
+        let db = setup_db_with_trades(&[
+            ("0xwinner", "m1", "BUY", 20.0, 0.50, now - 100),
+            ("0xwinner", "m1", "SELL", 20.0, 0.70, now - 99),
+            ("0xwinner", "m2", "BUY", 10.0, 0.40, now - 98),
+            ("0xwinner", "m2", "SELL", 10.0, 0.35, now - 97),
+        ]);
+        let f = compute_wallet_features(&db.conn, "0xwinner", 30, now).unwrap();
+        assert_eq!(f.win_count, 1);
+        assert_eq!(f.loss_count, 1);
+    }
+
+    #[test]
+    fn test_avg_hold_time_hours_from_paired_trades() {
+        // One round-trip: BUY at 0, SELL at 7200 sec (2 hours) => avg 2.0 hours
+        let now = 1_700_000_000i64;
+        let db = setup_db_with_trades(&[
+            ("0xhold", "m1", "BUY", 10.0, 0.50, now - 7200),
+            ("0xhold", "m1", "SELL", 10.0, 0.55, now),
+        ]);
+        let f = compute_wallet_features(&db.conn, "0xhold", 30, now).unwrap();
+        assert!((f.avg_hold_time_hours - 2.0).abs() < 0.01);
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub struct PersonaConfig {
     pub generalist_min_sharpe: f64,
     pub accumulator_min_hold_hours: f64,
     pub accumulator_max_trades_per_week: f64,
+    pub accumulator_min_roi: f64,
     #[allow(dead_code)] // Used when Execution Master detection is wired (PnL decomposition)
     pub execution_master_pnl_ratio: f64,
     pub tail_risk_min_win_rate: f64,
@@ -60,6 +61,7 @@ impl PersonaConfig {
             generalist_min_sharpe: 1.0,
             accumulator_min_hold_hours: 48.0,
             accumulator_max_trades_per_week: 5.0,
+            accumulator_min_roi: 0.05,
             execution_master_pnl_ratio: 0.70,
             tail_risk_min_win_rate: 0.80,
             tail_risk_loss_multiplier: 5.0,
@@ -95,6 +97,7 @@ impl PersonaConfig {
             generalist_min_sharpe: p.generalist_min_sharpe,
             accumulator_min_hold_hours: p.accumulator_min_hold_hours,
             accumulator_max_trades_per_week: p.accumulator_max_trades_per_week,
+            accumulator_min_roi: p.accumulator_min_roi,
             execution_master_pnl_ratio: p.execution_master_pnl_ratio,
             tail_risk_min_win_rate: p.tail_risk_min_win_rate,
             tail_risk_loss_multiplier: p.tail_risk_loss_multiplier,
@@ -173,6 +176,11 @@ pub enum ExclusionReason {
         trades_per_day: f64,
         avg_size_usdc: f64,
     },
+    /// Trades predominantly at extreme prices (>=0.9 or <=0.1); edge not replicable for copy-trading.
+    Bonder {
+        extreme_price_ratio: f64,
+        threshold: f64,
+    },
     /// Wallet is in the configured known_bots list (Strategy Bible §4 Stage 1).
     KnownBot,
     /// Would pass persona checks but ROI < stage2_min_roi (win rate + PnL combo).
@@ -197,6 +205,7 @@ impl ExclusionReason {
             Self::LiquidityProvider { .. } => "LIQUIDITY_PROVIDER",
             Self::JackpotGambler { .. } => "JACKPOT_GAMBLER",
             Self::BotSwarmMicro { .. } => "BOT_SWARM_MICRO",
+            Self::Bonder { .. } => "BONDER",
             Self::KnownBot => "KNOWN_BOT",
             Self::InsufficientPnl { .. } => "INSUFFICIENT_PNL",
         }
@@ -222,6 +231,10 @@ impl ExclusionReason {
             Self::LiquidityProvider { mid_fill_ratio, .. } => *mid_fill_ratio,
             Self::JackpotGambler { pnl_top1_share, .. } => *pnl_top1_share,
             Self::BotSwarmMicro { trades_per_day, .. } => *trades_per_day,
+            Self::Bonder {
+                extreme_price_ratio,
+                ..
+            } => *extreme_price_ratio,
             Self::KnownBot => 1.0,
             Self::InsufficientPnl { roi, .. } => *roi,
         }
@@ -249,6 +262,7 @@ impl ExclusionReason {
             Self::LiquidityProvider { .. } => 0.0,
             Self::JackpotGambler { .. } => 0.0,
             Self::BotSwarmMicro { .. } => 0.0,
+            Self::Bonder { threshold, .. } => *threshold,
             Self::KnownBot => 0.0,
             Self::InsufficientPnl { min_roi, .. } => *min_roi,
         }
@@ -625,11 +639,16 @@ pub fn detect_patient_accumulator(
     features: &WalletFeatures,
     min_hold_hours: f64,
     max_trades_per_week: f64,
+    roi: f64,
+    min_roi: f64,
 ) -> Option<Persona> {
     if features.avg_hold_time_hours < min_hold_hours {
         return None;
     }
     if features.trades_per_week > max_trades_per_week {
+        return None;
+    }
+    if roi < min_roi {
         return None;
     }
     Some(Persona::PatientAccumulator)
@@ -774,6 +793,15 @@ pub fn classify_wallet(
         return Ok(ClassificationResult::Excluded(reason));
     }
 
+    if features.extreme_price_ratio >= config.bonder_min_extreme_price_ratio {
+        let reason = ExclusionReason::Bonder {
+            extreme_price_ratio: features.extreme_price_ratio,
+            threshold: config.bonder_min_extreme_price_ratio,
+        };
+        record_exclusion(conn, &features.proxy_wallet, &reason)?;
+        return Ok(ClassificationResult::Excluded(reason));
+    }
+
     // --- Followable persona detection (priority order) ---
     // Each followable persona also requires roi >= stage2_min_roi (win rate + PnL combo).
 
@@ -813,6 +841,8 @@ pub fn classify_wallet(
         features,
         config.accumulator_min_hold_hours,
         config.accumulator_max_trades_per_week,
+        roi,
+        config.accumulator_min_roi,
     ) {
         if let Some(reason) =
             record_exclusion_if_roi_fails(conn, &features.proxy_wallet, roi, config.stage2_min_roi)?
@@ -1180,6 +1210,14 @@ mod tests {
             .reason_str(),
             "BOT_SWARM_MICRO"
         );
+        assert_eq!(
+            ExclusionReason::Bonder {
+                extreme_price_ratio: 0.85,
+                threshold: 0.60
+            }
+            .reason_str(),
+            "BONDER"
+        );
     }
 
     fn make_features(unique_markets: u32, win_count: u32, loss_count: u32) -> WalletFeatures {
@@ -1418,21 +1456,21 @@ mod tests {
     #[test]
     fn test_detect_patient_accumulator() {
         let features = make_accumulator_features(72.0, 3.0); // holds >48h, <5 trades/week
-        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.10, 0.05);
         assert_eq!(persona, Some(Persona::PatientAccumulator));
     }
 
     #[test]
     fn test_not_accumulator_too_frequent() {
         let features = make_accumulator_features(72.0, 15.0); // >5 trades/week
-        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.10, 0.05);
         assert_eq!(persona, None);
     }
 
     #[test]
     fn test_not_accumulator_short_holds() {
         let features = make_accumulator_features(12.0, 3.0); // holds <48h
-        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.10, 0.05);
         assert_eq!(persona, None);
     }
 
@@ -1440,7 +1478,7 @@ mod tests {
     fn test_accumulator_boundary_exact_min_hold() {
         // Exactly 48h = at threshold, should pass (not <)
         let features = make_accumulator_features(48.0, 3.0);
-        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.10, 0.05);
         assert_eq!(persona, Some(Persona::PatientAccumulator));
     }
 
@@ -1448,8 +1486,16 @@ mod tests {
     fn test_accumulator_boundary_exact_max_frequency() {
         // Exactly 5 trades/week = at threshold, should pass (not >)
         let features = make_accumulator_features(72.0, 5.0);
-        let persona = detect_patient_accumulator(&features, 48.0, 5.0);
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.10, 0.05);
         assert_eq!(persona, Some(Persona::PatientAccumulator));
+    }
+
+    #[test]
+    fn test_not_accumulator_low_roi() {
+        let features = make_accumulator_features(72.0, 3.0); // holds >48h, <5 trades/week (PASS)
+        // ROI 0.01 < min 0.05 => FAIL
+        let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.01, 0.05);
+        assert_eq!(persona, None);
     }
 
     // --- Task 8: Execution Master ---

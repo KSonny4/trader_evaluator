@@ -10,6 +10,7 @@
         <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
     </div>
 
+    <!-- Summary Cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div class="bg-gray-800/50 rounded-lg p-3">
             <div class="text-xs text-gray-500">Persona</div>
@@ -24,10 +25,14 @@
                 {% when Some with (c) %}confidence: {{ c }}
                 {% when None %}{% endmatch %}
             </div>
+            <span class="inline-block mt-1 text-xs font-mono px-1.5 py-0.5 rounded bg-gray-700 text-gray-300" title="Wallet rules engine state">Pipeline: {{ journey.pipeline_state }}</span>
         </div>
         <div class="bg-gray-800/50 rounded-lg p-3">
             <div class="text-xs text-gray-500">Paper PnL</div>
             <div class="text-sm text-gray-200">{{ journey.paper_pnl_display }}</div>
+            {% if journey.pipeline_state != "PAPER_TRADING" && journey.pipeline_state != "APPROVED" %}
+            <div class="text-xs text-gray-500 mt-0.5">Not yet paper trading</div>
+            {% endif %}
         </div>
         <div class="bg-gray-800/50 rounded-lg p-3">
             <div class="text-xs text-gray-500">Exposure</div>
@@ -48,6 +53,7 @@
         <span class="text-gray-600 ml-1">(we never have all trades; this is when we last fetched for this wallet)</span>
     </div>
 
+    <!-- Timeline -->
     <div class="bg-gray-900 rounded-lg p-4">
         <div class="flex items-center justify-between">
             <h3 class="text-lg font-semibold text-gray-200">Timeline</h3>
@@ -71,43 +77,208 @@
         {% endif %}
     </div>
 
-    <div class="bg-gray-900 rounded-lg p-4">
-        <h3 class="text-lg font-semibold text-gray-200">All trades ({{ journey.total_trades_count }})</h3>
-        {% if journey.trades.is_empty() %}
-        <p class="text-gray-500 text-sm italic mt-3">No trades for this wallet yet.</p>
+    <!-- Tabs Navigation -->
+    <div class="border-b border-gray-700">
+        <nav class="-mb-px flex gap-6" aria-label="Tabs">
+            <button onclick="switchTab('positions')" id="tab-btn-positions" class="border-blue-500 text-blue-400 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium" aria-current="page">
+                Positions
+            </button>
+            <button onclick="switchTab('activity')" id="tab-btn-activity" class="border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium">
+                Activity
+            </button>
+        </nav>
+    </div>
+
+    <!-- Positions Content -->
+    <div id="tab-content-positions" class="block">
+        <div class="flex gap-2 mb-4 mt-4">
+            <button onclick="switchSubTab('active')" id="subtab-btn-active" class="bg-gray-700 text-white px-3 py-1.5 rounded-md text-sm font-medium">
+                Active ({{ journey.total_active_positions_count }})
+            </button>
+            <button onclick="switchSubTab('closed')" id="subtab-btn-closed" class="text-gray-400 hover:text-white px-3 py-1.5 rounded-md text-sm font-medium">
+                Closed ({{ journey.total_closed_positions_count }})
+            </button>
+        </div>
+
+        <!-- Active Positions -->
+        <div id="subtab-content-active" class="block bg-gray-900 rounded-lg overflow-hidden">
+            {% if journey.active_positions.is_empty() %}
+            <div class="p-8 text-center text-gray-500 italic">No active positions.</div>
+            {% else %}
+            <div class="overflow-x-auto max-h-[70vh] overflow-y-auto" id="active-positions-container">
+                <table class="w-full text-sm text-left">
+                    <thead class="bg-gray-800 text-gray-400 sticky top-0 z-10">
+                        <tr>
+                            <th class="py-3 px-4 font-medium">Market</th>
+                            <th class="py-3 px-4 font-medium">Outcome</th>
+                            <th class="py-3 px-4 font-medium text-right">Shares</th>
+                            <th class="py-3 px-4 font-medium text-right">Avg Price</th>
+                            <th class="py-3 px-4 font-medium text-right">Total Bet</th>
+                        </tr>
+                    </thead>
+                    <tbody id="active-positions-tbody" class="text-gray-300 divide-y divide-gray-800">
+                        {% for p in journey.active_positions %}
+                        <tr class="hover:bg-gray-800/50 transition-colors">
+                            <td class="py-3 px-4">
+                                {% match p.polymarket_url %}
+                                    {% when Some with (url) %}
+                                    <a href="{{ url }}" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 font-medium block truncate max-w-sm" title="{{ p.market_title.as_deref().unwrap_or(p.condition_id.as_str()) }}">
+                                        {% match p.market_title %}
+                                            {% when Some with (t) %}{{ t }}
+                                            {% when None %}{{ p.condition_id }}
+                                        {% endmatch %}
+                                    </a>
+                                    {% when None %}
+                                    <span class="block truncate max-w-sm" title="{{ p.condition_id }}">
+                                        {% match p.market_title %}
+                                            {% when Some with (t) %}{{ t }}
+                                            {% when None %}{{ p.condition_id }}
+                                        {% endmatch %}
+                                    </span>
+                                {% endmatch %}
+                            </td>
+                            <td class="py-3 px-4 font-mono text-gray-400">
+                                {% match p.outcome %}
+                                {% when Some with (o) %}{{ o }}
+                                {% when None %}—
+                                {% endmatch %}
+                            </td>
+                            <td class="py-3 px-4 text-right font-mono">{{ p.shares_display }}</td>
+                            <td class="py-3 px-4 text-right font-mono">{{ p.avg_price_display }}</td>
+                            <td class="py-3 px-4 text-right font-mono">{{ p.total_bet_display }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if journey.total_active_positions_count > journey.active_positions.len() %}
+                        <tr id="active-sentinel" class="text-gray-500" data-type="active-positions" data-wallet="{{ journey.proxy_wallet }}" data-offset="{{ journey.active_positions.len() }}" data-limit="20" data-total="{{ journey.total_active_positions_count }}">
+                            <td colspan="5" class="py-4 text-center text-xs">Scroll to load more…</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Closed Positions -->
+        <div id="subtab-content-closed" class="hidden bg-gray-900 rounded-lg overflow-hidden">
+            {% if journey.closed_positions.is_empty() %}
+            <div class="p-8 text-center text-gray-500 italic">No closed positions.</div>
+            {% else %}
+            <div class="overflow-x-auto max-h-[70vh] overflow-y-auto" id="closed-positions-container">
+                <table class="w-full text-sm text-left">
+                    <thead class="bg-gray-800 text-gray-400 sticky top-0 z-10">
+                        <tr>
+                            <th class="py-3 px-4 font-medium">Market</th>
+                            <th class="py-3 px-4 font-medium">Outcome</th>
+                            <th class="py-3 px-4 font-medium text-right">Total Bet</th>
+                            <th class="py-3 px-4 font-medium text-right">Trades</th>
+                        </tr>
+                    </thead>
+                    <tbody id="closed-positions-tbody" class="text-gray-300 divide-y divide-gray-800">
+                        {% for p in journey.closed_positions %}
+                        <tr class="hover:bg-gray-800/50 transition-colors">
+                            <td class="py-3 px-4">
+                                {% match p.polymarket_url %}
+                                    {% when Some with (url) %}
+                                    <a href="{{ url }}" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 font-medium block truncate max-w-sm">
+                                        {% match p.market_title %}
+                                            {% when Some with (t) %}{{ t }}
+                                            {% when None %}{{ p.condition_id }}
+                                        {% endmatch %}
+                                    </a>
+                                    {% when None %}
+                                    <span class="block truncate max-w-sm">
+                                        {% match p.market_title %}
+                                            {% when Some with (t) %}{{ t }}
+                                            {% when None %}{{ p.condition_id }}
+                                        {% endmatch %}
+                                    </span>
+                                {% endmatch %}
+                            </td>
+                            <td class="py-3 px-4 font-mono text-gray-400">
+                                {% match p.outcome %}
+                                {% when Some with (o) %}{{ o }}
+                                {% when None %}—
+                                {% endmatch %}
+                            </td>
+                            <td class="py-3 px-4 text-right font-mono">{{ p.total_bet_display }}</td>
+                            <td class="py-3 px-4 text-right font-mono">{{ p.trade_count }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if journey.total_closed_positions_count > journey.closed_positions.len() %}
+                        <tr id="closed-sentinel" class="text-gray-500" data-type="closed-positions" data-wallet="{{ journey.proxy_wallet }}" data-offset="{{ journey.closed_positions.len() }}" data-limit="20" data-total="{{ journey.total_closed_positions_count }}">
+                            <td colspan="4" class="py-4 text-center text-xs">Scroll to load more…</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Activity Content -->
+    <div id="tab-content-activity" class="hidden bg-gray-900 rounded-lg overflow-hidden mt-4">
+        {% if journey.activities.is_empty() %}
+        <div class="p-8 text-center text-gray-500 italic">No activity found.</div>
         {% else %}
-        <p class="text-gray-500 text-xs mt-1">Showing first 20; scroll down to load more.</p>
-        <div class="mt-3 overflow-x-auto max-h-[70vh] overflow-y-auto" id="trades-container">
-            <table class="w-full text-sm">
-                <thead class="sticky top-0 bg-gray-900 z-10">
-                    <tr class="text-left text-gray-500 border-b border-gray-700">
-                        <th class="pb-2 pr-4">Time</th>
-                        <th class="pb-2 pr-4">Market</th>
-                        <th class="pb-2 pr-4">Side</th>
-                        <th class="pb-2 pr-4">Size</th>
-                        <th class="pb-2 pr-4">Price</th>
-                        <th class="pb-2">Outcome</th>
+        <div class="overflow-x-auto max-h-[70vh] overflow-y-auto" id="activity-container">
+            <table class="w-full text-sm text-left">
+                <thead class="bg-gray-800 text-gray-400 sticky top-0 z-10">
+                    <tr>
+                        <th class="py-3 px-4 font-medium">Type</th>
+                        <th class="py-3 px-4 font-medium">Market</th>
+                        <th class="py-3 px-4 font-medium">Outcome</th>
+                        <th class="py-3 px-4 font-medium text-right">Amount</th>
+                        <th class="py-3 px-4 font-medium text-right">Time</th>
                     </tr>
                 </thead>
-                <tbody id="trades-tbody">
-                    {% for t in journey.trades %}
-                    <tr class="border-b border-gray-800 text-gray-300">
-                        <td class="py-2 pr-4 font-mono text-xs">{{ t.timestamp_display }}</td>
-                        <td class="py-2 pr-4 max-w-xs truncate" title="{{ t.condition_id }}">
-                            {% match t.market_title %}
-                            {% when Some with (title) %}{{ title }}
-                            {% when None %}<span class="text-gray-500 font-mono">{{ t.condition_id }}</span>
+                <tbody id="activity-tbody" class="text-gray-300 divide-y divide-gray-800">
+                    {% for a in journey.activities %}
+                    <tr class="hover:bg-gray-800/50 transition-colors">
+                        <td class="py-3 px-4">
+                            <div class="font-medium text-gray-200">{{ a.activity_type }}</div>
+                            <div class="text-xs text-gray-500 font-mono">{{ a.usdc_amount_display }}</div>
+                        </td>
+                        <td class="py-3 px-4">
+                            {% match a.polymarket_url %}
+                                {% when Some with (url) %}
+                                <a href="{{ url }}" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 block truncate max-w-xs">
+                                    {% match a.market_title %}
+                                        {% when Some with (t) %}{{ t }}
+                                        {% when None %}{% match a.condition_id %}{% when Some with (cid) %}{{ cid }}{% when None %}—{% endmatch %}
+                                    {% endmatch %}
+                                </a>
+                                {% when None %}
+                                <span class="block truncate max-w-xs">
+                                    {% match a.market_title %}
+                                        {% when Some with (t) %}{{ t }}
+                                        {% when None %}{% match a.condition_id %}{% when Some with (cid) %}{{ cid }}{% when None %}—{% endmatch %}
+                                    {% endmatch %}
+                                </span>
                             {% endmatch %}
                         </td>
-                        <td class="py-2 pr-4">{{ t.side }}</td>
-                        <td class="py-2 pr-4">{{ t.size_display }}</td>
-                        <td class="py-2 pr-4">{{ t.price_display }}</td>
-                        <td class="py-2">{% match t.outcome %}{% when Some with (o) %}{{ o }}{% when None %}—{% endmatch %}</td>
+                        <td class="py-3 px-4 font-mono text-gray-400">
+                            {% match a.outcome %}
+                            {% when Some with (o) %}{{ o }}
+                            {% when None %}—
+                            {% endmatch %}
+                        </td>
+                        <td class="py-3 px-4 text-right font-mono">{{ a.shares_display }} shares</td>
+                        <td class="py-3 px-4 text-right whitespace-nowrap">
+                            <div class="text-xs text-gray-400">{{ a.timestamp_display }}</div>
+                            {% match a.polygonscan_url %}
+                            {% when Some with (url) %}
+                            <a href="{{ url }}" target="_blank" rel="noopener" class="inline-block mt-0.5 text-xs text-blue-500 hover:text-blue-400" title="View on Polygonscan">
+                                ↗ Tx
+                            </a>
+                            {% when None %}{% endmatch %}
+                        </td>
                     </tr>
                     {% endfor %}
-                    {% if journey.total_trades_count > journey.trades.len() %}
-                    <tr id="trades-sentinel" class="border-b border-gray-800 text-gray-500" data-wallet="{{ journey.proxy_wallet }}" data-offset="20" data-limit="20" data-total="{{ journey.total_trades_count }}">
-                        <td colspan="6" class="py-4 text-center text-xs">Scroll to load more…</td>
+                    {% if journey.total_activities_count > journey.activities.len() %}
+                    <tr id="activity-sentinel" class="text-gray-500" data-type="activity" data-wallet="{{ journey.proxy_wallet }}" data-offset="{{ journey.activities.len() }}" data-limit="20" data-total="{{ journey.total_activities_count }}">
+                        <td colspan="5" class="py-4 text-center text-xs">Scroll to load more…</td>
                     </tr>
                     {% endif %}
                 </tbody>
@@ -115,62 +286,163 @@
         </div>
         {% endif %}
     </div>
+</div>
 
-    {% if !journey.trades.is_empty() && journey.total_trades_count > journey.trades.len() %}
-    <script>
-    (function() {
-        var sentinel = document.getElementById('trades-sentinel');
-        var tbody = document.getElementById('trades-tbody');
-        var container = document.getElementById('trades-container');
+<script>
+function switchTab(tab) {
+    // Buttons
+    document.getElementById('tab-btn-positions').className = tab === 'positions'
+        ? 'border-blue-500 text-blue-400 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium'
+        : 'border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium';
+    document.getElementById('tab-btn-activity').className = tab === 'activity'
+        ? 'border-blue-500 text-blue-400 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium'
+        : 'border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium';
+
+    // Content
+    document.getElementById('tab-content-positions').className = tab === 'positions' ? 'block' : 'hidden';
+    document.getElementById('tab-content-activity').className = tab === 'activity' ? 'block mt-4' : 'hidden';
+}
+
+function switchSubTab(subtab) {
+    // Buttons
+    document.getElementById('subtab-btn-active').className = subtab === 'active'
+        ? 'bg-gray-700 text-white px-3 py-1.5 rounded-md text-sm font-medium'
+        : 'text-gray-400 hover:text-white px-3 py-1.5 rounded-md text-sm font-medium';
+    document.getElementById('subtab-btn-closed').className = subtab === 'closed'
+        ? 'bg-gray-700 text-white px-3 py-1.5 rounded-md text-sm font-medium'
+        : 'text-gray-400 hover:text-white px-3 py-1.5 rounded-md text-sm font-medium';
+
+    // Content
+    document.getElementById('subtab-content-active').className = subtab === 'active' ? 'block bg-gray-900 rounded-lg overflow-hidden' : 'hidden';
+    document.getElementById('subtab-content-closed').className = subtab === 'closed' ? 'block bg-gray-900 rounded-lg overflow-hidden' : 'hidden';
+}
+
+// Infinite Scroll Logic (Generic)
+(function() {
+    function setupObserver(sentinelId, tbodyId, containerId, endpointKey, renderRows) {
+        var sentinel = document.getElementById(sentinelId);
+        var tbody = document.getElementById(tbodyId);
+        var container = document.getElementById(containerId);
         if (!sentinel || !tbody || !container) return;
+
         var loading = false;
+        var observer = new IntersectionObserver(function(entries) {
+            if (entries[0].isIntersecting && !loading) {
+                loadMore();
+            }
+        }, { root: container, rootMargin: '200px', threshold: 0 });
+
+        observer.observe(sentinel);
+
         function loadMore() {
-            if (loading) return;
             var wallet = sentinel.getAttribute('data-wallet');
             var offset = parseInt(sentinel.getAttribute('data-offset'), 10);
             var limit = parseInt(sentinel.getAttribute('data-limit'), 10);
             var total = parseInt(sentinel.getAttribute('data-total'), 10);
+
             if (offset >= total) return;
+
             loading = true;
             sentinel.querySelector('td').textContent = 'Loading…';
-            fetch('/wallet/' + encodeURIComponent(wallet) + '/trades?offset=' + offset + '&limit=' + limit)
+
+            fetch('/wallet/' + encodeURIComponent(wallet) + '/' + endpointKey + '?offset=' + offset + '&limit=' + limit)
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
-                    data.trades.forEach(function(t) {
-                        var tr = document.createElement('tr');
-                        tr.className = 'border-b border-gray-800 text-gray-300';
-                        var title = t.market_title != null ? escapeHtml(t.market_title) : '<span class="text-gray-500 font-mono">' + escapeHtml(t.condition_id) + '</span>';
-                        var outcome = t.outcome != null ? escapeHtml(t.outcome) : '—';
-                        tr.innerHTML = '<td class="py-2 pr-4 font-mono text-xs">' + escapeHtml(t.timestamp_display) + '</td>' +
-                            '<td class="py-2 pr-4 max-w-xs truncate" title="' + escapeHtml(t.condition_id) + '">' + title + '</td>' +
-                            '<td class="py-2 pr-4">' + escapeHtml(t.side) + '</td>' +
-                            '<td class="py-2 pr-4">' + escapeHtml(t.size_display) + '</td>' +
-                            '<td class="py-2 pr-4">' + escapeHtml(t.price_display) + '</td>' +
-                            '<td class="py-2">' + outcome + '</td>';
-                        tbody.insertBefore(tr, sentinel);
+                    var items = data.positions || data.activities; // Handles both responses
+                    if (!items) items = [];
+
+                    items.forEach(function(item) {
+                        renderRows(tbody, sentinel, item);
                     });
-                    var nextOffset = offset + data.trades.length;
+
+                    var nextOffset = offset + items.length;
                     sentinel.setAttribute('data-offset', nextOffset);
-                    if (nextOffset >= data.total || data.trades.length < limit) {
+
+                    if (nextOffset >= data.total || items.length < limit) {
                         sentinel.remove();
+                        observer.disconnect();
                     } else {
                         sentinel.querySelector('td').textContent = 'Scroll to load more…';
+                        loading = false;
                     }
                 })
-                .catch(function() { sentinel.querySelector('td').textContent = 'Error loading more.'; })
-                .finally(function() { loading = false; });
+                .catch(function(e) {
+                    console.error(e);
+                    sentinel.querySelector('td').textContent = 'Error loading data.';
+                });
         }
-        function escapeHtml(s) {
-            var div = document.createElement('div');
-            div.textContent = s;
-            return div.innerHTML;
-        }
-        var observer = new IntersectionObserver(function(entries) {
-            if (entries[0].isIntersecting) loadMore();
-        }, { root: container, rootMargin: '100px', threshold: 0 });
-        observer.observe(sentinel);
-    })();
-    </script>
-    {% endif %}
-</div>
+    }
+
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+
+    // Row Renders
+    function renderActiveRow(tbody, sentinel, p) {
+        var tr = document.createElement('tr');
+        tr.className = 'hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-0 text-gray-300';
+        
+        var marketLink = p.polymarket_url 
+            ? '<a href="' + escapeHtml(p.polymarket_url) + '" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 font-medium block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</a>'
+            : '<span class="block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</span>';
+
+        tr.innerHTML = 
+            '<td class="py-3 px-4">' + marketLink + '</td>' +
+            '<td class="py-3 px-4 font-mono text-gray-400">' + escapeHtml(p.outcome || '—') + '</td>' +
+            '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(p.shares_display) + '</td>' +
+            '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(p.avg_price_display) + '</td>' +
+            '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(p.total_bet_display) + '</td>';
+        tbody.insertBefore(tr, sentinel);
+    }
+
+    function renderClosedRow(tbody, sentinel, p) {
+        var tr = document.createElement('tr');
+        tr.className = 'hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-0 text-gray-300';
+        
+        var marketLink = p.polymarket_url 
+            ? '<a href="' + escapeHtml(p.polymarket_url) + '" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 font-medium block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</a>'
+            : '<span class="block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</span>';
+
+        tr.innerHTML = 
+            '<td class="py-3 px-4">' + marketLink + '</td>' +
+            '<td class="py-3 px-4 font-mono text-gray-400">' + escapeHtml(p.outcome || '—') + '</td>' +
+            '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(p.total_bet_display) + '</td>' +
+            '<td class="py-3 px-4 text-right font-mono">' + p.trade_count + '</td>';
+        tbody.insertBefore(tr, sentinel);
+    }
+
+    function renderActivityRow(tbody, sentinel, a) {
+        var tr = document.createElement('tr');
+        tr.className = 'hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-0 text-gray-300';
+
+        var marketLink = a.polymarket_url 
+             ? '<a href="' + escapeHtml(a.polymarket_url) + '" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 block truncate max-w-xs">' + escapeHtml(a.market_title || a.condition_id || '—') + '</a>'
+             : '<span class="block truncate max-w-xs">' + escapeHtml(a.market_title || a.condition_id || '—') + '</span>';
+
+        var psLink = a.polygonscan_url
+            ? '<a href="' + escapeHtml(a.polygonscan_url) + '" target="_blank" rel="noopener" class="inline-block mt-0.5 text-xs text-blue-500 hover:text-blue-400" title="View on Polygonscan">↗ Tx</a>'
+            : '';
+
+        tr.innerHTML = 
+            '<td class="py-3 px-4">' +
+                '<div class="font-medium text-gray-200">' + escapeHtml(a.activity_type) + '</div>' +
+                '<div class="text-xs text-gray-500 font-mono">' + escapeHtml(a.usdc_amount_display) + '</div>' +
+            '</td>' +
+            '<td class="py-3 px-4">' + marketLink + '</td>' +
+            '<td class="py-3 px-4 font-mono text-gray-400">' + escapeHtml(a.outcome || '—') + '</td>' +
+            '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(a.shares_display) + ' shares</td>' +
+            '<td class="py-3 px-4 text-right whitespace-nowrap">' +
+                '<div class="text-xs text-gray-400">' + escapeHtml(a.timestamp_display) + '</div>' +
+                psLink +
+            '</td>';
+        tbody.insertBefore(tr, sentinel);
+    }
+
+    // Initialize Observers
+    setupObserver('active-sentinel', 'active-positions-tbody', 'active-positions-container', 'active-positions', renderActiveRow);
+    setupObserver('closed-sentinel', 'closed-positions-tbody', 'closed-positions-container', 'closed-positions', renderClosedRow);
+    setupObserver('activity-sentinel', 'activity-tbody', 'activity-container', 'activity', renderActivityRow);
+})();
+</script>
 {% endblock %}

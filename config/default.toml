@@ -113,6 +113,7 @@ generalist_min_sharpe = 1.0
 # Patient Accumulator
 accumulator_min_hold_hours = 48.0
 accumulator_max_trades_per_week = 5.0
+accumulator_min_roi = 0.05
 # Execution Master (exclusion)
 execution_master_pnl_ratio = 0.70
 # Tail Risk Seller (exclusion)
@@ -139,8 +140,8 @@ jackpot_max_win_rate = 0.45
 topic_lane_min_top_domain_ratio = 0.65
 bonder_min_extreme_price_ratio = 0.60
 whale_min_avg_trade_size_usdc = 100.0
-# Stage 2 ROI gate: min ROI for followable (0 = disabled)
-stage2_min_roi = 0.0
+# Stage 2 ROI gate: min ROI for followable (0 = disabled). 0.01 = 1% minimum.
+stage2_min_roi = 0.01
 
 [wallet_rules]
 # Discovery

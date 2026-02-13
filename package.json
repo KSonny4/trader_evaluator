@@ -1,0 +1,27 @@
+{
+  "name": "trader_evaluator",
+  "version": "1.0.0",
+  "description": "Polymarket wallet discovery and paper copy-trading evaluation system. Discovers follow-worthy markets, extracts wallets trading them, tracks those wallets long-term, runs risk-managed paper-copy portfolios, and ranks \"who to follow\" with evidence.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KSonny4/trader_evaluator.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/KSonny4/trader_evaluator/issues"
+  },
+  "homepage": "https://github.com/KSonny4/trader_evaluator#readme",
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}
