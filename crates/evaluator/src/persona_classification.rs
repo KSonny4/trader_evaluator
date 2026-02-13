@@ -176,11 +176,6 @@ pub enum ExclusionReason {
         trades_per_day: f64,
         avg_size_usdc: f64,
     },
-    /// Trades predominantly at extreme prices (>=0.9 or <=0.1); edge not replicable for copy-trading.
-    Bonder {
-        extreme_price_ratio: f64,
-        threshold: f64,
-    },
     /// Wallet is in the configured known_bots list (Strategy Bible §4 Stage 1).
     KnownBot,
     /// Would pass persona checks but ROI < stage2_min_roi (win rate + PnL combo).
@@ -205,7 +200,6 @@ impl ExclusionReason {
             Self::LiquidityProvider { .. } => "LIQUIDITY_PROVIDER",
             Self::JackpotGambler { .. } => "JACKPOT_GAMBLER",
             Self::BotSwarmMicro { .. } => "BOT_SWARM_MICRO",
-            Self::Bonder { .. } => "BONDER",
             Self::KnownBot => "KNOWN_BOT",
             Self::InsufficientPnl { .. } => "INSUFFICIENT_PNL",
         }
@@ -231,10 +225,6 @@ impl ExclusionReason {
             Self::LiquidityProvider { mid_fill_ratio, .. } => *mid_fill_ratio,
             Self::JackpotGambler { pnl_top1_share, .. } => *pnl_top1_share,
             Self::BotSwarmMicro { trades_per_day, .. } => *trades_per_day,
-            Self::Bonder {
-                extreme_price_ratio,
-                ..
-            } => *extreme_price_ratio,
             Self::KnownBot => 1.0,
             Self::InsufficientPnl { roi, .. } => *roi,
         }
@@ -262,7 +252,6 @@ impl ExclusionReason {
             Self::LiquidityProvider { .. } => 0.0,
             Self::JackpotGambler { .. } => 0.0,
             Self::BotSwarmMicro { .. } => 0.0,
-            Self::Bonder { threshold, .. } => *threshold,
             Self::KnownBot => 0.0,
             Self::InsufficientPnl { min_roi, .. } => *min_roi,
         }
@@ -793,15 +782,6 @@ pub fn classify_wallet(
         return Ok(ClassificationResult::Excluded(reason));
     }
 
-    if features.extreme_price_ratio >= config.bonder_min_extreme_price_ratio {
-        let reason = ExclusionReason::Bonder {
-            extreme_price_ratio: features.extreme_price_ratio,
-            threshold: config.bonder_min_extreme_price_ratio,
-        };
-        record_exclusion(conn, &features.proxy_wallet, &reason)?;
-        return Ok(ClassificationResult::Excluded(reason));
-    }
-
     // --- Followable persona detection (priority order) ---
     // Each followable persona also requires roi >= stage2_min_roi (win rate + PnL combo).
 
@@ -1210,14 +1190,6 @@ mod tests {
             .reason_str(),
             "BOT_SWARM_MICRO"
         );
-        assert_eq!(
-            ExclusionReason::Bonder {
-                extreme_price_ratio: 0.85,
-                threshold: 0.60
-            }
-            .reason_str(),
-            "BONDER"
-        );
     }
 
     fn make_features(unique_markets: u32, win_count: u32, loss_count: u32) -> WalletFeatures {
@@ -1493,7 +1465,7 @@ mod tests {
     #[test]
     fn test_not_accumulator_low_roi() {
         let features = make_accumulator_features(72.0, 3.0); // holds >48h, <5 trades/week (PASS)
-        // ROI 0.01 < min 0.05 => FAIL
+                                                             // ROI 0.01 < min 0.05 => FAIL
         let persona = detect_patient_accumulator(&features, 48.0, 5.0, 0.01, 0.05);
         assert_eq!(persona, None);
     }
@@ -1869,6 +1841,60 @@ mod tests {
         let result = classify_wallet(&db.conn, &features, 180, &config).unwrap();
 
         assert_eq!(result, ClassificationResult::Unclassified);
+    }
+
+    #[test]
+    fn test_classify_wallet_high_extreme_price_ratio_not_excluded() {
+        // Bonder is a trait, not an exclusion. A wallet with high extreme_price_ratio
+        // should still be classified as a followable persona (not excluded).
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let features = WalletFeatures {
+            proxy_wallet: "0xbonder".to_string(),
+            window_days: 30,
+            trade_count: 60,
+            win_count: 42,
+            loss_count: 18,
+            total_pnl: 900.0,
+            avg_position_size: 300.0,
+            unique_markets: 6,
+            avg_hold_time_hours: 72.0,
+            max_drawdown_pct: 5.0,
+            trades_per_week: 3.0,
+            trades_per_day: 0.4,
+            sharpe_ratio: 1.2,
+            active_positions: 3,
+            concentration_ratio: 0.7,
+            avg_trade_size_usdc: 300.0,
+            size_cv: 0.2,
+            buy_sell_balance: 0.5,
+            mid_fill_ratio: 0.3,
+            extreme_price_ratio: 0.90, // well above bonder threshold (0.60)
+            burstiness_top_1h_ratio: 0.1,
+            top_domain: None,
+            top_domain_ratio: 0.0,
+        };
+
+        let config = PersonaConfig::default_for_test();
+        let result = classify_wallet(&db.conn, &features, 180, &config).unwrap();
+
+        // Should be followable (Informed Specialist), NOT excluded
+        assert!(
+            matches!(result, ClassificationResult::Followable(_)),
+            "Expected Followable, got {result:?}"
+        );
+
+        // BONDER trait should still be recorded
+        let bonder_trait: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT trait_value FROM wallet_persona_traits WHERE proxy_wallet = '0xbonder' AND trait_key = 'BONDER'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert_eq!(bonder_trait, Some("1".to_string()));
     }
 
     #[test]

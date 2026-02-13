@@ -158,6 +158,8 @@ pub struct PaperTrading {
     pub min_copy_fidelity_pct: f64,
     pub per_trade_size_usd: f64,
     pub slippage_default_cents: f64,
+    pub mirror_use_proportional_sizing: bool,
+    pub mirror_default_their_bankroll_usd: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,6 +456,8 @@ max_daily_loss_pct = 3.0
 min_copy_fidelity_pct = 80.0
 per_trade_size_usd = 25.0
 slippage_default_cents = 1.0
+mirror_use_proportional_sizing = true
+mirror_default_their_bankroll_usd = 5000
 
 [wallet_scoring]
 windows_days = [7, 30, 90]
@@ -485,6 +489,7 @@ generalist_max_drawdown = 15.0
 generalist_min_sharpe = 1.0
 accumulator_min_hold_hours = 48.0
 accumulator_max_trades_per_week = 5.0
+accumulator_min_roi = 0.05
 execution_master_pnl_ratio = 0.70
 tail_risk_min_win_rate = 0.80
 tail_risk_loss_multiplier = 5.0
@@ -505,6 +510,8 @@ jackpot_max_win_rate = 0.45
 topic_lane_min_top_domain_ratio = 0.65
 bonder_min_extreme_price_ratio = 0.60
 whale_min_avg_trade_size_usdc = 100.0
+known_bots = []
+stage2_min_roi = 0.03
 
 [wallet_rules]
 min_trades_for_discovery = 50

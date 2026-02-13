@@ -138,8 +138,24 @@ Only three personas advance to paper trading. Everything else is excluded.
 
 **Patient Accumulator:**
 - `avg_hold_time_hours > accumulator_min_hold_hours` (default: 48)
-- `avg_position_size` in top 10th percentile of all tracked wallets
+- `roi >= accumulator_min_roi` (default: 0.05 = 5% per-trade ROI)
 - `trades_per_week < accumulator_max_trades_per_week` (default: 5)
+
+> The ROI gate replaces the 90th-percentile position size check (impractical to compute inline).
+
+### Followable ROI Gate
+
+All followable personas must pass `stage2_min_roi` after persona detection. This is per-trade ROI: `total_pnl / (trade_count * avg_position_size)`.
+
+**Three ROI Tiers:**
+
+| Tier | Gate | Default | Purpose |
+|------|------|---------|---------|
+| **Tier 1 (Classification)** | `stage2_min_roi` | 3% | Bare minimum to be followable — applies to all personas |
+| **Tier 2 (Accumulator-specific)** | `accumulator_min_roi` | 5% | Higher bar for slow traders who must compensate for low frequency |
+| **Tier 3 (Follow-worthy)** | `paper_roi_pct > 5% (7d) AND > 10% (30d)` | — | Portfolio-level proof before real-money promotion |
+
+> **Opportunity cost note:** SAP/S&P 500 returns ~7% annually. Our Tier 3 thresholds (5% in 7 days ~ 260% annualized) far exceed passive alternatives, ensuring we only follow wallets with genuine edge.
 
 ---
 
@@ -151,16 +167,16 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 
 | Filter | Config Key | Default | Why |
 |--------|-----------|---------|-----|
-| Wallet age | `stage1_min_wallet_age_days` | 30 | Age = days since oldest trade in `trades_raw` (not discovery time). New wallets = insufficient data or sniper risk |
+| Wallet age | `stage1_min_wallet_age_days` | 45 | Age = days since oldest trade in `trades_raw` (not discovery time). New wallets = insufficient data or sniper risk |
 | Minimum trades | `stage1_min_total_trades` | 10 | Can't classify with fewer |
-| Basic activity | `stage1_max_inactive_days` | 30 | Dead wallets waste resources |
+| Basic activity | `stage1_max_inactive_days` | 45 | Dead wallets waste resources |
 | Not a known bot | Check against `known_bots` list | — | Automated accounts are unfollowable |
 
 ### Stage 2: Deep Analysis (async, scheduled background job)
 
 | Persona to Detect | Analysis | Config Key | Exclusion Trigger |
 |-------------------|----------|-----------|-------------------|
-| **Execution Master** | PnL decomposition: directional vs execution | `execution_master_pnl_ratio` | execution_pnl / total_pnl > 0.70 |
+| **Execution Master** (not yet implemented) | PnL decomposition: directional vs execution | `execution_master_pnl_ratio` | execution_pnl / total_pnl > 0.70 |
 | **Tail Risk Seller** | Loss distribution analysis | `tail_risk_min_win_rate`, `tail_risk_loss_multiplier` | win_rate > 0.80 AND max_single_loss > 5x avg_win |
 | **Noise Trader** | Churn rate + ROI | `noise_max_trades_per_week`, `noise_max_abs_roi` | trades/week > 50 AND abs(ROI) < 0.02 |
 | **Sniper/Insider** | Age + anomalous win rate | `sniper_max_age_days`, `sniper_min_win_rate`, `sniper_max_trades` | age < 30d AND win_rate > 0.85 on < 20 trades |
@@ -168,7 +184,7 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 | **Liquidity Provider / Market Maker** | Two-sided flow + mid-centric fills | `liquidity_provider_min_buy_sell_balance`, `liquidity_provider_min_mid_fill_ratio` | buy/sell balance high AND trades cluster near mid |
 | **Jackpot Gambler** | PnL concentrated in few trades | `jackpot_min_pnl_top1_share`, `jackpot_max_win_rate` | top-1 trade share dominates PnL, low win-rate/huge variance |
 | **Bot Swarm / Micro-trader** | Extreme frequency + micro sizing | `bot_swarm_min_trades_per_day`, `bot_swarm_max_avg_trade_size_usdc` | trades/day extreme AND size small/uniform |
-| **Sybil Cluster** | DBSCAN clustering on trade timing | `sybil_min_cluster_size`, `sybil_min_overlap` | cluster > 3 wallets AND > 80% trade overlap |
+| **Sybil Cluster** (not yet implemented) | DBSCAN clustering on trade timing | `sybil_min_cluster_size`, `sybil_min_overlap` | cluster > 3 wallets AND > 80% trade overlap |
 
 ### Persona Traits (Not Personas)
 

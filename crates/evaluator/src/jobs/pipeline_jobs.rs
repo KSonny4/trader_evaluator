@@ -19,9 +19,9 @@ use crate::wallet_rules_engine::{
 use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
 
 use super::fetcher_traits::*;
+use super::tracker::JobTracker;
 
 pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
-    // Read unprocessed trades from DB.
     type TradeRow = (
         i64,
         String,
@@ -31,6 +31,9 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         Option<String>,
         Option<i32>,
     );
+
+    let tracker = JobTracker::start(db, "paper_tick").await?;
+    // Read unprocessed trades from DB.
     let rows: Vec<TradeRow> = db
         .call_named("paper_tick.select_unprocessed_trades", |conn| {
             let mut stmt = conn.prepare(
@@ -166,6 +169,9 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         .await?;
     metrics::gauge!("evaluator_paper_pnl").set(pnl.unwrap_or(0.0));
 
+    tracker
+        .success(Some(serde_json::json!({"inserted": inserted})))
+        .await?;
     Ok(inserted)
 }
 
@@ -182,6 +188,7 @@ pub async fn run_recovery_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
 }
 
 pub async fn run_wallet_rules_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    let tracker = JobTracker::start(db, "wallet_rules").await?;
     let now_epoch = chrono::Utc::now().timestamp();
     let rules_cfg = cfg.wallet_rules.clone();
     let changed: u64 = db
@@ -321,6 +328,9 @@ pub async fn run_wallet_rules_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
         })
         .await?;
     metrics::gauge!("evaluator_wallet_rules_transitions_run").set(changed as f64);
+    tracker
+        .success(Some(serde_json::json!({"changed": changed})))
+        .await?;
     Ok(changed)
 }
 
@@ -334,6 +344,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         roi_pct: f64,
     }
 
+    let tracker = JobTracker::start(db, "wallet_scoring").await?;
     let today = chrono::Utc::now().date_naive().to_string();
 
     let w = WScoreWeights {
@@ -491,6 +502,9 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
         })
         .await?;
 
+    tracker
+        .success(Some(serde_json::json!({"inserted": inserted})))
+        .await?;
     Ok(inserted)
 }
 
@@ -762,6 +776,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
     trades: &T,
     cfg: &Config,
 ) -> Result<u64> {
+    let tracker = JobTracker::start(db, "wallet_discovery").await?;
     let markets: Vec<String> = db
         .call_named("wallet_discovery.select_top_events_markets", move |conn| {
             let mut stmt = conn.prepare(
@@ -884,6 +899,9 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         })
         .await?;
     metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
+    tracker
+        .success(Some(serde_json::json!({"inserted": inserted})))
+        .await?;
     Ok(inserted)
 }
 
@@ -991,6 +1009,7 @@ pub async fn run_leaderboard_discovery_once<L: super::fetcher_traits::Leaderboar
 /// prioritizes wallets with 0 trades (backfill-first) so `trades_raw` fills; then the next
 /// persona run will classify them.
 pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+    let tracker = JobTracker::start(db, "persona_classification").await?;
     let now_epoch = chrono::Utc::now().timestamp();
     let window_days = 180_u32;
     let persona_config = PersonaConfig::from_personas(&cfg.personas);
@@ -1130,6 +1149,9 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         .await?;
 
     metrics::gauge!("evaluator_persona_classifications_run").set(classified as f64);
+    tracker
+        .success(Some(serde_json::json!({"classified": classified})))
+        .await?;
     Ok(classified)
 }
 
