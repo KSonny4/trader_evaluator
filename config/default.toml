@@ -198,14 +198,14 @@ auth_password = "recognize-parade-finalist-flatbed-stumble"
 # trader_api_url = "http://aws-trader:8081"
 
 # Event-driven architecture (Phases 1-3)
-# Feature flags OFF by default - zero behavior change
+# Event-driven mode ENABLED by default for reactive, low-latency operation
 [events]
-enabled = false              # Master kill switch - when false, event bus not initialized
-log_to_db = false            # Persist events to event_log table
+enabled = true               # Master kill switch - event bus active
+log_to_db = true             # Persist events to event_log table for audit/replay
 bus_capacity = 1000          # Buffer size for broadcast channels
 
-# Phase 3: Event-driven triggers (replace timer-based orchestration)
-enable_discovery_event_trigger = false        # MarketsScored → wallet_discovery
-enable_classification_event_trigger = false   # TradesIngested (batched) → classification
-enable_fast_path_trigger = false              # TradesIngested (coalescing) → paper tick
+# Phase 3: Event-driven triggers (reactive job orchestration)
+enable_discovery_event_trigger = true         # MarketsScored → wallet_discovery (0s latency)
+enable_classification_event_trigger = true    # TradesIngested (batched) → classification (<5min)
+enable_fast_path_trigger = true               # TradesIngested (coalescing) → paper tick (<10s)
 classification_batch_window_secs = 300        # 5 minutes batching window
