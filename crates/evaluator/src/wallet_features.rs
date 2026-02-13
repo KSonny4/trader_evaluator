@@ -903,4 +903,64 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0, "should have 0 feature rows");
     }
+
+    #[tokio::test]
+    async fn test_compute_features_for_wallet_idempotent() {
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let db = common::db::AsyncDb::open(":memory:").await.unwrap();
+
+        // Use current time so trades fall within the 30-day window
+        let now = chrono::Utc::now().timestamp();
+        let day = 86400i64;
+
+        // Insert wallet with sufficient trades
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xidempotent', 'HOLDER', 1)",
+                [],
+            )?;
+            for i in 0..6 {
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xidempotent', '0xcond', 'BUY', 100.0, 0.5, ?2)",
+                    rusqlite::params![format!("0xtx_buy_{}", i), now - (i + 1) * day],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xidempotent', '0xcond', 'SELL', 100.0, 0.6, ?2)",
+                    rusqlite::params![format!("0xtx_sell_{}", i), now - i * day],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Call twice
+        compute_features_for_wallet(&db, &cfg, "0xidempotent", 30)
+            .await
+            .unwrap();
+        compute_features_for_wallet(&db, &cfg, "0xidempotent", 30)
+            .await
+            .unwrap();
+
+        // Verify only 1 row (INSERT OR REPLACE with same date/window)
+        let count: i64 = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM wallet_features_daily WHERE proxy_wallet = '0xidempotent' AND window_days = 30",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "should have exactly 1 row due to UNIQUE constraint"
+        );
+    }
 }
