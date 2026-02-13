@@ -33,6 +33,51 @@ pub async fn run_paper_tick_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
     );
 
     let tracker = JobTracker::start(db, "paper_tick").await?;
+
+    // Quality gate: Check for active followable wallets (trades within 7 days)
+    let active_followable: i64 = db
+        .call_named("paper_tick.count_active_followable", |conn| {
+            Ok(conn.query_row(
+                "
+                WITH latest_persona AS (
+                    SELECT proxy_wallet, MAX(classified_at) AS classified_at
+                    FROM wallet_personas
+                    GROUP BY proxy_wallet
+                ),
+                latest_exclusion AS (
+                    SELECT proxy_wallet, MAX(excluded_at) AS excluded_at
+                    FROM wallet_exclusions
+                    GROUP BY proxy_wallet
+                )
+                SELECT COUNT(DISTINCT w.proxy_wallet)
+                FROM wallets w
+                JOIN wallet_rules_state wr ON wr.proxy_wallet = w.proxy_wallet
+                JOIN latest_persona lp ON lp.proxy_wallet = w.proxy_wallet
+                LEFT JOIN latest_exclusion le ON le.proxy_wallet = w.proxy_wallet
+                WHERE w.is_active = 1
+                  AND wr.state IN ('PAPER_TRADING', 'APPROVED')
+                  AND (le.excluded_at IS NULL OR le.excluded_at < lp.classified_at)
+                  AND (SELECT MAX(timestamp) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet)
+                      >= unixepoch('now', '-7 days')
+                ",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await?;
+
+    if active_followable == 0 {
+        tracing::warn!("paper_tick: skipping - no active followable wallets");
+        tracker
+            .success(Some(serde_json::json!({
+                "inserted": 0,
+                "skipped": "no active followable wallets",
+                "max_inactivity_days": 7
+            })))
+            .await?;
+        return Ok(0);
+    }
+
     // Read unprocessed trades from DB.
     let rows: Vec<TradeRow> = db
         .call_named("paper_tick.select_unprocessed_trades", |conn| {
@@ -2203,7 +2248,9 @@ mod tests {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
-        db.call(|conn| {
+        let now = chrono::Utc::now().timestamp();
+
+        db.call(move |conn| {
             conn.execute(
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xw"],
@@ -2224,9 +2271,9 @@ mod tests {
                 INSERT INTO trades_raw
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                 VALUES
-                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx1', '{}')
+                    (?1, ?2, 'BUY', 1.0, 0.5, ?3, '0xtx1', '{}')
                 ",
-                rusqlite::params!["0xw", "0xcond"],
+                rusqlite::params!["0xw", "0xcond", now],
             )?;
             Ok(())
         })
@@ -2251,7 +2298,9 @@ mod tests {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
-        db.call(|conn| {
+        let now = chrono::Utc::now().timestamp();
+
+        db.call(move |conn| {
             conn.execute(
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xunfollowable"],
@@ -2265,9 +2314,9 @@ mod tests {
                 INSERT INTO trades_raw
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                 VALUES
-                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx_unfollowable', '{}')
+                    (?1, ?2, 'BUY', 1.0, 0.5, ?3, '0xtx_unfollowable', '{}')
                 ",
-                rusqlite::params!["0xunfollowable", "0xcond"],
+                rusqlite::params!["0xunfollowable", "0xcond", now],
             )?;
             Ok(())
         })
@@ -2315,7 +2364,9 @@ mod tests {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
-        db.call(|conn| {
+        let now = chrono::Utc::now().timestamp();
+
+        db.call(move |conn| {
             conn.execute(
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xw"],
@@ -2351,18 +2402,18 @@ mod tests {
                 INSERT INTO trades_raw
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                 VALUES
-                    (?1, ?2, 'BUY', 1.0, 0.5, 1, '0xtx1', '{}')
+                    (?1, ?2, 'BUY', 1.0, 0.5, ?3, '0xtx1', '{}')
                 ",
-                rusqlite::params!["0xw", "0xcond"],
+                rusqlite::params!["0xw", "0xcond", now],
             )?;
             conn.execute(
                 "
                 INSERT INTO trades_raw
                     (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                 VALUES
-                    (?1, ?2, 'BUY', 1.0, 0.55, 2, '0xtx2', '{}')
+                    (?1, ?2, 'BUY', 1.0, 0.55, ?3, '0xtx2', '{}')
                 ",
-                rusqlite::params!["0xw", "0xcond"],
+                rusqlite::params!["0xw", "0xcond", now + 1],
             )?;
             Ok(())
         })
@@ -2461,6 +2512,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cnt, 0);
+    }
+
+    #[tokio::test]
+    async fn test_paper_tick_skips_when_no_active_followable_wallets() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create followable wallet with old trades (no activity within 7 days)
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xinactive"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES (?1, 'Consistent Generalist', 1.0, datetime('now'))",
+                rusqlite::params!["0xinactive"],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_rules_state (proxy_wallet, state, updated_at)
+                 VALUES (?1, 'PAPER_TRADING', datetime('now'))",
+                rusqlite::params!["0xinactive"],
+            )?;
+            // Trade is 8 days old - should be considered inactive
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, '0xtx_old', '{}')",
+                rusqlite::params!["0xinactive", now - (8 * 86400)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Run paper_tick - should skip because no active followable wallets
+        let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0, "should create 0 paper trades when no active followable wallets");
+
+        // Verify metadata shows skip reason
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'paper_tick'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert!(metadata.is_some(), "metadata should be set");
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+        assert!(
+            meta_json.get("skipped").is_some(),
+            "metadata should indicate skipping"
+        );
     }
 
     #[tokio::test]
@@ -2564,7 +2673,9 @@ mod tests {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
-        db.call(|conn| {
+        let now = chrono::Utc::now().timestamp();
+
+        db.call(move |conn| {
             conn.execute(
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xcandidate', 'HOLDER', 1)",
                 [],
@@ -2593,13 +2704,13 @@ mod tests {
             )?;
             conn.execute(
                 "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
-                 VALUES ('0xcandidate', 'm1', 'BUY', 1.0, 0.5, 1, '0xtx-candidate', '{}')",
-                [],
+                 VALUES ('0xcandidate', 'm1', 'BUY', 1.0, 0.5, ?1, '0xtx-candidate', '{}')",
+                rusqlite::params![now],
             )?;
             conn.execute(
                 "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
-                 VALUES ('0xapproved', 'm1', 'BUY', 1.0, 0.5, 2, '0xtx-approved', '{}')",
-                [],
+                 VALUES ('0xapproved', 'm1', 'BUY', 1.0, 0.5, ?1, '0xtx-approved', '{}')",
+                rusqlite::params![now],
             )?;
             Ok(())
         })
