@@ -1017,6 +1017,128 @@ pub async fn run_leaderboard_discovery_once<L: super::fetcher_traits::Leaderboar
 /// Run Stage 2 persona classification for all watchlist wallets that pass Stage 1.
 /// Returns the number of wallets that received a classification (followable or excluded).
 ///
+/// Fetch a paginated chunk of active wallets with their metadata
+fn fetch_wallet_chunk(
+    conn: &rusqlite::Connection,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<(String, u32, u32, u32)>> {
+    conn.prepare(
+        "
+        SELECT w.proxy_wallet,
+            (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
+             FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS age_days,
+            (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS total_trades,
+            (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
+             FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS days_since_last
+        FROM wallets w
+        WHERE w.is_active = 1
+        ORDER BY w.proxy_wallet  -- Stable ordering for pagination
+        LIMIT ?1 OFFSET ?2
+        ",
+    )?
+    .query_map([limit, offset], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as u32,
+            row.get::<_, i64>(2).unwrap_or(0).max(0) as u32,
+            row.get::<_, Option<i64>>(3)?
+                .unwrap_or(i64::MAX)
+                .min(i64::from(i32::MAX))
+                .max(0) as u32,
+        ))
+    })?
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
+
+/// Process a chunk of wallets (Stage 1 + Stage 2)
+/// Returns (processed_count, stage1_no_trades, stage1_other, stage2_excluded, suitable)
+fn process_wallet_chunk(
+    conn: &rusqlite::Connection,
+    wallets: &[(String, u32, u32, u32)],
+    stage1_config: &Stage1Config,
+    persona_config: &PersonaConfig,
+    window_days: u32,
+    now_epoch: i64,
+) -> Result<(u64, u64, u64, u64, u64)> {
+    let mut count = 0_u64;
+    let mut stage1_no_trades = 0_u64;
+    let mut stage1_other = 0_u64;
+    let mut stage2_excluded = 0_u64;
+    let mut suitable = 0_u64;
+
+    for (proxy_wallet, wallet_age_days, total_trades, days_since_last) in wallets {
+        // Stage 1 checks
+        if let Some(reason) = stage1_known_bot_check(proxy_wallet, &stage1_config.known_bots) {
+            crate::persona_classification::record_exclusion(conn, proxy_wallet, &reason)?;
+            stage1_other += 1;
+            count += 1;
+            continue;
+        }
+
+        if let Some(reason) = stage1_filter(
+            *wallet_age_days,
+            *total_trades,
+            *days_since_last,
+            stage1_config,
+        ) {
+            crate::persona_classification::record_exclusion(conn, proxy_wallet, &reason)?;
+            if *total_trades == 0 {
+                stage1_no_trades += 1;
+            } else {
+                stage1_other += 1;
+            }
+            count += 1;
+            continue;
+        }
+
+        // Stage 1 passed - clear old exclusions
+        let _ = crate::persona_classification::clear_stage1_exclusion(conn, proxy_wallet);
+
+        // Compute features
+        let Ok(features) = compute_wallet_features(conn, proxy_wallet, window_days, now_epoch)
+        else {
+            tracing::warn!(proxy_wallet = %proxy_wallet, "compute_wallet_features failed");
+            continue;
+        };
+
+        // Stage 2 classification
+        match classify_wallet(conn, &features, *wallet_age_days, persona_config) {
+            Ok(result) => {
+                match &result {
+                    crate::persona_classification::ClassificationResult::Followable(p) => {
+                        suitable += 1;
+                        tracing::info!(wallet = %proxy_wallet, persona = %p.as_str(), "persona: suitable");
+                    }
+                    crate::persona_classification::ClassificationResult::Excluded(r) => {
+                        stage2_excluded += 1;
+                        tracing::info!(wallet = %proxy_wallet, reason = %r.reason_str(), "persona: excluded Stage 2");
+                    }
+                    crate::persona_classification::ClassificationResult::Unclassified => {}
+                }
+                if !matches!(
+                    result,
+                    crate::persona_classification::ClassificationResult::Unclassified
+                ) {
+                    count += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "classify_wallet failed");
+            }
+        }
+    }
+
+    Ok((
+        count,
+        stage1_no_trades,
+        stage1_other,
+        stage2_excluded,
+        suitable,
+    ))
+}
+
 /// This job runs on a schedule (e.g. hourly); it does not wait for trades ingestion. It reads
 /// age/trades from `trades_raw`. To get wallets evaluated, ensure trades ingestion runs and
 /// prioritizes wallets with 0 trades (backfill-first) so `trades_raw` fills; then the next
@@ -1033,140 +1155,113 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         known_bots: cfg.personas.known_bots.clone(),
     };
 
-    let result = db
-        .call_named("persona_classification.classify_batch", move |conn| {
-            let wallets: Vec<(String, u32, u32, u32)> = conn
-                .prepare(
-                    "
-                    SELECT w.proxy_wallet,
-                        (SELECT CAST((julianday('now') - julianday(datetime(MIN(tr.timestamp), 'unixepoch'))) AS INTEGER)
-                         FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS age_days,
-                        (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS total_trades,
-                        (SELECT CAST((julianday('now') - julianday(datetime(MAX(tr.timestamp), 'unixepoch'))) AS INTEGER)
-                         FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) AS days_since_last
-                    FROM wallets w
-                    WHERE w.is_active = 1
-                    ",
-                )?
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as u32,
-                        row.get::<_, i64>(2).unwrap_or(0).max(0) as u32,
-                        row.get::<_, Option<i64>>(3)?
-                            .unwrap_or(i64::MAX)
-                            .min(i64::from(i32::MAX))
-                            .max(0) as u32,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            let wallets_with_trades = wallets.iter().filter(|(_, _, t, _)| *t > 0).count();
-            let wallets_no_trades = wallets.len().saturating_sub(wallets_with_trades);
-            tracing::info!(
-                total = wallets.len(),
-                with_trades = wallets_with_trades,
-                no_trades = wallets_no_trades,
-                "persona_classification: starting (wallets with no trades fail Stage 1)"
-            );
-
-            let mut count = 0_u64;
-            let mut stage1_no_trades = 0_u64;
-            let mut stage1_other = 0_u64;
-            let mut stage2_excluded = 0_u64;
-            let mut suitable = 0_u64;
-            for (proxy_wallet, wallet_age_days, total_trades, days_since_last) in wallets {
-                if let Some(reason) =
-                    stage1_known_bot_check(&proxy_wallet, &stage1_config.known_bots)
-                {
-                    crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
-                    stage1_other += 1;
-                    count += 1;
-                    continue;
-                }
-                if let Some(reason) = stage1_filter(
-                    wallet_age_days,
-                    total_trades,
-                    days_since_last,
-                    &stage1_config,
-                ) {
-                    crate::persona_classification::record_exclusion(conn, &proxy_wallet, &reason)?;
-                    if total_trades == 0 {
-                        stage1_no_trades += 1;
-                    } else {
-                        stage1_other += 1;
-                    }
-                    count += 1;
-                    continue;
-                }
-
-                // Wallet passed Stage 1; clear any old Stage 1 exclusion so re-runs don't leave stale "young" etc.
-                let _ = crate::persona_classification::clear_stage1_exclusion(conn, &proxy_wallet);
-
-                let Ok(features) = compute_wallet_features(
-                    conn,
-                    &proxy_wallet,
-                    window_days,
-                    now_epoch,
-                ) else {
-                    tracing::warn!(
-                        proxy_wallet = %proxy_wallet,
-                        "persona classification skipped: compute_wallet_features failed"
-                    );
-                    continue;
-                };
-
-                match classify_wallet(conn, &features, wallet_age_days, &persona_config) {
-                    Ok(result) => {
-                        match &result {
-                            crate::persona_classification::ClassificationResult::Followable(p) => {
-                                suitable += 1;
-                                tracing::info!(
-                                    wallet = %proxy_wallet,
-                                    persona = %p.as_str(),
-                                    "persona: suitable"
-                                );
-                            }
-                            crate::persona_classification::ClassificationResult::Excluded(r) => {
-                                stage2_excluded += 1;
-                                tracing::info!(
-                                    wallet = %proxy_wallet,
-                                    reason = %r.reason_str(),
-                                    "persona: excluded Stage 2"
-                                );
-                            }
-                            crate::persona_classification::ClassificationResult::Unclassified => {}
-                        }
-                        if !matches!(result, crate::persona_classification::ClassificationResult::Unclassified) {
-                            count += 1;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            proxy_wallet = %proxy_wallet,
-                            error = %e,
-                            "persona classification skipped: classify_wallet failed"
-                        );
-                    }
-                }
-            }
-            tracing::info!(
-                stage1_no_trades,
-                stage1_other,
-                stage2_excluded,
-                suitable,
-                "persona_classification: summary (no_trades = excluded at Stage 1 due to no trade data)"
-            );
-            Ok((count, stage1_no_trades, stage1_other, stage2_excluded, suitable))
+    // Get total wallet count for progress tracking
+    let total_wallets: i64 = db
+        .call_named("persona_classification.count_wallets", |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM wallets WHERE is_active = 1",
+                [],
+                |row| row.get(0),
+            )?)
         })
         .await?;
 
-    let (count, stage1_no_trades, stage1_other, stage2_excluded, suitable) = result;
+    if total_wallets == 0 {
+        tracing::warn!("persona_classification: no wallets to classify");
+        tracker
+            .success(Some(serde_json::json!({
+                "classified": 0,
+                "skipped": "no wallets"
+            })))
+            .await?;
+        return Ok(0);
+    }
 
-    metrics::gauge!("evaluator_persona_classifications_run").set(count as f64);
+    tracing::info!(
+        total = total_wallets,
+        "persona_classification: starting chunked processing"
+    );
+
+    // Accumulate counters across chunks
+    let mut total_processed = 0_u64;
+    let mut stage1_no_trades = 0_u64;
+    let mut stage1_other = 0_u64;
+    let mut stage2_excluded = 0_u64;
+    let mut suitable = 0_u64;
+
+    let chunk_size = 100_i64;
+    let mut offset = 0_i64;
+
+    loop {
+        // Process one chunk
+        let chunk_result = db
+            .call_named("persona_classification.classify_chunk", {
+                let stage1_config = stage1_config.clone();
+                let persona_config = persona_config.clone();
+                move |conn| {
+                    let wallets = fetch_wallet_chunk(conn, offset, chunk_size)?;
+
+                    if wallets.is_empty() {
+                        return Ok(None); // Signal completion
+                    }
+
+                    let counters = process_wallet_chunk(
+                        conn,
+                        &wallets,
+                        &stage1_config,
+                        &persona_config,
+                        window_days,
+                        now_epoch,
+                    )?;
+
+                    Ok(Some(counters))
+                }
+            })
+            .await?;
+
+        let Some((chunk_processed, chunk_no_trades, chunk_other, chunk_excluded, chunk_suitable)) =
+            chunk_result
+        else {
+            break; // No more wallets
+        };
+
+        // Accumulate counters
+        total_processed += chunk_processed;
+        stage1_no_trades += chunk_no_trades;
+        stage1_other += chunk_other;
+        stage2_excluded += chunk_excluded;
+        suitable += chunk_suitable;
+
+        // Update progress
+        tracker
+            .update_progress(serde_json::json!({
+                "processed": total_processed,
+                "total": total_wallets,
+                "suitable": suitable,
+                "stage1_no_trades": stage1_no_trades,
+                "stage1_other": stage1_other,
+                "stage2_excluded": stage2_excluded,
+                "phase": "classifying"
+            }))
+            .await?;
+
+        offset += chunk_size;
+    }
+
+    tracing::info!(
+        stage1_no_trades,
+        stage1_other,
+        stage2_excluded,
+        suitable,
+        "persona_classification: summary"
+    );
+
+    metrics::gauge!("evaluator_persona_classifications_run").set(total_processed as f64);
     tracker
         .success(Some(serde_json::json!({
-            "classified": count,
+            "processed": total_processed,
+            "total": total_wallets,
+            "classified": total_processed,
             "suitable": suitable,
             "stage1_no_trades": stage1_no_trades,
             "stage1_other": stage1_other,
@@ -1174,7 +1269,8 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
             "completed": true
         })))
         .await?;
-    Ok(count)
+
+    Ok(total_processed)
 }
 
 fn compute_days_to_expiry(end_date: Option<&str>) -> Option<u32> {
@@ -2478,5 +2574,139 @@ mod tests {
 
         let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
         assert_eq!(inserted, 0, "excluded wallets must not be mirrored");
+    }
+
+    #[test]
+    fn test_fetch_wallet_chunk_returns_paginated_wallets() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 3 active wallets with different characteristics
+        for i in 0..3 {
+            let wallet = format!("0xwallet{i}");
+            db.conn
+                .execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![wallet],
+                )
+                .unwrap();
+
+            // Add trades with varying ages (all in the past)
+            db.conn
+                .execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                    rusqlite::params![
+                        wallet,
+                        now - (i64::from(i) + 1) * 86400, // 1, 2, 3 days ago
+                        format!("0xtx{i}")
+                    ],
+                )
+                .unwrap();
+        }
+
+        // First chunk: limit 2, offset 0
+        let chunk1 = fetch_wallet_chunk(&db.conn, 0, 2).unwrap();
+        assert_eq!(chunk1.len(), 2, "should return 2 wallets in first chunk");
+        assert_eq!(chunk1[0].0, "0xwallet0", "first wallet should be 0xwallet0");
+        assert_eq!(
+            chunk1[1].0, "0xwallet1",
+            "second wallet should be 0xwallet1"
+        );
+
+        // Verify metadata fields are computed correctly
+        let (_, age_days, total_trades, _days_since_last) = &chunk1[0];
+        assert!(
+            *age_days > 0,
+            "age_days should be positive (wallet has trades)"
+        );
+        assert_eq!(*total_trades, 1, "wallet should have 1 trade");
+
+        // Second chunk: limit 2, offset 2
+        let chunk2 = fetch_wallet_chunk(&db.conn, 2, 2).unwrap();
+        assert_eq!(chunk2.len(), 1, "should return 1 wallet in second chunk");
+        assert_eq!(chunk2[0].0, "0xwallet2", "third wallet should be 0xwallet2");
+
+        // Third chunk: beyond data
+        let chunk3 = fetch_wallet_chunk(&db.conn, 4, 2).unwrap();
+        assert_eq!(
+            chunk3.len(),
+            0,
+            "should return empty when offset exceeds data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_persona_classification_updates_progress_incrementally() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap(); // Migrations run automatically
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 250 wallets (enough for 3 chunks of 100)
+        for i in 0..250 {
+            let wallet = format!("0xwallet{i}");
+            db.call(move |conn| {
+                let w = wallet.clone();
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![w],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                    rusqlite::params![
+                        wallet,
+                        now - 86400 * 30, // 30 days ago
+                        format!("0xtx{i}")
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        // Run classification
+        let _classified = run_persona_classification_once(&db, &cfg).await.unwrap();
+
+        // Verify progress was updated (check job_status metadata contains "processed" key)
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'persona_classification'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            metadata.is_some(),
+            "metadata should be set after classification"
+        );
+
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+        assert!(
+            meta_json.get("processed").is_some(),
+            "metadata should contain 'processed' field"
+        );
+        assert!(
+            meta_json.get("total").is_some(),
+            "metadata should contain 'total' field"
+        );
+        assert_eq!(
+            meta_json["total"].as_i64().unwrap(),
+            250,
+            "total should be 250 wallets"
+        );
+        assert_eq!(
+            meta_json["processed"].as_i64().unwrap(),
+            250,
+            "all 250 wallets should be processed"
+        );
     }
 }
