@@ -32,7 +32,7 @@ Commit BEFORE deploying. Never commit `.env`, `data/`, or credentials.
 make deploy
 ```
 
-Server is auto-discovered via `scripts/aws_find_server.sh` (AWS EC2 tag Name=trading-bot). Do **not** pass hardcoded `SERVER=` — EC2 IPs change on restart and cause "connection timed out". Override only when needed: `make deploy SERVER=ubuntu@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x make deploy`.
+Server is resolved via `scripts/find_server.sh` (reads `deploy/.server-info`). Override when needed: `make deploy SERVER=ksonny@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x make deploy`.
 
 This cross-compiles musl, SCPs to `/opt/evaluator/`, restarts systemd service, runs `make check`.
 
@@ -44,13 +44,13 @@ If the dashboard is behind a reverse proxy (cloudflared, nginx, ALB, etc.), the 
 
 ```bash
 # Service alive
-ssh -i ~/git_projects/trading/trading-bot.pem $(./scripts/aws_find_server.sh) 'systemctl is-active evaluator'
+ssh $(./scripts/find_server.sh) 'systemctl is-active evaluator'
 
 # Metrics on port 9094
-ssh -i ~/git_projects/trading/trading-bot.pem $(./scripts/aws_find_server.sh) 'curl -s localhost:9094/metrics | head -5'
+ssh $(./scripts/find_server.sh) 'curl -s localhost:9094/metrics | head -5'
 
 # No panics
-ssh -i ~/git_projects/trading/trading-bot.pem $(./scripts/aws_find_server.sh) 'journalctl -u evaluator --no-pager -n 20'
+ssh $(./scripts/find_server.sh) 'journalctl -u evaluator --no-pager -n 20'
 
 # Phase checks (run highest applicable; uses auto-discovered SERVER)
 make check-phase-0   # Tables exist
@@ -70,7 +70,7 @@ make status
 |------|---------|------|
 | Test | `make test` | 0 failures |
 | Commit | `git commit && push` | Clean tree |
-| Deploy | `make deploy` (uses AWS discovery) | No errors |
+| Deploy | `make deploy` (uses find_server.sh) | No errors |
 | Service | `systemctl is-active evaluator` | `active` |
 | Metrics | `curl localhost:9094/metrics` | Non-empty |
 | Logs | `journalctl -u evaluator -n 20` | No panics |

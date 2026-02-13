@@ -1,0 +1,4 @@
+# Server connection info
+# Copy to .server-info and edit with your server details
+SERVER_IP=YOUR_SERVER_IP
+SSH_USER=your_user
