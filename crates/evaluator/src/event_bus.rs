@@ -37,8 +37,6 @@ pub enum BackpressurePolicy {
     DropOldest,
     /// Drop the newest event (the one being published) when the buffer is full.
     DropNewest,
-    /// Block the publisher until space is available (not recommended for broadcast).
-    Block,
 }
 
 /// EventBus coordinates job execution via typed events.
@@ -156,13 +154,6 @@ impl EventBus {
                 } else {
                     self.pipeline_tx.send(event)
                 }
-            }
-            BackpressurePolicy::Block => {
-                // For broadcast channels, Block behaves the same as DropOldest
-                // since tokio broadcast doesn't support blocking sends.
-                // In practice, critical events should use Block policy as a signal
-                // that they are important and should always be sent.
-                self.pipeline_tx.send(event)
             }
         }
     }
@@ -349,8 +340,8 @@ mod tests {
         let bus = EventBus::new(16).with_backpressure_policy(BackpressurePolicy::DropNewest);
         assert_eq!(bus.backpressure_policy(), BackpressurePolicy::DropNewest);
 
-        let bus = EventBus::new(16).with_backpressure_policy(BackpressurePolicy::Block);
-        assert_eq!(bus.backpressure_policy(), BackpressurePolicy::Block);
+        let bus = EventBus::new(16).with_backpressure_policy(BackpressurePolicy::DropOldest);
+        assert_eq!(bus.backpressure_policy(), BackpressurePolicy::DropOldest);
     }
 
     #[tokio::test]
@@ -438,29 +429,6 @@ mod tests {
                 _ => panic!("Expected TradesIngested"),
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_block_policy_sends_events_like_drop_oldest() {
-        // Block policy falls back to DropOldest for broadcast channels
-        let bus = EventBus::new(4).with_backpressure_policy(BackpressurePolicy::Block);
-        let mut rx = bus.subscribe_pipeline();
-
-        // Fill and overflow
-        for i in 0..6u64 {
-            let _ = bus.publish_pipeline(PipelineEvent::TradesIngested {
-                wallet_address: format!("0xwallet{i}"),
-                trades_count: i,
-                ingested_at: Utc::now(),
-            });
-        }
-
-        // Should still be able to receive events (lagged or otherwise)
-        let result = rx.recv().await;
-        assert!(
-            result.is_ok() || matches!(result, Err(broadcast::error::RecvError::Lagged(_))),
-            "Block policy should send events (with possible lag)"
-        );
     }
 
     #[tokio::test]
