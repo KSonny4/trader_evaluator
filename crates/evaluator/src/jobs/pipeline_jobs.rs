@@ -1219,8 +1219,41 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         return Ok(0);
     }
 
+    // Quality gate: Check for wallets with sufficient trade history
+    // Need at least min_total_trades and 7+ days of tracking
+    let min_trades = i64::from(stage1_config.min_total_trades);
+    let ready_wallets: i64 = db
+        .call_named("persona_classification.count_ready_wallets", move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(DISTINCT w.proxy_wallet)
+                 FROM wallets w
+                 WHERE w.is_active = 1
+                   AND (SELECT COUNT(*) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet) >= ?1
+                   AND (SELECT MIN(timestamp) FROM trades_raw tr WHERE tr.proxy_wallet = w.proxy_wallet)
+                       <= unixepoch('now', '-7 days')",
+                [min_trades],
+                |row| row.get(0),
+            )?)
+        })
+        .await?;
+
+    if ready_wallets == 0 {
+        tracing::warn!("persona_classification: skipping - no wallets with sufficient trade history");
+        tracker
+            .success(Some(serde_json::json!({
+                "classified": 0,
+                "skipped": "insufficient trade history",
+                "total_wallets": total_wallets,
+                "min_trades_required": stage1_config.min_total_trades,
+                "min_tracking_days": 7
+            })))
+            .await?;
+        return Ok(0);
+    }
+
     tracing::info!(
         total = total_wallets,
+        ready = ready_wallets,
         "persona_classification: starting chunked processing"
     );
 
@@ -2681,6 +2714,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_persona_classification_skips_when_insufficient_trade_history() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create wallets with insufficient trade history
+        // Wallet 1: Only 5 trades (need 10+)
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xfew', 'HOLDER', 1)",
+                [],
+            )?;
+            for i in 0..5 {
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES ('0xfew', 'm1', 'BUY', 1.0, 0.5, ?1, ?2, '{}')",
+                    rusqlite::params![now - (i + 1) * 86400, format!("0xtx{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Wallet 2: Recent trades only (not 7+ days old)
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xnew', 'HOLDER', 1)",
+                [],
+            )?;
+            for i in 0..15 {
+                // 15 trades but all within last 3 days
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES ('0xnew', 'm1', 'BUY', 1.0, 0.5, ?1, ?2, '{}')",
+                    rusqlite::params![now - (i as i64) * 3600, format!("0xtx_new{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Run classification - should skip because wallets lack sufficient history
+        let classified = run_persona_classification_once(&db, &cfg).await.unwrap();
+
+        assert_eq!(
+            classified, 0,
+            "should classify 0 wallets when trade history insufficient"
+        );
+
+        // Verify job_status shows skip reason
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'persona_classification'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert!(metadata.is_some(), "metadata should be set");
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+        assert!(
+            meta_json.get("skipped").is_some(),
+            "metadata should indicate skipping"
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_persona_classification_updates_progress_incrementally() {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap(); // Migrations run automatically
@@ -2688,6 +2794,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // Create 250 wallets (enough for 3 chunks of 100)
+        // Each wallet needs 10+ trades and 7+ days of history to pass quality gate
         for i in 0..250 {
             let wallet = format!("0xwallet{i}");
             db.call(move |conn| {
@@ -2696,15 +2803,18 @@ mod tests {
                     "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                     rusqlite::params![w],
                 )?;
-                conn.execute(
-                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
-                     VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
-                    rusqlite::params![
-                        wallet,
-                        now - 86400 * 30, // 30 days ago
-                        format!("0xtx{i}")
-                    ],
-                )?;
+                // Create 15 trades spread over 30 days to pass quality gate
+                for j in 0..15 {
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * (30 - (j * 2)), // Spread trades over 30 days
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
                 Ok(())
             })
             .await
