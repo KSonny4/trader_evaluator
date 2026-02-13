@@ -61,11 +61,30 @@ flowchart LR
 
 ---
 
-## 2. Target architecture (single process)
+## 2. Event-driven architecture -- IMPLEMENTED
 
-The following is the **intended direction** for the evaluator, still as a **single process** (one deployable binary). No implementation is implied in this document.
+> **Status:** Implemented. See [`docs/EVENT_ARCHITECTURE.md`](EVENT_ARCHITECTURE.md) for the full reference.
 
-### Async tasks and work queue (Akka-like)
+The evaluator now has an in-process event bus (`crates/evaluator/src/event_bus.rs`) that coordinates pipeline jobs via typed events. This implements the "Event-driven" subsection below. Work queues, saga, and tracing are not yet implemented.
+
+### Current state (config flags)
+
+All flags default to `false` in `config/default.toml`. Enable progressively:
+
+| Flag | Default | Effect when `true` |
+|------|---------|-------------------|
+| `events.enabled` | `false` | Initialize EventBus, spawn logging subscriber |
+| `events.enable_discovery_event_trigger` | `false` | `MarketsScored` triggers wallet discovery (replaces timer) |
+| `events.enable_classification_event_trigger` | `false` | `TradesIngested` batched triggers classification (replaces timer) |
+| `events.enable_fast_path_trigger` | `false` | `TradesIngested` coalescing triggers paper trading fast-path |
+| `events.bus_capacity` | `1000` | Broadcast channel buffer size |
+| `events.classification_batch_window_secs` | `300` | Batching window for classification trigger |
+
+### Migration from timer to event-driven
+
+When event-driven triggers are enabled, the corresponding timer-based scheduler jobs are **automatically excluded** from the scheduler. No manual removal needed. To revert: set the trigger flag back to `false` and restart.
+
+### Async tasks and work queue (Akka-like) -- NOT YET IMPLEMENTED
 
 - Move from “one tick, one run” to **work queues**: jobs receive units of work (e.g. “score these market IDs,” “ingest this wallet”) with **explicit backpressure**.
 - Multiple worker tasks can drain the same queue (worker pool). Implementation stays in-process (e.g. `mpsc` or a bounded channel of typed messages).
@@ -170,15 +189,13 @@ If you later want isolation (e.g. paper engine as its own process for safety or 
 
 ## 5. Migration path (high level)
 
-Implementing the target can be done in phases, for example:
+Implementing the target can be done in phases:
 
-1. **Paper fast path:** Introduce explicit queue priority/backpressure so paper-trading decisions stay low-latency even if background ingestion/enrichment is behind.
-2. **Paper saga:** Add a local saga-like flow for paper trading (persisted state machine) to make decisions atomic, replayable, and resilient to partial failures.
-3. **Tracing:** Add `tracing` spans and trace IDs for Tempo and service graph.
-4. **Events:** Introduce typed events and in-process subscribers (including “ingestion triggers paper decisioning immediately”).
+1. ~~**Events:** Introduce typed events and in-process subscribers (including "ingestion triggers paper decisioning immediately").~~ **DONE.** See `docs/EVENT_ARCHITECTURE.md`.
+2. **Paper fast path:** Introduce explicit queue priority/backpressure so paper-trading decisions stay low-latency even if background ingestion/enrichment is behind.
+3. **Paper saga:** Add a local saga-like flow for paper trading (persisted state machine) to make decisions atomic, replayable, and resilient to partial failures.
+4. **Tracing:** Add `tracing` spans and trace IDs for Tempo and service graph.
 5. **Queues:** Replace remaining tick channels with work queues where beneficial, keeping fast-path isolation.
-
-No task breakdown or code changes are specified here; this is the order of concerns for a future implementation plan.
 
 ---
 
@@ -186,7 +203,11 @@ No task breakdown or code changes are specified here; this is the order of conce
 
 | Document / code | Purpose |
 |-----------------|---------|
+| `docs/EVENT_ARCHITECTURE.md` | Event-driven architecture reference (event types, subscribers, config, troubleshooting) |
 | `docs/REFERENCE.md` | Technical stack, DB tables, project structure |
 | `docs/STRATEGY_BIBLE.md` | Domain rules, persona taxonomy, WScore/MScore |
 | `crates/evaluator/src/main.rs` | Current job wiring and worker loops |
 | `crates/evaluator/src/scheduler.rs` | Timer and tick channel setup |
+| `crates/evaluator/src/event_bus.rs` | EventBus implementation |
+| `crates/evaluator/src/events/mod.rs` | Event type definitions |
+| `crates/evaluator/src/events/subscribers.rs` | Subscriber implementations |

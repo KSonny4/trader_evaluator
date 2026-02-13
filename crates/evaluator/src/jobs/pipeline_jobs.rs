@@ -17,6 +17,9 @@ use crate::wallet_rules_engine::{
 };
 use crate::wallet_scoring::{compute_wscore, score_input_from_features, WScoreWeights};
 
+use crate::event_bus::EventBus;
+use crate::events::PipelineEvent;
+
 use super::fetcher_traits::*;
 use super::tracker::JobTracker;
 
@@ -32,11 +35,15 @@ fn is_crypto_15m_market(title: &str, slug: &str) -> bool {
     is_crypto && is_15m
 }
 
-pub async fn run_wallet_rules_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+pub async fn run_wallet_rules_once(
+    db: &AsyncDb,
+    cfg: &Config,
+    event_bus: Option<&EventBus>,
+) -> Result<u64> {
     let tracker = JobTracker::start(db, "wallet_rules").await?;
     let now_epoch = chrono::Utc::now().timestamp();
     let rules_cfg = cfg.wallet_rules.clone();
-    let changed: u64 = db
+    let (evaluated_count, changed): (u64, u64) = db
         .call_named("wallet_rules.evaluate_batch", move |conn| {
             let wallets: Vec<String> = conn
                 .prepare(
@@ -50,6 +57,7 @@ pub async fn run_wallet_rules_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
                 .query_map([], |row| row.get(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
+            let total_wallets = wallets.len() as u64;
             let mut updates = 0_u64;
             for proxy_wallet in wallets {
                 let features = match compute_wallet_features(conn, &proxy_wallet, 30, now_epoch) {
@@ -169,10 +177,20 @@ pub async fn run_wallet_rules_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
                 }
             }
 
-            Ok(updates)
+            Ok((total_wallets, updates))
         })
         .await?;
     metrics::gauge!("evaluator_wallet_rules_transitions_run").set(changed as f64);
+
+    // Emit WalletRulesEvaluated event
+    if let Some(bus) = event_bus {
+        let _ = bus.publish_pipeline(PipelineEvent::WalletRulesEvaluated {
+            wallets_evaluated: evaluated_count,
+            transitions: changed,
+            evaluated_at: chrono::Utc::now(),
+        });
+    }
+
     tracker
         .success(Some(serde_json::json!({"changed": changed})))
         .await?;
@@ -354,6 +372,7 @@ pub async fn run_event_scoring_once<P: GammaMarketsPager + Sync>(
     db: &AsyncDb,
     pager: &P,
     cfg: &Config,
+    event_bus: Option<&EventBus>,
 ) -> Result<u64> {
     // Extra fields from GammaMarket for the full DB upsert (not in MarketCandidate).
     #[derive(Clone)]
@@ -609,6 +628,15 @@ pub async fn run_event_scoring_once<P: GammaMarketsPager + Sync>(
         })
         .await;
 
+    // Emit pipeline event if event_bus is provided
+    if let Some(bus) = event_bus {
+        let _ = bus.publish_pipeline(PipelineEvent::MarketsScored {
+            markets_scored: inserted,
+            events_ranked: total_events_evaluated as u64,
+            completed_at: chrono::Utc::now(),
+        });
+    }
+
     Ok(inserted)
 }
 
@@ -617,6 +645,7 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
     holders: &H,
     trades: &T,
     cfg: &Config,
+    event_bus: Option<&EventBus>,
 ) -> Result<u64> {
     let tracker = JobTracker::start(db, "wallet_discovery").await?;
 
@@ -783,6 +812,15 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
 
         inserted += page_inserted;
         all_new_wallets.extend(new_wallets);
+
+        // Emit WalletsDiscovered event for this market
+        if let Some(bus) = event_bus {
+            let _ = bus.publish_pipeline(PipelineEvent::WalletsDiscovered {
+                market_id: condition_id.clone(),
+                wallets_added: page_inserted,
+                discovered_at: chrono::Utc::now(),
+            });
+        }
     }
 
     // Spawn on-demand feature computation for newly discovered wallets
@@ -1129,7 +1167,11 @@ fn process_wallet_chunk(
 /// age/trades from `trades_raw`. To get wallets evaluated, ensure trades ingestion runs and
 /// prioritizes wallets with 0 trades (backfill-first) so `trades_raw` fills; then the next
 /// persona run will classify them.
-pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Result<u64> {
+pub async fn run_persona_classification_once(
+    db: &AsyncDb,
+    cfg: &Config,
+    event_bus: Option<&EventBus>,
+) -> Result<u64> {
     let tracker = JobTracker::start(db, "persona_classification").await?;
     let now_epoch = chrono::Utc::now().timestamp();
     let window_days = 180_u32;
@@ -1327,6 +1369,15 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
     );
 
     metrics::gauge!("evaluator_persona_classifications_run").set(total_processed as f64);
+
+    // Emit WalletsClassified event
+    if let Some(bus) = event_bus {
+        let _ = bus.publish_pipeline(PipelineEvent::WalletsClassified {
+            wallets_classified: total_processed,
+            classified_at: chrono::Utc::now(),
+        });
+    }
+
     tracker
         .success(Some(serde_json::json!({
             "processed": total_processed,
@@ -1609,7 +1660,9 @@ mod tests {
         ];
 
         let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
-        run_event_scoring_once(&db, &pager, &cfg).await.unwrap();
+        run_event_scoring_once(&db, &pager, &cfg, None)
+            .await
+            .unwrap();
 
         let (m1, m2): (f64, f64) = db
             .call(|conn| {
@@ -1674,7 +1727,9 @@ mod tests {
         ];
 
         let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
-        let inserted = run_event_scoring_once(&db, &pager, &cfg).await.unwrap();
+        let inserted = run_event_scoring_once(&db, &pager, &cfg, None)
+            .await
+            .unwrap();
         assert!(inserted > 0);
 
         let (cnt_scores, cnt_markets): (i64, i64) = db
@@ -1962,7 +2017,7 @@ mod tests {
             raw: b"[]".to_vec(),
         };
 
-        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
         assert!(inserted > 0);
@@ -2005,7 +2060,7 @@ mod tests {
             raw: b"[]".to_vec(),
         };
 
-        let _inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let _inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
 
@@ -2073,7 +2128,7 @@ mod tests {
             raw: b"[]".to_vec(),
         };
 
-        let _inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let _inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
 
@@ -2181,7 +2236,7 @@ mod tests {
             by_market: trades_by_market,
         };
 
-        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
 
@@ -2335,7 +2390,7 @@ mod tests {
         .await
         .unwrap();
 
-        let changed = run_wallet_rules_once(&db, &cfg).await.unwrap();
+        let changed = run_wallet_rules_once(&db, &cfg, None).await.unwrap();
         assert_eq!(changed, 1);
 
         let state: String = db
@@ -2349,6 +2404,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state, "PAPER_TRADING");
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_rules_once_emits_wallet_rules_evaluated_event() {
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.wallet_rules.min_median_hold_minutes = 0.0;
+        cfg.wallet_rules.min_trades_for_discovery = 50;
+        cfg.wallet_rules.max_fraction_trades_at_spread_edge = 1.0;
+
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        db.call(|conn| {
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xw', 'HOLDER', 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO wallet_personas (proxy_wallet, persona, confidence, classified_at)
+                 VALUES ('0xw', 'CONSISTENT_GENERALIST', 1.0, '2026-02-10 00:00:00')",
+                [],
+            )?;
+            for i in 0..60 {
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES ('0xw', 'm1', 'BUY', 1.0, 0.5, ?1, ?2, '{}')",
+                    rusqlite::params![now - i, format!("0xtx{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe_pipeline();
+
+        let changed = run_wallet_rules_once(&db, &cfg, Some(&bus)).await.unwrap();
+        assert_eq!(changed, 1);
+
+        // Should have received a WalletRulesEvaluated event
+        let event = rx.try_recv().unwrap();
+        match event {
+            PipelineEvent::WalletRulesEvaluated {
+                wallets_evaluated,
+                transitions,
+                ..
+            } => {
+                assert_eq!(wallets_evaluated, 1, "should have evaluated 1 wallet");
+                assert_eq!(transitions, 1, "should have 1 state transition");
+            }
+            other => panic!("Expected WalletRulesEvaluated event, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2459,7 +2567,9 @@ mod tests {
         .unwrap();
 
         // Run classification - should skip because wallets lack sufficient history
-        let classified = run_persona_classification_once(&db, &cfg).await.unwrap();
+        let classified = run_persona_classification_once(&db, &cfg, None)
+            .await
+            .unwrap();
 
         assert_eq!(
             classified, 0,
@@ -2522,7 +2632,9 @@ mod tests {
         }
 
         // Run classification
-        let _classified = run_persona_classification_once(&db, &cfg).await.unwrap();
+        let _classified = run_persona_classification_once(&db, &cfg, None)
+            .await
+            .unwrap();
 
         // Verify progress was updated (check job_status metadata contains "processed" key)
         let metadata: Option<String> = db
@@ -2595,7 +2707,7 @@ mod tests {
         };
 
         // Run wallet_discovery - should skip because scores are too old
-        let discovered = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let discovered = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
 
@@ -2710,7 +2822,7 @@ mod tests {
         };
 
         // Discovery should insert 2 new wallets (0xnew1, 0xnew2)
-        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
         assert_eq!(inserted, 2, "should insert 2 new wallets");
@@ -2775,7 +2887,7 @@ mod tests {
         };
 
         // Run discovery
-        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None)
             .await
             .unwrap();
         assert_eq!(inserted, 1, "should discover 1 new wallet");
@@ -2957,7 +3069,9 @@ mod tests {
 
         // Run with parallel disabled
         cfg.personas.parallel_enabled = false;
-        let serial_count = run_persona_classification_once(&db, &cfg).await.unwrap();
+        let serial_count = run_persona_classification_once(&db, &cfg, None)
+            .await
+            .unwrap();
 
         // Verify we got results from serial path
         let serial_personas: Vec<String> = db
@@ -2983,7 +3097,9 @@ mod tests {
 
         // Run with parallel enabled
         cfg.personas.parallel_enabled = true;
-        let parallel_count = run_persona_classification_once(&db, &cfg).await.unwrap();
+        let parallel_count = run_persona_classification_once(&db, &cfg, None)
+            .await
+            .unwrap();
 
         // Get results from parallel path
         let parallel_personas: Vec<String> = db
@@ -3010,5 +3126,329 @@ mod tests {
             serial_personas, parallel_personas,
             "serial and parallel should classify same wallets"
         );
+    }
+
+    #[tokio::test]
+    async fn test_run_event_scoring_once_emits_markets_scored_event() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let end_date = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        let markets = vec![
+            GammaMarket {
+                condition_id: Some("0x1".to_string()),
+                question: Some("M1".to_string()),
+                title: None,
+                slug: None,
+                description: None,
+                end_date: Some(end_date.clone()),
+                liquidity: Some("5000".to_string()),
+                volume: Some("8000".to_string()),
+                volume_24hr: Some("8000".to_string()),
+                category: None,
+                event_slug: None,
+                events: None,
+                neg_risk: None,
+            },
+            GammaMarket {
+                condition_id: Some("0x2".to_string()),
+                question: Some("M2".to_string()),
+                title: None,
+                slug: None,
+                description: None,
+                end_date: Some(end_date),
+                liquidity: Some("20000".to_string()),
+                volume: Some("9000".to_string()),
+                volume_24hr: Some("9000".to_string()),
+                category: None,
+                event_slug: None,
+                events: None,
+                neg_risk: None,
+            },
+        ];
+
+        let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
+
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe_pipeline();
+
+        let inserted = run_event_scoring_once(&db, &pager, &cfg, Some(&bus))
+            .await
+            .unwrap();
+        assert!(inserted > 0);
+
+        // Should have received a MarketsScored event
+        let event = rx.try_recv().unwrap();
+        match event {
+            PipelineEvent::MarketsScored {
+                markets_scored,
+                events_ranked,
+                ..
+            } => {
+                assert_eq!(markets_scored, inserted);
+                assert!(events_ranked > 0);
+            }
+            other => panic!("Expected MarketsScored event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_event_scoring_once_works_without_event_bus() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let end_date = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        let markets = vec![GammaMarket {
+            condition_id: Some("0x1".to_string()),
+            question: Some("M1".to_string()),
+            title: None,
+            slug: None,
+            description: None,
+            end_date: Some(end_date),
+            liquidity: Some("5000".to_string()),
+            volume: Some("8000".to_string()),
+            volume_24hr: Some("8000".to_string()),
+            category: None,
+            event_slug: None,
+            events: None,
+            neg_risk: None,
+        }];
+
+        let pager = FakeGammaPager::new(vec![(markets, br#"[{"page":1}]"#.to_vec())]);
+
+        // Should work fine with None event_bus (backward compatible)
+        let inserted = run_event_scoring_once(&db, &pager, &cfg, None)
+            .await
+            .unwrap();
+        assert!(inserted > 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_discovery_emits_wallets_discovered_events() {
+        use crate::event_bus::EventBus;
+        use crate::events::PipelineEvent;
+
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert 2 markets so we get 2 events
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('0xmarket_a', date('now'), 0.9, 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('0xmarket_b', date('now'), 0.8, 2)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let holders = FakeHoldersFetcher {
+            resp: vec![ApiHolderResponse {
+                token: Some("0xtok".to_string()),
+                holders: vec![common::types::ApiHolder {
+                    proxy_wallet: Some("0xholder1".to_string()),
+                    amount: Some(100.0),
+                    asset: None,
+                    pseudonym: None,
+                    name: None,
+                    outcome_index: None,
+                }],
+            }],
+            raw: b"[]".to_vec(),
+        };
+
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![
+                ApiTrade {
+                    proxy_wallet: Some("0xtrader1".to_string()),
+                    condition_id: Some("0xcond".to_string()),
+                    asset: None,
+                    size: Some("10".to_string()),
+                    price: Some("0.5".to_string()),
+                    timestamp: Some(1),
+                    title: None,
+                    slug: None,
+                    outcome: None,
+                    outcome_index: None,
+                    transaction_hash: Some("0xtx1".to_string()),
+                    side: None,
+                    pseudonym: None,
+                    name: None,
+                },
+                ApiTrade {
+                    proxy_wallet: Some("0xtrader1".to_string()),
+                    condition_id: Some("0xcond".to_string()),
+                    asset: None,
+                    size: Some("10".to_string()),
+                    price: Some("0.5".to_string()),
+                    timestamp: Some(2),
+                    title: None,
+                    slug: None,
+                    outcome: None,
+                    outcome_index: None,
+                    transaction_hash: Some("0xtx2".to_string()),
+                    side: None,
+                    pseudonym: None,
+                    name: None,
+                },
+                ApiTrade {
+                    proxy_wallet: Some("0xtrader1".to_string()),
+                    condition_id: Some("0xcond".to_string()),
+                    asset: None,
+                    size: Some("10".to_string()),
+                    price: Some("0.5".to_string()),
+                    timestamp: Some(3),
+                    title: None,
+                    slug: None,
+                    outcome: None,
+                    outcome_index: None,
+                    transaction_hash: Some("0xtx3".to_string()),
+                    side: None,
+                    pseudonym: None,
+                    name: None,
+                },
+            ],
+            raw: b"[]".to_vec(),
+        };
+
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe_pipeline();
+
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg, Some(&event_bus))
+            .await
+            .unwrap();
+
+        assert!(inserted > 0, "should discover some wallets");
+
+        // Should have received 2 WalletsDiscovered events (one per market)
+        let mut events = Vec::new();
+        // Drain all available events
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        assert_eq!(events.len(), 2, "should emit one event per market");
+
+        // Verify both are WalletsDiscovered with correct market_ids
+        let market_ids: Vec<String> = events
+            .iter()
+            .map(|e| match e {
+                PipelineEvent::WalletsDiscovered { market_id, .. } => market_id.clone(),
+                other => panic!("Expected WalletsDiscovered, got {other:?}"),
+            })
+            .collect();
+
+        assert!(market_ids.contains(&"0xmarket_a".to_string()));
+        assert!(market_ids.contains(&"0xmarket_b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_discovery_works_without_event_bus() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('0xmarket1', date('now'), 0.9, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let holders = FakeHoldersFetcher {
+            resp: vec![ApiHolderResponse {
+                token: Some("0xtok".to_string()),
+                holders: vec![],
+            }],
+            raw: b"[]".to_vec(),
+        };
+
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![],
+            raw: b"[]".to_vec(),
+        };
+
+        // Should work fine with None event_bus (backward compatibility)
+        let result = run_wallet_discovery_once(&db, &holders, &trades, &cfg, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_persona_classification_once_emits_wallets_classified_event() {
+        use crate::event_bus::EventBus;
+        use crate::events::PipelineEvent;
+
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create wallets with sufficient trade history (10+ trades, 7+ days)
+        for i in 0..3 {
+            let wallet = format!("0xwallet{i}");
+            db.call(move |conn| {
+                let w = wallet.clone();
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![w],
+                )?;
+                for j in 0..15 {
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * (30 - (j * 2)),
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        // Set up event bus and subscribe before running
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe_pipeline();
+
+        let classified = run_persona_classification_once(&db, &cfg, Some(&bus))
+            .await
+            .unwrap();
+
+        // Should have classified some wallets
+        assert!(classified > 0, "should classify at least one wallet");
+
+        // Should have emitted a WalletsClassified event
+        let event = rx.try_recv().unwrap();
+        match event {
+            PipelineEvent::WalletsClassified {
+                wallets_classified,
+                classified_at,
+            } => {
+                assert_eq!(wallets_classified, classified);
+                assert!(classified_at <= chrono::Utc::now());
+            }
+            other => panic!("expected WalletsClassified, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_persona_classification_once_works_without_event_bus() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // No wallets - just verify it runs without event_bus (backward compat)
+        let classified = run_persona_classification_once(&db, &cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(classified, 0);
     }
 }

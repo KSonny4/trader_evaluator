@@ -18,6 +18,8 @@ pub struct Config {
     pub wallet_rules: WalletRules,
     pub anomaly: Anomaly,
     pub web: Option<Web>,
+    #[serde(default)]
+    pub events: Events,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -301,6 +303,59 @@ pub struct Anomaly {
     pub max_weekly_drawdown_pct: f64,
     pub frequency_change_multiplier: f64,
     pub size_change_multiplier: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Events {
+    /// Master kill switch - when false, event bus is not initialized
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Whether to persist events to event_log table
+    #[serde(default)]
+    pub log_to_db: bool,
+
+    /// Capacity for broadcast channels (pipeline and operational events)
+    #[serde(default = "default_bus_capacity")]
+    pub bus_capacity: usize,
+
+    /// Phase 3: Enable event-driven wallet discovery (MarketsScored → discovery)
+    #[serde(default)]
+    pub enable_discovery_event_trigger: bool,
+
+    /// Phase 3: Enable event-driven classification (TradesIngested → batched → classification)
+    #[serde(default)]
+    pub enable_classification_event_trigger: bool,
+
+    /// Phase 3: Enable fast-path trigger (TradesIngested → coalescing → paper trading)
+    #[serde(default)]
+    pub enable_fast_path_trigger: bool,
+
+    /// Batching window for classification trigger (seconds)
+    #[serde(default = "default_classification_batch_window")]
+    pub classification_batch_window_secs: u64,
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            log_to_db: false,
+            bus_capacity: default_bus_capacity(),
+            enable_discovery_event_trigger: false,
+            enable_classification_event_trigger: false,
+            enable_fast_path_trigger: false,
+            classification_batch_window_secs: default_classification_batch_window(),
+        }
+    }
+}
+
+fn default_bus_capacity() -> usize {
+    1000
+}
+
+fn default_classification_batch_window() -> u64 {
+    300 // 5 minutes
 }
 
 impl Config {
@@ -886,5 +941,36 @@ size_change_multiplier = 10.0
 "#;
         let config = Config::from_toml_str(toml).unwrap();
         assert!(config.web.is_none());
+    }
+
+    #[test]
+    fn test_events_config_loads_with_defaults() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let events = config.events;
+        assert!(!events.enabled, "events should be disabled by default");
+        assert!(
+            !events.log_to_db,
+            "event logging to DB should be disabled by default"
+        );
+        assert_eq!(events.bus_capacity, 1000);
+    }
+
+    #[test]
+    fn test_events_config_trigger_flags_default_to_false() {
+        let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
+        let events = config.events;
+        assert!(
+            !events.enable_discovery_event_trigger,
+            "discovery event trigger should be disabled by default"
+        );
+        assert!(
+            !events.enable_classification_event_trigger,
+            "classification event trigger should be disabled by default"
+        );
+        assert!(
+            !events.enable_fast_path_trigger,
+            "fast path trigger should be disabled by default"
+        );
+        assert_eq!(events.classification_batch_window_secs, 300);
     }
 }

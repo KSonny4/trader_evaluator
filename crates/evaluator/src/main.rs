@@ -2,6 +2,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 mod cli;
+mod event_bus;
+mod events;
 mod flow_metrics;
 mod ingestion;
 mod jobs;
@@ -54,19 +56,43 @@ async fn main() -> Result<()> {
         std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
     ));
 
+    // ── Event Bus: Initialized when enabled, passed to all jobs (Phase 2) ──
+    let event_bus = if cfg.events.enabled {
+        tracing::info!("event bus enabled (capacity={})", cfg.events.bus_capacity);
+        Some(Arc::new(event_bus::EventBus::new(cfg.events.bus_capacity)))
+    } else {
+        None
+    };
+
+    // ── Event Logging Subscriber: Logs all events to stdout when enabled ──
+    if let Some(ref bus) = event_bus {
+        let subscriber_bus = bus.clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_logging_subscriber(subscriber_bus).await;
+        });
+        tracing::info!("event logging subscriber started");
+    }
+
     // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
     // Order: event_scoring first (wallet_discovery reads market_scores). Then run
     // wallet_discovery, leaderboard_discovery, and recovery in parallel (they are independent).
     // Finally wallet_rules (needs wallets to exist).
     tracing::info!("bootstrap: seeding markets and wallets");
 
-    match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+    match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref(), event_bus.as_deref()).await
+    {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
     }
 
     let (wallet_res, leaderboard_res) = tokio::join!(
-        jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref()),
+        jobs::run_wallet_discovery_once(
+            &db,
+            api.as_ref(),
+            api.as_ref(),
+            cfg.as_ref(),
+            event_bus.as_deref()
+        ),
         jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
     );
     match wallet_res {
@@ -78,7 +104,7 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
     }
 
-    match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
+    match jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()).await {
         Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
     }
@@ -104,13 +130,25 @@ async fn main() -> Result<()> {
         .wallet_discovery_mode
         .eq_ignore_ascii_case("continuous");
 
+    // Event-driven discovery: when enabled AND event bus is available, MarketsScored
+    // events trigger discovery immediately instead of using a timer.
+    let discovery_event_driven = cfg.events.enable_discovery_event_trigger && event_bus.is_some();
+
     let mut scheduler_jobs = vec![scheduler::JobSpec {
         name: "event_scoring".to_string(),
         interval: std::time::Duration::from_secs(cfg.market_scoring.refresh_interval_secs),
         tick: event_scoring_tx,
         run_immediately: false,
     }];
-    if !discovery_continuous {
+    if discovery_event_driven {
+        // Event-driven mode: MarketsScored events trigger discovery immediately
+        let bus = event_bus.as_ref().unwrap().clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_discovery_trigger_subscriber(bus, wallet_discovery_tx).await;
+        });
+        tracing::info!("event-driven discovery trigger enabled (MarketsScored → discovery)");
+    } else if !discovery_continuous {
+        // Timer-based fallback: only used when neither continuous nor event-driven mode is active
         scheduler_jobs.push(scheduler::JobSpec {
             name: "wallet_discovery".to_string(),
             interval: std::time::Duration::from_secs(cfg.wallet_discovery.refresh_interval_secs),
@@ -118,6 +156,61 @@ async fn main() -> Result<()> {
             run_immediately: false,
         });
     }
+
+    // Event-driven classification: when enabled, TradesIngested events are batched
+    // and trigger classification every N seconds (configurable window).
+    let classification_event_driven =
+        cfg.events.enable_classification_event_trigger && event_bus.is_some();
+
+    if classification_event_driven {
+        let bus = event_bus.as_ref().unwrap().clone();
+        let batch_window =
+            std::time::Duration::from_secs(cfg.events.classification_batch_window_secs);
+        let classification_tx = persona_classification_tx.clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_classification_trigger_subscriber(
+                bus,
+                classification_tx,
+                batch_window,
+            )
+            .await;
+        });
+        tracing::info!(
+            window_secs = cfg.events.classification_batch_window_secs,
+            "event-driven classification trigger enabled (TradesIngested batched → classification)"
+        );
+    }
+
+    // Event-driven fast-path: when enabled, TradesIngested events trigger
+    // fast-path coalescing for immediate paper trading reactions.
+    let fast_path_enabled = cfg.events.enable_fast_path_trigger && event_bus.is_some();
+
+    if fast_path_enabled {
+        let bus = event_bus.as_ref().unwrap().clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_fast_path_subscriber(bus).await;
+        });
+
+        // Spawn fast-path worker that converts coalesced triggers to ticks
+        let bus_worker = event_bus.as_ref().unwrap().clone();
+        let (paper_tick_tx, mut paper_tick_rx) = tokio::sync::mpsc::channel::<u64>(8);
+        tokio::spawn(async move {
+            events::subscribers::spawn_fast_path_worker(bus_worker, paper_tick_tx).await;
+        });
+
+        // Wire paper_tick_rx to downstream consumer (future: paper trading scheduler)
+        tokio::spawn(async move {
+            while let Some(generation) = paper_tick_rx.recv().await {
+                tracing::info!(generation, "fast-path tick received (ready for paper trading integration)");
+                // TODO: When trader microservice supports event-driven mode, trigger paper tick here
+            }
+        });
+
+        tracing::info!(
+            "event-driven fast-path trigger enabled (TradesIngested coalescing → paper tick)"
+        );
+    }
+
     scheduler_jobs.extend([
         scheduler::JobSpec {
             name: "trades_ingestion".to_string(),
@@ -156,12 +249,6 @@ async fn main() -> Result<()> {
             run_immediately: true,
         },
         scheduler::JobSpec {
-            name: "persona_classification".to_string(),
-            interval: std::time::Duration::from_secs(3600), // every hour
-            tick: persona_classification_tx,
-            run_immediately: true,
-        },
-        scheduler::JobSpec {
             name: "wal_checkpoint".to_string(),
             interval: std::time::Duration::from_secs(300), // every 5 minutes
             tick: wal_checkpoint_tx,
@@ -174,17 +261,36 @@ async fn main() -> Result<()> {
             run_immediately: true,
         },
     ]);
+
+    // Conditionally add persona_classification to scheduler (timer fallback when not event-driven)
+    if !classification_event_driven {
+        scheduler_jobs.push(scheduler::JobSpec {
+            name: "persona_classification".to_string(),
+            interval: std::time::Duration::from_secs(3600), // every hour
+            tick: persona_classification_tx,
+            run_immediately: true,
+        });
+    }
+
     let _scheduler_handles = scheduler::start(scheduler_jobs);
 
     tokio::spawn({
         let api = api.clone();
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while event_scoring_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "event_scoring");
                 let _g = span.enter();
-                match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+                match jobs::run_event_scoring_once(
+                    &db,
+                    api.as_ref(),
+                    cfg.as_ref(),
+                    event_bus.as_deref(),
+                )
+                .await
+                {
                     Ok(n) => tracing::info!(inserted = n, "event_scoring done"),
                     Err(e) => tracing::error!(error = %e, "event_scoring failed"),
                 }
@@ -208,6 +314,7 @@ async fn main() -> Result<()> {
                         api.as_ref(),
                         api.as_ref(),
                         cfg.as_ref(),
+                        None,
                     )
                     .await
                     {
@@ -248,6 +355,7 @@ async fn main() -> Result<()> {
                         api.as_ref(),
                         api.as_ref(),
                         cfg.as_ref(),
+                        None,
                     )
                     .await
                     {
@@ -269,12 +377,21 @@ async fn main() -> Result<()> {
         let api = api.clone();
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while trades_ingestion_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "trades_ingestion");
                 let _g = span.enter();
                 let w = cfg.ingestion.wallets_per_ingestion_run;
-                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200, w).await {
+                match jobs::run_trades_ingestion_once(
+                    &db,
+                    api.as_ref(),
+                    200,
+                    w,
+                    event_bus.as_deref(),
+                )
+                .await
+                {
                     Ok((_pages, inserted)) => {
                         tracing::info!(inserted, "trades_ingestion done");
                     }
@@ -343,11 +460,12 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while wallet_rules_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "wallet_rules");
                 let _g = span.enter();
-                match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
+                match jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()).await {
                     Ok(changed) => tracing::info!(changed, "wallet_rules done"),
                     Err(e) => tracing::error!(error = %e, "wallet_rules failed"),
                 }
@@ -373,11 +491,14 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while persona_classification_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "persona_classification");
                 let _g = span.enter();
-                match jobs::run_persona_classification_once(&db, cfg.as_ref()).await {
+                match jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref())
+                    .await
+                {
                     Ok(classified) => {
                         tracing::info!(classified, "persona_classification done");
                     }
