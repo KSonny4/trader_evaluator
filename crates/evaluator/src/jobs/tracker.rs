@@ -155,4 +155,51 @@ mod tests {
             "Metadata should be updated"
         );
     }
+
+    #[tokio::test]
+    async fn test_success_completes_job_with_idle_status() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        let tracker = JobTracker::start(&db, "test_job").await.unwrap();
+
+        let final_metadata = serde_json::json!({"result": "completed"});
+        tracker.success(Some(final_metadata.clone())).await.unwrap();
+
+        let (status, metadata, duration): (String, Option<String>, Option<i64>) = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status, metadata, duration_ms FROM job_status WHERE job_name = 'test_job'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(status, "idle");
+        assert_eq!(metadata, Some(final_metadata.to_string()));
+        assert!(duration.is_some(), "Duration should be recorded");
+    }
+
+    #[tokio::test]
+    async fn test_fail_records_error_message() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+        let tracker = JobTracker::start(&db, "test_job").await.unwrap();
+
+        let error = anyhow::anyhow!("Test error");
+        tracker.fail(&error).await.unwrap();
+
+        let (status, last_error): (String, Option<String>) = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status, last_error FROM job_status WHERE job_name = 'test_job'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(status, "failed");
+        assert!(last_error.unwrap().contains("Test error"));
+    }
 }

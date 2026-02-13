@@ -1094,7 +1094,9 @@ fn process_wallet_chunk(
         }
 
         // Stage 1 passed - clear old exclusions
-        let _ = crate::persona_classification::clear_stage1_exclusion(conn, proxy_wallet);
+        if let Err(e) = crate::persona_classification::clear_stage1_exclusion(conn, proxy_wallet) {
+            tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "Failed to clear Stage 1 exclusion");
+        }
 
         // Compute features
         let Ok(features) = compute_wallet_features(conn, proxy_wallet, window_days, now_epoch)
