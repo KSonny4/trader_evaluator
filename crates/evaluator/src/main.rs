@@ -130,13 +130,25 @@ async fn main() -> Result<()> {
         .wallet_discovery_mode
         .eq_ignore_ascii_case("continuous");
 
+    // Event-driven discovery: when enabled AND event bus is available, MarketsScored
+    // events trigger discovery immediately instead of using a timer.
+    let discovery_event_driven = cfg.events.enable_discovery_event_trigger && event_bus.is_some();
+
     let mut scheduler_jobs = vec![scheduler::JobSpec {
         name: "event_scoring".to_string(),
         interval: std::time::Duration::from_secs(cfg.market_scoring.refresh_interval_secs),
         tick: event_scoring_tx,
         run_immediately: false,
     }];
-    if !discovery_continuous {
+    if discovery_event_driven {
+        // Event-driven mode: MarketsScored events trigger discovery immediately
+        let bus = event_bus.as_ref().unwrap().clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_discovery_trigger_subscriber(bus, wallet_discovery_tx).await;
+        });
+        tracing::info!("event-driven discovery trigger enabled (MarketsScored → discovery)");
+    } else if !discovery_continuous {
+        // Timer-based fallback: only used when neither continuous nor event-driven mode is active
         scheduler_jobs.push(scheduler::JobSpec {
             name: "wallet_discovery".to_string(),
             interval: std::time::Duration::from_secs(cfg.wallet_discovery.refresh_interval_secs),
@@ -144,6 +156,45 @@ async fn main() -> Result<()> {
             run_immediately: false,
         });
     }
+
+    // Event-driven classification: when enabled, TradesIngested events are batched
+    // and trigger classification every N seconds (configurable window).
+    let classification_event_driven =
+        cfg.events.enable_classification_event_trigger && event_bus.is_some();
+
+    if classification_event_driven {
+        let bus = event_bus.as_ref().unwrap().clone();
+        let batch_window =
+            std::time::Duration::from_secs(cfg.events.classification_batch_window_secs);
+        let classification_tx = persona_classification_tx.clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_classification_trigger_subscriber(
+                bus,
+                classification_tx,
+                batch_window,
+            )
+            .await;
+        });
+        tracing::info!(
+            window_secs = cfg.events.classification_batch_window_secs,
+            "event-driven classification trigger enabled (TradesIngested batched → classification)"
+        );
+    }
+
+    // Event-driven fast-path: when enabled, TradesIngested events trigger
+    // fast-path coalescing for immediate paper trading reactions.
+    let fast_path_enabled = cfg.events.enable_fast_path_trigger && event_bus.is_some();
+
+    if fast_path_enabled {
+        let bus = event_bus.as_ref().unwrap().clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_fast_path_subscriber(bus).await;
+        });
+        tracing::info!(
+            "event-driven fast-path trigger enabled (TradesIngested coalescing → paper tick)"
+        );
+    }
+
     scheduler_jobs.extend([
         scheduler::JobSpec {
             name: "trades_ingestion".to_string(),
@@ -182,12 +233,6 @@ async fn main() -> Result<()> {
             run_immediately: true,
         },
         scheduler::JobSpec {
-            name: "persona_classification".to_string(),
-            interval: std::time::Duration::from_secs(3600), // every hour
-            tick: persona_classification_tx,
-            run_immediately: true,
-        },
-        scheduler::JobSpec {
             name: "wal_checkpoint".to_string(),
             interval: std::time::Duration::from_secs(300), // every 5 minutes
             tick: wal_checkpoint_tx,
@@ -200,6 +245,17 @@ async fn main() -> Result<()> {
             run_immediately: true,
         },
     ]);
+
+    // Conditionally add persona_classification to scheduler (timer fallback when not event-driven)
+    if !classification_event_driven {
+        scheduler_jobs.push(scheduler::JobSpec {
+            name: "persona_classification".to_string(),
+            interval: std::time::Duration::from_secs(3600), // every hour
+            tick: persona_classification_tx,
+            run_immediately: true,
+        });
+    }
+
     let _scheduler_handles = scheduler::start(scheduler_jobs);
 
     tokio::spawn({
