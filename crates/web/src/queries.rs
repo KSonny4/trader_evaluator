@@ -3123,6 +3123,124 @@ mod tests {
         assert_eq!(rankings[1].pnl_display, "$-5.00");
     }
 
+    /// Direct test for wallet_positions_summary consolidated query.
+    /// Verifies new function matches behavior of old separate queries.
+    #[test]
+    fn test_wallet_positions_summary_direct() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xtest', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title, event_slug, slug) VALUES ('0xm1', 'Market 1', 'event1', 'market1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title, event_slug, slug) VALUES ('0xm2', 'Market 2', 'event2', 'market2')",
+            [],
+        )
+        .unwrap();
+
+        // Active: 60 net shares
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xtest', '0xm1', 'BUY', 100.0, 0.50, 1000000000, 'Yes')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xtest', '0xm1', 'SELL', 40.0, 0.60, 1000000100, 'Yes')",
+            [],
+        )
+        .unwrap();
+
+        // Closed: 0 net shares
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xtest', '0xm2', 'BUY', 50.0, 0.45, 1000000200, 'No')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xtest', '0xm2', 'SELL', 50.0, 0.55, 1000000300, 'No')",
+            [],
+        )
+        .unwrap();
+
+        // Test new consolidated function
+        let summary = wallet_positions_summary(&conn, "0xtest", 20).unwrap();
+
+        assert_eq!(summary.active_count, 1);
+        assert_eq!(summary.closed_count, 1);
+        assert_eq!(summary.active_positions.len(), 1);
+        assert_eq!(summary.closed_positions.len(), 1);
+        assert_eq!(summary.active_positions[0].condition_id, "0xm1");
+        assert_eq!(summary.closed_positions[0].condition_id, "0xm2");
+    }
+
+    /// Test wallet_positions_summary respects limit with many positions.
+    #[test]
+    fn test_wallet_positions_summary_respects_limit() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xlimit', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Create 25 active positions and 15 closed positions
+        for i in 0..25 {
+            let cond_id = format!("0xactive{i}");
+            conn.execute(
+                &format!("INSERT INTO markets (condition_id, title) VALUES ('{cond_id}', 'Market {i}')"),
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+                 VALUES ('0xlimit', ?1, 'BUY', 10.0, 0.50, 1000000000, 'Yes')",
+                [&cond_id],
+            )
+            .unwrap();
+        }
+
+        for i in 0..15 {
+            let cond_id = format!("0xclosed{i}");
+            conn.execute(
+                &format!("INSERT INTO markets (condition_id, title) VALUES ('{cond_id}', 'Market {i}')"),
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+                 VALUES ('0xlimit', ?1, 'BUY', 10.0, 0.50, 1000000000, 'Yes')",
+                [&cond_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+                 VALUES ('0xlimit', ?1, 'SELL', 10.0, 0.60, 1000000100, 'Yes')",
+                [&cond_id],
+            )
+            .unwrap();
+        }
+
+        let summary = wallet_positions_summary(&conn, "0xlimit", 20).unwrap();
+
+        // Counts should include ALL positions
+        assert_eq!(summary.active_count, 25, "count should include all 25 active positions");
+        assert_eq!(summary.closed_count, 15, "count should include all 15 closed positions");
+
+        // But data arrays should respect limit
+        assert_eq!(summary.active_positions.len(), 20, "should limit active data to 20");
+        assert_eq!(summary.closed_positions.len(), 15, "closed has <20 so all included");
+    }
+
     /// Characterization test for unified_funnel_counts before CTE optimization.
     /// Tests that wallet age filtering works correctly.
     #[test]
