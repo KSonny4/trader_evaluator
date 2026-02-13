@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Polymarket wallet discovery and paper copy-trading evaluation system. Discovers "follow-worthy" markets, extracts wallets trading them, tracks those wallets long-term, runs risk-managed paper-copy portfolios, and ranks "who to follow" with evidence. Written in Rust. Deployed to AWS t3.micro.
+Polymarket wallet discovery and paper copy-trading evaluation system. Discovers "follow-worthy" markets, extracts wallets trading them, tracks those wallets long-term, runs risk-managed paper-copy portfolios, and ranks "who to follow" with evidence. Written in Rust. Deployed to home server (172.23.229.176).
 
 ## The pipeline
 
@@ -75,7 +75,7 @@ The system progresses through 7 phases. **Never skip a phase.**
 | 3 | Long-Term Tracking | 7 days continuous ingestion, no data gaps |
 | 4 | Paper Trading | Paper-trade only the best classified wallets (~5-10). Full risk management from `docs/on_risk2.txt`. |
 | 5 | Wallet Ranking | WScore stable across 3 consecutive days |
-| 6 | Production | Deployed on AWS, 72h no crashes, metrics in Grafana |
+| 6 | Production | Deployed on home server, 72h no crashes, metrics in Grafana |
 
 **Full details in `docs/EVALUATION_STRATEGY.md`.**
 
