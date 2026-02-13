@@ -5,6 +5,8 @@
 //! - Fast-path events: Latency-critical triggers (coalescing via watch)
 //! - Operational events: Monitoring and observability
 
+pub mod dlq;
+pub mod replay;
 pub mod subscribers;
 
 use chrono::{DateTime, Utc};

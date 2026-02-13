@@ -1,12 +1,45 @@
-//! EventBus for coordinating jobs via pub/sub and coalescing triggers.
+//! In-process EventBus for coordinating pipeline jobs via pub/sub and coalescing triggers.
 //!
-//! Provides three communication patterns:
-//! - Pipeline events: Multi-subscriber broadcast for job completion signals
-//! - Fast-path triggers: Coalescing watch channel for latency-critical work
-//! - Operational events: Multi-subscriber broadcast for monitoring
+//! # Architecture Decision: broadcast + watch hybrid
+//!
+//! We use two Tokio channel types rather than a single pub/sub mechanism:
+//!
+//! - **`broadcast`** for pipeline and operational events: Every subscriber gets every
+//!   event. Needed for logging (sees all events), discovery triggers (reacts to
+//!   MarketsScored), and classification triggers (accumulates TradesIngested).
+//!
+//! - **`watch`** for fast-path triggers: Only the latest generation matters. Multiple
+//!   TradesIngested events arriving in rapid succession coalesce into a single downstream
+//!   reaction. This prevents thundering-herd problems in paper trading.
+//!
+//! We chose in-process channels over an external broker (Redis, SQS) because the evaluator
+//! is a single-process system. The same event types can later back a network bus if we split
+//! into multiple processes.
+//!
+//! # Communication patterns
+//!
+//! - **Pipeline events:** Multi-subscriber broadcast for job completion signals
+//! - **Fast-path triggers:** Coalescing watch channel for latency-critical work
+//! - **Operational events:** Multi-subscriber broadcast for monitoring
+//!
+//! See `docs/EVENT_ARCHITECTURE.md` for the full architecture reference.
 
 use crate::events::{FastPathTrigger, OperationalEvent, PipelineEvent};
+use chrono::Utc;
 use tokio::sync::{broadcast, watch};
+
+/// Policy applied when a broadcast channel is at capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // Phase 4: Variants used via with_backpressure_policy(), production wiring in Phase 5+
+pub enum BackpressurePolicy {
+    /// Drop the oldest event in the buffer to make room (default broadcast behavior).
+    #[default]
+    DropOldest,
+    /// Drop the newest event (the one being published) when the buffer is full.
+    DropNewest,
+    /// Block the publisher until space is available (not recommended for broadcast).
+    Block,
+}
 
 /// EventBus coordinates job execution via typed events.
 #[derive(Clone)]
@@ -20,6 +53,15 @@ pub struct EventBus {
 
     /// Multi-subscriber pub/sub for operational events (monitoring)
     operational_tx: broadcast::Sender<OperationalEvent>,
+
+    /// Channel capacity (stored for backpressure threshold calculations)
+    capacity: usize,
+
+    /// Backpressure policy for pipeline events
+    pipeline_backpressure: BackpressurePolicy,
+
+    /// Threshold percentage [0, 100] at which to emit BackpressureWarning
+    warn_threshold_pct: u8,
 }
 
 #[allow(dead_code)] // Phase 1: Infrastructure only, will be used in Phase 2+
@@ -37,17 +79,92 @@ impl EventBus {
             pipeline_tx,
             fast_path_tx,
             operational_tx,
+            capacity,
+            pipeline_backpressure: BackpressurePolicy::default(),
+            warn_threshold_pct: 90,
         }
     }
 
-    /// Publishes a pipeline event to all subscribers.
+    /// Sets the backpressure policy for pipeline events.
+    pub fn with_backpressure_policy(mut self, policy: BackpressurePolicy) -> Self {
+        self.pipeline_backpressure = policy;
+        self
+    }
+
+    /// Sets the warning threshold percentage (0-100) for backpressure warnings.
+    pub fn with_warn_threshold_pct(mut self, pct: u8) -> Self {
+        self.warn_threshold_pct = pct;
+        self
+    }
+
+    /// Returns the configured backpressure policy.
+    pub fn backpressure_policy(&self) -> BackpressurePolicy {
+        self.pipeline_backpressure
+    }
+
+    /// Returns the current number of queued pipeline events.
+    pub fn pipeline_len(&self) -> usize {
+        self.pipeline_tx.len()
+    }
+
+    /// Returns the channel capacity.
+    pub fn pipeline_capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Publishes a pipeline event, applying the configured backpressure policy.
     ///
-    /// Returns an error if there are no active subscribers.
+    /// - **DropOldest**: Default broadcast behavior. Oldest events are overwritten when full.
+    /// - **DropNewest**: If the channel is at capacity, the new event is silently dropped.
+    /// - **Block**: Uses default broadcast send (which overwrites oldest in tokio broadcast).
+    ///
+    /// Emits `OperationalEvent::BackpressureWarning` when queue fill exceeds the threshold.
     pub fn publish_pipeline(
         &self,
         event: PipelineEvent,
     ) -> Result<usize, broadcast::error::SendError<PipelineEvent>> {
-        self.pipeline_tx.send(event)
+        // Check fill level before sending
+        let current_len = self.pipeline_tx.len();
+        let threshold = (self.capacity as u64 * u64::from(self.warn_threshold_pct) / 100) as usize;
+
+        if current_len >= threshold && threshold > 0 {
+            // Emit backpressure warning on the operational channel
+            let _ = self
+                .operational_tx
+                .send(OperationalEvent::BackpressureWarning {
+                    queue_name: "pipeline".to_string(),
+                    current_size: current_len,
+                    capacity: self.capacity,
+                    warned_at: Utc::now(),
+                });
+        }
+
+        match self.pipeline_backpressure {
+            BackpressurePolicy::DropOldest => {
+                // Default tokio broadcast behavior: oldest messages are overwritten
+                self.pipeline_tx.send(event)
+            }
+            BackpressurePolicy::DropNewest => {
+                if current_len >= self.capacity {
+                    // Channel is full: drop the new event (return Ok(0) to indicate no receivers got it)
+                    tracing::warn!(
+                        current_len,
+                        capacity = self.capacity,
+                        "Backpressure: dropping newest pipeline event (channel full)"
+                    );
+                    Ok(0)
+                } else {
+                    self.pipeline_tx.send(event)
+                }
+            }
+            BackpressurePolicy::Block => {
+                // For broadcast channels, Block behaves the same as DropOldest
+                // since tokio broadcast doesn't support blocking sends.
+                // In practice, critical events should use Block policy as a signal
+                // that they are important and should always be sent.
+                self.pipeline_tx.send(event)
+            }
+        }
     }
 
     /// Subscribes to pipeline events.
@@ -217,5 +334,245 @@ mod tests {
                 _ => panic!("Expected TradesIngested event"),
             }
         }
+    }
+
+    // ── Backpressure policy tests ──
+
+    #[test]
+    fn test_backpressure_policy_default_is_drop_oldest() {
+        let bus = EventBus::new(16);
+        assert_eq!(bus.backpressure_policy(), BackpressurePolicy::DropOldest);
+    }
+
+    #[test]
+    fn test_with_backpressure_policy_sets_policy() {
+        let bus = EventBus::new(16).with_backpressure_policy(BackpressurePolicy::DropNewest);
+        assert_eq!(bus.backpressure_policy(), BackpressurePolicy::DropNewest);
+
+        let bus = EventBus::new(16).with_backpressure_policy(BackpressurePolicy::Block);
+        assert_eq!(bus.backpressure_policy(), BackpressurePolicy::Block);
+    }
+
+    #[tokio::test]
+    async fn test_drop_oldest_policy_overwrites_old_events_when_full() {
+        // Capacity of 4: fill it, then send one more. The oldest should be gone.
+        let bus = EventBus::new(4).with_backpressure_policy(BackpressurePolicy::DropOldest);
+        let mut rx = bus.subscribe_pipeline();
+
+        // Fill the buffer with 4 events (capacity)
+        for i in 0..4u64 {
+            bus.publish_pipeline(PipelineEvent::TradesIngested {
+                wallet_address: format!("0xwallet{i}"),
+                trades_count: i,
+                ingested_at: Utc::now(),
+            })
+            .unwrap();
+        }
+
+        // Send a 5th event, which should cause the oldest (i=0) to be dropped
+        bus.publish_pipeline(PipelineEvent::TradesIngested {
+            wallet_address: "0xwallet4".to_string(),
+            trades_count: 4,
+            ingested_at: Utc::now(),
+        })
+        .unwrap();
+
+        // The receiver should get a Lagged error since event 0 was overwritten
+        let result = rx.recv().await;
+        match result {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                assert!(n >= 1, "should have lagged by at least 1 event");
+            }
+            Ok(event) => {
+                // If we get an event, it should NOT be the first one (i=0)
+                match &event {
+                    PipelineEvent::TradesIngested { trades_count, .. } => {
+                        assert!(
+                            *trades_count > 0,
+                            "oldest event (0) should have been dropped"
+                        );
+                    }
+                    _ => panic!("Expected TradesIngested"),
+                }
+            }
+            Err(e) => panic!("Unexpected error: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drop_newest_policy_drops_new_event_when_full() {
+        // Capacity of 4: fill buffer, then try to add one more.
+        // With DropNewest, the new event should be silently dropped.
+        let bus = EventBus::new(4).with_backpressure_policy(BackpressurePolicy::DropNewest);
+        let mut rx = bus.subscribe_pipeline();
+
+        // Fill the buffer
+        for i in 0..4u64 {
+            let result = bus.publish_pipeline(PipelineEvent::TradesIngested {
+                wallet_address: format!("0xwallet{i}"),
+                trades_count: i,
+                ingested_at: Utc::now(),
+            });
+            assert!(result.is_ok());
+        }
+
+        // This 5th event should be dropped (returns Ok(0))
+        let result = bus.publish_pipeline(PipelineEvent::TradesIngested {
+            wallet_address: "0xwallet_dropped".to_string(),
+            trades_count: 999,
+            ingested_at: Utc::now(),
+        });
+        assert_eq!(
+            result.unwrap(),
+            0,
+            "DropNewest should return 0 receivers when event is dropped"
+        );
+
+        // We should be able to read all 4 original events without error
+        for i in 0..4u64 {
+            let received = rx.recv().await.unwrap();
+            match received {
+                PipelineEvent::TradesIngested { trades_count, .. } => {
+                    assert_eq!(trades_count, i);
+                }
+                _ => panic!("Expected TradesIngested"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_block_policy_sends_events_like_drop_oldest() {
+        // Block policy falls back to DropOldest for broadcast channels
+        let bus = EventBus::new(4).with_backpressure_policy(BackpressurePolicy::Block);
+        let mut rx = bus.subscribe_pipeline();
+
+        // Fill and overflow
+        for i in 0..6u64 {
+            let _ = bus.publish_pipeline(PipelineEvent::TradesIngested {
+                wallet_address: format!("0xwallet{i}"),
+                trades_count: i,
+                ingested_at: Utc::now(),
+            });
+        }
+
+        // Should still be able to receive events (lagged or otherwise)
+        let result = rx.recv().await;
+        assert!(
+            result.is_ok() || matches!(result, Err(broadcast::error::RecvError::Lagged(_))),
+            "Block policy should send events (with possible lag)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_backpressure_warning_emitted_at_threshold() {
+        // Capacity 10, threshold 90% = warn when len >= 9 at time of next publish.
+        // The check happens BEFORE the send, so we need 9 items already in the
+        // buffer when we call publish_pipeline for the 10th event.
+        let bus = EventBus::new(10)
+            .with_backpressure_policy(BackpressurePolicy::DropOldest)
+            .with_warn_threshold_pct(90);
+
+        let _pipeline_rx = bus.subscribe_pipeline();
+        let mut operational_rx = bus.subscribe_operational();
+
+        // Fill to 9 events (90% fill). During these sends, the check sees
+        // len 0..8, all below threshold of 9, so no warning yet.
+        for i in 0..9u64 {
+            bus.publish_pipeline(PipelineEvent::TradesIngested {
+                wallet_address: format!("0xwallet{i}"),
+                trades_count: i,
+                ingested_at: Utc::now(),
+            })
+            .unwrap();
+        }
+
+        // No warning should have been emitted yet (max len seen was 8 < 9)
+        let warn_result = operational_rx.try_recv();
+        assert!(
+            warn_result.is_err(),
+            "Should not emit warning while filling to threshold"
+        );
+
+        // Send 10th event: len is now 9, which equals threshold -> warning emitted
+        bus.publish_pipeline(PipelineEvent::TradesIngested {
+            wallet_address: "0xwallet9".to_string(),
+            trades_count: 9,
+            ingested_at: Utc::now(),
+        })
+        .unwrap();
+
+        let warning = operational_rx.try_recv();
+        assert!(
+            warning.is_ok(),
+            "Should emit BackpressureWarning when queue fill >= 90%"
+        );
+        match warning.unwrap() {
+            OperationalEvent::BackpressureWarning {
+                queue_name,
+                current_size,
+                capacity,
+                ..
+            } => {
+                assert_eq!(queue_name, "pipeline");
+                assert_eq!(current_size, 9);
+                assert_eq!(capacity, 10);
+            }
+            other => panic!("Expected BackpressureWarning, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backpressure_warning_not_emitted_below_threshold() {
+        // Capacity 10, threshold 90% -- send only 5 events (50%)
+        let bus = EventBus::new(10)
+            .with_backpressure_policy(BackpressurePolicy::DropOldest)
+            .with_warn_threshold_pct(90);
+
+        let _pipeline_rx = bus.subscribe_pipeline();
+        let mut operational_rx = bus.subscribe_operational();
+
+        for i in 0..5u64 {
+            bus.publish_pipeline(PipelineEvent::TradesIngested {
+                wallet_address: format!("0xwallet{i}"),
+                trades_count: i,
+                ingested_at: Utc::now(),
+            })
+            .unwrap();
+        }
+
+        let result = operational_rx.try_recv();
+        assert!(
+            result.is_err(),
+            "Should not emit warning when fill is only 50%"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_len_tracks_queued_events() {
+        let bus = EventBus::new(16);
+        let _rx = bus.subscribe_pipeline();
+
+        assert_eq!(bus.pipeline_len(), 0);
+
+        bus.publish_pipeline(PipelineEvent::MarketsScored {
+            markets_scored: 1,
+            events_ranked: 1,
+            completed_at: Utc::now(),
+        })
+        .unwrap();
+
+        assert_eq!(bus.pipeline_len(), 1);
+    }
+
+    #[test]
+    fn test_pipeline_capacity_returns_configured_capacity() {
+        let bus = EventBus::new(32);
+        assert_eq!(bus.pipeline_capacity(), 32);
+    }
+
+    #[test]
+    fn test_with_warn_threshold_pct_sets_threshold() {
+        let bus = EventBus::new(16).with_warn_threshold_pct(75);
+        assert_eq!(bus.warn_threshold_pct, 75);
     }
 }

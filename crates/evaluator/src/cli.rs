@@ -7,10 +7,20 @@ pub enum Command {
     Run,
     Markets,
     Wallets,
-    Wallet { address: String },
+    Wallet {
+        address: String,
+    },
     Rankings,
     Classify,
     PickForPaper,
+    ReplayEvents {
+        from: String,
+        to: Option<String>,
+        event_type: Option<String>,
+    },
+    RetryFailedEvents {
+        limit: usize,
+    },
 }
 
 pub fn parse_args<I>(mut args: I) -> std::result::Result<Command, String>
@@ -37,8 +47,68 @@ where
         "rankings" => Ok(Command::Rankings),
         "classify" => Ok(Command::Classify),
         "pick-for-paper" => Ok(Command::PickForPaper),
+        "replay-events" => parse_replay_events_args(args),
+        "retry-failed-events" => parse_retry_failed_events_args(args),
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+fn parse_replay_events_args<I>(args: I) -> std::result::Result<Command, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut from: Option<String> = None;
+    let mut to: Option<String> = None;
+    let mut event_type: Option<String> = None;
+
+    for arg in args {
+        if let Some(val) = arg.strip_prefix("--from=") {
+            from = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("--to=") {
+            to = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("--type=") {
+            event_type = Some(val.to_string());
+        } else {
+            return Err(format!(
+                "unknown flag for replay-events: {arg}\n\
+                 usage: evaluator replay-events --from=YYYY-MM-DD [--to=YYYY-MM-DD] [--type=pipeline|operational]"
+            ));
+        }
+    }
+
+    let from = from.ok_or_else(|| {
+        "replay-events requires --from=YYYY-MM-DD\n\
+         usage: evaluator replay-events --from=YYYY-MM-DD [--to=YYYY-MM-DD] [--type=pipeline|operational]"
+            .to_string()
+    })?;
+
+    Ok(Command::ReplayEvents {
+        from,
+        to,
+        event_type,
+    })
+}
+
+fn parse_retry_failed_events_args<I>(args: I) -> std::result::Result<Command, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut limit: usize = 10;
+
+    for arg in args {
+        if let Some(val) = arg.strip_prefix("--limit=") {
+            limit = val.parse::<usize>().map_err(|_e| {
+                format!("invalid --limit value: {val}\nusage: evaluator retry-failed-events [--limit=N]")
+            })?;
+        } else {
+            return Err(format!(
+                "unknown flag for retry-failed-events: {arg}\n\
+                 usage: evaluator retry-failed-events [--limit=N]"
+            ));
+        }
+    }
+
+    Ok(Command::RetryFailedEvents { limit })
 }
 
 pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
@@ -50,6 +120,12 @@ pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
         Command::Rankings => show_rankings(db),
         Command::Classify => run_classify(db),
         Command::PickForPaper => show_pick_for_paper(db),
+        Command::ReplayEvents {
+            from,
+            to,
+            event_type,
+        } => run_replay_events(db, &from, to.as_deref(), event_type.as_deref()),
+        Command::RetryFailedEvents { limit } => run_retry_failed_events(db, limit),
     }
 }
 
@@ -303,6 +379,119 @@ fn run_classify(_db: &Database) -> Result<()> {
     Ok(())
 }
 
+fn run_replay_events(
+    db: &Database,
+    from: &str,
+    to: Option<&str>,
+    event_type: Option<&str>,
+) -> Result<()> {
+    let bus = crate::event_bus::EventBus::new(1024);
+    let _pipeline_rx = bus.subscribe_pipeline();
+    let _operational_rx = bus.subscribe_operational();
+
+    println!(
+        "Replaying events from={from} to={} type={:?}",
+        to.unwrap_or(from),
+        event_type
+    );
+
+    let (replayed, skipped) = crate::events::replay::replay_events(db, &bus, from, to, event_type)?;
+
+    println!("Replay complete: {replayed} replayed, {skipped} skipped");
+    Ok(())
+}
+
+fn run_retry_failed_events(_db: &Database, limit: usize) -> Result<()> {
+    let config = common::config::Config::load()?;
+    let db_path = config.database.path.clone();
+
+    // Use a dedicated thread to run async DLQ operations (same pattern as run_classify)
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let async_db = AsyncDb::open(&db_path).await?;
+
+            // Show current counts
+            let counts = crate::events::dlq::failed_event_counts(&async_db).await?;
+            println!("Failed event counts:");
+            if counts.is_empty() {
+                println!("  (no failed events)");
+                return Ok::<_, anyhow::Error>(());
+            }
+            for (status, count) in &counts {
+                println!("  {status}: {count}");
+            }
+
+            // Get pending events
+            let pending = crate::events::dlq::get_pending_failed_events(&async_db, limit).await?;
+            if pending.is_empty() {
+                println!("\nNo pending events to retry.");
+                return Ok(());
+            }
+
+            println!("\nRetrying {} failed events:", pending.len());
+
+            // Re-publish each event to the event bus
+            let bus = crate::event_bus::EventBus::new(1024);
+            let _pipeline_rx = bus.subscribe_pipeline();
+            let _operational_rx = bus.subscribe_operational();
+
+            let mut retried = 0;
+            let mut failed = 0;
+            for event in &pending {
+                let ok: bool = match event.event_type.as_str() {
+                    "pipeline" => {
+                        match serde_json::from_str::<crate::events::PipelineEvent>(
+                            &event.event_data,
+                        ) {
+                            Ok(pe) => bus.publish_pipeline(pe).is_ok(),
+                            Err(e) => {
+                                println!("  [SKIP] id={} cannot parse: {e}", event.id);
+                                failed += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    "operational" => {
+                        match serde_json::from_str::<crate::events::OperationalEvent>(
+                            &event.event_data,
+                        ) {
+                            Ok(oe) => bus.publish_operational(oe).is_ok(),
+                            Err(e) => {
+                                println!("  [SKIP] id={} cannot parse: {e}", event.id);
+                                failed += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    other => {
+                        println!("  [SKIP] id={} unknown type: {other}", event.id);
+                        failed += 1;
+                        continue;
+                    }
+                };
+
+                if ok {
+                    crate::events::dlq::mark_event_retried(&async_db, event.id).await?;
+                    println!("  [OK] id={} type={}", event.id, event.event_type);
+                    retried += 1;
+                } else {
+                    println!("  [FAIL] id={} no subscribers", event.id);
+                    failed += 1;
+                }
+            }
+
+            println!("\nRetry complete: {retried} retried, {failed} failed");
+            Ok(())
+        })
+    });
+    #[allow(clippy::map_err_ignore)]
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("retry-failed-events thread panicked"))??;
+    Ok(())
+}
+
 fn show_rankings(db: &Database) -> Result<()> {
     let mut stmt = db.conn.prepare(
         "
@@ -387,5 +576,123 @@ mod tests {
                 address: "0xabc".to_string()
             }
         );
+    }
+
+    #[test]
+    fn test_parse_replay_events_with_from_only() {
+        let cmd = parse_args(
+            vec![
+                "evaluator".to_string(),
+                "replay-events".to_string(),
+                "--from=2026-02-10".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::ReplayEvents {
+                from: "2026-02-10".to_string(),
+                to: None,
+                event_type: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_replay_events_with_all_flags() {
+        let cmd = parse_args(
+            vec![
+                "evaluator".to_string(),
+                "replay-events".to_string(),
+                "--from=2026-02-10".to_string(),
+                "--to=2026-02-12".to_string(),
+                "--type=pipeline".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::ReplayEvents {
+                from: "2026-02-10".to_string(),
+                to: Some("2026-02-12".to_string()),
+                event_type: Some("pipeline".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_replay_events_missing_from_returns_error() {
+        let result =
+            parse_args(vec!["evaluator".to_string(), "replay-events".to_string()].into_iter());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--from"));
+    }
+
+    #[test]
+    fn test_parse_replay_events_unknown_flag_returns_error() {
+        let result = parse_args(
+            vec![
+                "evaluator".to_string(),
+                "replay-events".to_string(),
+                "--from=2026-02-10".to_string(),
+                "--unknown=value".to_string(),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown flag"));
+    }
+
+    #[test]
+    fn test_parse_retry_failed_events_default_limit() {
+        let cmd = parse_args(
+            vec!["evaluator".to_string(), "retry-failed-events".to_string()].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(cmd, Command::RetryFailedEvents { limit: 10 });
+    }
+
+    #[test]
+    fn test_parse_retry_failed_events_with_limit() {
+        let cmd = parse_args(
+            vec![
+                "evaluator".to_string(),
+                "retry-failed-events".to_string(),
+                "--limit=25".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(cmd, Command::RetryFailedEvents { limit: 25 });
+    }
+
+    #[test]
+    fn test_parse_retry_failed_events_invalid_limit() {
+        let result = parse_args(
+            vec![
+                "evaluator".to_string(),
+                "retry-failed-events".to_string(),
+                "--limit=abc".to_string(),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid --limit"));
+    }
+
+    #[test]
+    fn test_parse_retry_failed_events_unknown_flag() {
+        let result = parse_args(
+            vec![
+                "evaluator".to_string(),
+                "retry-failed-events".to_string(),
+                "--unknown=value".to_string(),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown flag"));
     }
 }

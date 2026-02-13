@@ -604,6 +604,20 @@ CREATE TABLE IF NOT EXISTS follower_slippage (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS failed_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,          -- pipeline, operational
+    event_data TEXT NOT NULL,          -- JSON serialized event
+    error TEXT NOT NULL,               -- error message from processing
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    failed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, retried, exhausted
+    UNIQUE(event_type, event_data)
+);
+
+CREATE INDEX IF NOT EXISTS idx_failed_events_status ON failed_events(status);
+CREATE INDEX IF NOT EXISTS idx_failed_events_failed_at ON failed_events(failed_at);
+
 CREATE INDEX IF NOT EXISTS idx_copy_fidelity_wallet ON copy_fidelity_events(proxy_wallet);
 CREATE INDEX IF NOT EXISTS idx_follower_slippage_wallet ON follower_slippage(proxy_wallet);
 "#;
@@ -646,6 +660,7 @@ mod tests {
         assert!(tables.contains(&"wallet_rules_state".to_string()));
         assert!(tables.contains(&"wallet_rules_events".to_string()));
         assert!(tables.contains(&"event_log".to_string()));
+        assert!(tables.contains(&"failed_events".to_string()));
     }
 
     #[test]
