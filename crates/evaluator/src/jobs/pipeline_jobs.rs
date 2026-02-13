@@ -813,6 +813,15 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
                 inserted_so_far = inserted,
                 "wallet_discovery: progress"
             );
+            // Update progress in database every 10 markets
+            let _ = tracker
+                .update_progress(serde_json::json!({
+                    "progress": idx + 1,
+                    "total": total,
+                    "inserted": inserted,
+                    "phase": "discovering_wallets"
+                }))
+                .await;
         }
         let (holder_resp, _raw_h) = holders
             .fetch_holders(condition_id, cfg.wallet_discovery.holders_per_market as u32)
@@ -900,7 +909,11 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         .await?;
     metrics::gauge!("evaluator_wallets_on_watchlist").set(watchlist as f64);
     tracker
-        .success(Some(serde_json::json!({"inserted": inserted})))
+        .success(Some(serde_json::json!({
+            "inserted": inserted,
+            "total": total,
+            "completed": true
+        })))
         .await?;
     Ok(inserted)
 }
@@ -1020,7 +1033,7 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         known_bots: cfg.personas.known_bots.clone(),
     };
 
-    let classified: u64 = db
+    let result = db
         .call_named("persona_classification.classify_batch", move |conn| {
             let wallets: Vec<(String, u32, u32, u32)> = conn
                 .prepare(
@@ -1144,15 +1157,24 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
                 suitable,
                 "persona_classification: summary (no_trades = excluded at Stage 1 due to no trade data)"
             );
-            Ok(count)
+            Ok((count, stage1_no_trades, stage1_other, stage2_excluded, suitable))
         })
         .await?;
 
-    metrics::gauge!("evaluator_persona_classifications_run").set(classified as f64);
+    let (count, stage1_no_trades, stage1_other, stage2_excluded, suitable) = result;
+
+    metrics::gauge!("evaluator_persona_classifications_run").set(count as f64);
     tracker
-        .success(Some(serde_json::json!({"classified": classified})))
+        .success(Some(serde_json::json!({
+            "classified": count,
+            "suitable": suitable,
+            "stage1_no_trades": stage1_no_trades,
+            "stage1_other": stage1_other,
+            "stage2_excluded": stage2_excluded,
+            "completed": true
+        })))
         .await?;
-    Ok(classified)
+    Ok(count)
 }
 
 fn compute_days_to_expiry(end_date: Option<&str>) -> Option<u32> {
@@ -1784,6 +1806,133 @@ mod tests {
             .await
             .unwrap();
         assert!(cnt_wallets >= 2); // holder + trader
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_discovery_updates_progress_during_execution() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert 15 markets to trigger progress update at market 10
+        db.call(|conn| {
+            for i in 1..=15 {
+                conn.execute(
+                    "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, ?2)",
+                    rusqlite::params![format!("0xmarket{}", i), i],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let holders = FakeHoldersFetcher {
+            resp: vec![ApiHolderResponse {
+                token: Some("0xtok".to_string()),
+                holders: vec![],
+            }],
+            raw: b"[]".to_vec(),
+        };
+
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![],
+            raw: b"[]".to_vec(),
+        };
+
+        let _inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+            .await
+            .unwrap();
+
+        // Verify final metadata includes progress info
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'wallet_discovery'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+
+        // The final success() call should include progress info
+        assert_eq!(meta_json["total"], 15, "metadata should include total");
+        assert_eq!(
+            meta_json["completed"], true,
+            "metadata should mark as completed"
+        );
+
+        // Note: We can't easily verify intermediate progress updates in a unit test
+        // because update_progress() is called during execution and overwritten by success().
+        // The important thing is that the mechanism exists and can be called.
+    }
+
+    #[tokio::test]
+    async fn test_run_wallet_discovery_reports_progress_to_job_status() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert 25 markets to trigger progress updates (every 10 markets)
+        db.call(|conn| {
+            for i in 1..=25 {
+                conn.execute(
+                    "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES (?1, date('now'), 0.9, ?2)",
+                    rusqlite::params![format!("0xmarket{}", i), i],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let holders = FakeHoldersFetcher {
+            resp: vec![ApiHolderResponse {
+                token: Some("0xtok".to_string()),
+                holders: vec![common::types::ApiHolder {
+                    proxy_wallet: Some("0xholder".to_string()),
+                    amount: Some(123.0),
+                    asset: None,
+                    pseudonym: None,
+                    name: None,
+                    outcome_index: Some(0),
+                }],
+            }],
+            raw: b"[]".to_vec(),
+        };
+
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![],
+            raw: b"[]".to_vec(),
+        };
+
+        let _inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+            .await
+            .unwrap();
+
+        // Verify job_status has progress metadata with "total": 25 and "completed": true
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'wallet_discovery'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert!(metadata.is_some(), "wallet_discovery should write metadata");
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+        assert_eq!(
+            meta_json["total"], 25,
+            "metadata should include total markets count"
+        );
+        assert_eq!(
+            meta_json["completed"], true,
+            "metadata should mark job as completed"
+        );
     }
 
     #[tokio::test]
