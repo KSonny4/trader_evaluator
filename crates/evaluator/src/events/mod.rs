@@ -5,6 +5,8 @@
 //! - Fast-path events: Latency-critical triggers (coalescing via watch)
 //! - Operational events: Monitoring and observability
 
+pub mod subscribers;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

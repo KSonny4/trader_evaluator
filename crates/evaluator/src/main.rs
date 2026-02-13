@@ -56,13 +56,22 @@ async fn main() -> Result<()> {
         std::time::Duration::from_millis(cfg.ingestion.backoff_base_ms),
     ));
 
-    // ── Event Bus: Initialize if enabled (Phase 1 infrastructure, not yet used) ──
-    let _event_bus = if cfg.events.enabled {
+    // ── Event Bus: Initialized when enabled, passed to all jobs (Phase 2) ──
+    let event_bus = if cfg.events.enabled {
         tracing::info!("event bus enabled (capacity={})", cfg.events.bus_capacity);
         Some(Arc::new(event_bus::EventBus::new(cfg.events.bus_capacity)))
     } else {
         None
     };
+
+    // ── Event Logging Subscriber: Logs all events to stdout when enabled ──
+    if let Some(ref bus) = event_bus {
+        let subscriber_bus = bus.clone();
+        tokio::spawn(async move {
+            events::subscribers::spawn_logging_subscriber(subscriber_bus).await;
+        });
+        tracing::info!("event logging subscriber started");
+    }
 
     // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
     // Order: event_scoring first (wallet_discovery reads market_scores). Then run
@@ -70,13 +79,20 @@ async fn main() -> Result<()> {
     // Finally wallet_rules (needs wallets to exist).
     tracing::info!("bootstrap: seeding markets and wallets");
 
-    match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+    match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref(), event_bus.as_deref()).await
+    {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
     }
 
     let (wallet_res, leaderboard_res) = tokio::join!(
-        jobs::run_wallet_discovery_once(&db, api.as_ref(), api.as_ref(), cfg.as_ref()),
+        jobs::run_wallet_discovery_once(
+            &db,
+            api.as_ref(),
+            api.as_ref(),
+            cfg.as_ref(),
+            event_bus.as_deref()
+        ),
         jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
     );
     match wallet_res {
@@ -88,7 +104,7 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
     }
 
-    match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
+    match jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()).await {
         Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
     }
@@ -190,11 +206,19 @@ async fn main() -> Result<()> {
         let api = api.clone();
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while event_scoring_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "event_scoring");
                 let _g = span.enter();
-                match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref()).await {
+                match jobs::run_event_scoring_once(
+                    &db,
+                    api.as_ref(),
+                    cfg.as_ref(),
+                    event_bus.as_deref(),
+                )
+                .await
+                {
                     Ok(n) => tracing::info!(inserted = n, "event_scoring done"),
                     Err(e) => tracing::error!(error = %e, "event_scoring failed"),
                 }
@@ -218,6 +242,7 @@ async fn main() -> Result<()> {
                         api.as_ref(),
                         api.as_ref(),
                         cfg.as_ref(),
+                        None,
                     )
                     .await
                     {
@@ -258,6 +283,7 @@ async fn main() -> Result<()> {
                         api.as_ref(),
                         api.as_ref(),
                         cfg.as_ref(),
+                        None,
                     )
                     .await
                     {
@@ -279,12 +305,21 @@ async fn main() -> Result<()> {
         let api = api.clone();
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while trades_ingestion_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "trades_ingestion");
                 let _g = span.enter();
                 let w = cfg.ingestion.wallets_per_ingestion_run;
-                match jobs::run_trades_ingestion_once(&db, api.as_ref(), 200, w).await {
+                match jobs::run_trades_ingestion_once(
+                    &db,
+                    api.as_ref(),
+                    200,
+                    w,
+                    event_bus.as_deref(),
+                )
+                .await
+                {
                     Ok((_pages, inserted)) => {
                         tracing::info!(inserted, "trades_ingestion done");
                     }
@@ -353,11 +388,12 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while wallet_rules_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "wallet_rules");
                 let _g = span.enter();
-                match jobs::run_wallet_rules_once(&db, cfg.as_ref()).await {
+                match jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()).await {
                     Ok(changed) => tracing::info!(changed, "wallet_rules done"),
                     Err(e) => tracing::error!(error = %e, "wallet_rules failed"),
                 }
@@ -383,11 +419,14 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let cfg = cfg.clone();
         let db = db.clone();
+        let event_bus = event_bus.clone();
         async move {
             while persona_classification_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "persona_classification");
                 let _g = span.enter();
-                match jobs::run_persona_classification_once(&db, cfg.as_ref()).await {
+                match jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref())
+                    .await
+                {
                     Ok(classified) => {
                         tracing::info!(classified, "persona_classification done");
                     }

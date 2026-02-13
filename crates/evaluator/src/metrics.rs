@@ -53,6 +53,19 @@ pub fn describe() {
         "evaluator_ingestion_lag_secs",
         "Ingestion lag (seconds) from newest observed trade."
     );
+    // Event bus observability
+    describe_counter!(
+        "evaluator_events_emitted_total",
+        "Total events emitted by the event bus, labeled by event_type."
+    );
+    describe_counter!(
+        "evaluator_events_dropped_total",
+        "Total events dropped (no subscribers), labeled by event_type."
+    );
+    describe_gauge!(
+        "evaluator_event_bus_size",
+        "Current number of pending events in the event bus."
+    );
     // Flow visualization (funnel + classification) — current counts for Grafana Canvas/Node Graph
     describe_gauge!(
         "evaluator_flow_funnel_markets_fetched",
@@ -142,6 +155,57 @@ mod tests {
         let rendered = handle.render();
         assert!(rendered.contains("evaluator_markets_scored_total"));
         assert!(rendered.contains("tracing_error_events"));
+    }
+
+    #[test]
+    fn test_event_bus_metrics_described_and_recorded_in_prometheus_output() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        describe();
+
+        metrics::with_local_recorder(&recorder, || {
+            // Emit some pipeline events
+            metrics::counter!("evaluator_events_emitted_total", "event_type" => "pipeline")
+                .increment(3);
+            metrics::counter!("evaluator_events_emitted_total", "event_type" => "operational")
+                .increment(2);
+
+            // Record some dropped events
+            metrics::counter!("evaluator_events_dropped_total", "event_type" => "pipeline")
+                .increment(1);
+
+            // Set bus size gauge
+            metrics::gauge!("evaluator_event_bus_size").set(5.0);
+        });
+
+        let rendered = handle.render();
+
+        // Verify emitted counter appears with both event_type labels
+        assert!(
+            rendered.contains("evaluator_events_emitted_total"),
+            "events emitted counter should appear in Prometheus output"
+        );
+        assert!(
+            rendered.contains(r#"event_type="pipeline""#),
+            "pipeline event_type label should appear"
+        );
+        assert!(
+            rendered.contains(r#"event_type="operational""#),
+            "operational event_type label should appear"
+        );
+
+        // Verify dropped counter appears
+        assert!(
+            rendered.contains("evaluator_events_dropped_total"),
+            "events dropped counter should appear in Prometheus output"
+        );
+
+        // Verify bus size gauge appears
+        assert!(
+            rendered.contains("evaluator_event_bus_size"),
+            "event bus size gauge should appear in Prometheus output"
+        );
     }
 
     #[test]

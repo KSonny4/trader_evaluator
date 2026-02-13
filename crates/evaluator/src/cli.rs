@@ -279,7 +279,7 @@ fn run_classify(_db: &Database) -> Result<()> {
         rt.block_on(async {
             let async_db = AsyncDb::open(&db_path_inner).await?;
             let classified =
-                crate::jobs::run_persona_classification_once(&async_db, &config).await?;
+                crate::jobs::run_persona_classification_once(&async_db, &config, None).await?;
             println!("Classified {classified} wallets (followable or excluded)");
             Ok::<_, anyhow::Error>(())
         })
