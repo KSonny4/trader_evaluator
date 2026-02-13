@@ -19,17 +19,21 @@ if [ -f "$SCRIPT_DIR/.server-info" ]; then
 fi
 
 SERVER_IP="${1:-${SERVER_IP:-}}"
-KEY_FILE="${KEY_FILE:-trading-bot.pem}"
-SSH_USER="${SSH_USER:-ubuntu}"
+KEY_FILE="${KEY_FILE:-}"
+SSH_USER="${SSH_USER:-ksonny}"
 
 if [ -z "$SERVER_IP" ]; then
     echo "Usage: ./deploy/deploy.sh <SERVER_IP>"
-    echo "  or run provision.sh first to create .server-info"
+    echo "  or edit deploy/.server-info"
     exit 1
 fi
 
-SSH_CMD="ssh -i $KEY_FILE -o StrictHostKeyChecking=no $SSH_USER@$SERVER_IP"
-SCP_CMD="scp -i $KEY_FILE -o StrictHostKeyChecking=no"
+KEY_OPT=""
+if [ -n "$KEY_FILE" ]; then
+    KEY_OPT="-i $KEY_FILE"
+fi
+SSH_CMD="ssh $KEY_OPT -o StrictHostKeyChecking=accept-new $SSH_USER@$SERVER_IP"
+SCP_CMD="scp $KEY_OPT -o StrictHostKeyChecking=accept-new"
 
 echo "=== Deploying to $SERVER_IP ==="
 

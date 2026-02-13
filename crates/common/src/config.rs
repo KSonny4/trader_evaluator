@@ -133,6 +133,14 @@ fn default_wallets_per_ingestion_run() -> u32 {
     20
 }
 
+fn default_parallel_enabled() -> bool {
+    true
+}
+
+fn default_parallel_tasks() -> usize {
+    8
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ingestion {
     #[serde(default = "default_wallets_per_ingestion_run")]
@@ -203,6 +211,12 @@ pub struct Personas {
     /// Proxy wallet addresses to exclude as known bots (Strategy Bible §4 Stage 1). E.g. ["0x..."].
     #[serde(default)]
     pub known_bots: Vec<String>,
+    /// Enable parallel classification (default: true)
+    #[serde(default = "default_parallel_enabled")]
+    pub parallel_enabled: bool,
+    /// Number of parallel tasks per chunk (default: 8)
+    #[serde(default = "default_parallel_tasks")]
+    pub parallel_tasks: usize,
     // Informed Specialist
     pub specialist_max_active_positions: u32,
     pub specialist_min_concentration: f64,
@@ -389,6 +403,328 @@ mod tests {
         assert!(config.anomaly.max_weekly_drawdown_pct > 0.0);
         assert!(config.anomaly.frequency_change_multiplier > 1.0);
         assert!(config.anomaly.size_change_multiplier > 1.0);
+    }
+
+    #[test]
+    fn test_personas_parallelization_config_loads() {
+        let toml = r#"
+[general]
+mode = "paper"
+log_level = "info"
+
+[database]
+path = "data/evaluator.db"
+
+[risk]
+max_exposure_per_market_pct = 10.0
+max_exposure_per_wallet_pct = 5.0
+max_daily_trades = 100
+slippage_pct = 1.0
+no_chase_adverse_move_pct = 5.0
+portfolio_stop_drawdown_pct = 15.0
+paper_bankroll_usdc = 1000.0
+per_wallet_daily_loss_pct = 2.0
+per_wallet_weekly_loss_pct = 5.0
+per_wallet_max_drawdown_pct = 15.0
+per_wallet_max_slippage_vs_edge = 1.0
+portfolio_daily_loss_pct = 3.0
+portfolio_weekly_loss_pct = 8.0
+max_concurrent_positions = 20
+
+[market_scoring]
+top_n_events = 50
+min_liquidity_usdc = 1000.0
+min_daily_volume_usdc = 5000.0
+min_daily_trades = 20
+min_unique_traders = 10
+max_days_to_expiry = 90
+min_days_to_expiry = 1
+refresh_interval_secs = 3600
+weights_liquidity = 0.25
+weights_volume = 0.25
+weights_density = 0.20
+weights_whale_concentration = 0.15
+weights_time_to_expiry = 0.15
+
+[wallet_discovery]
+min_total_trades = 5
+holders_per_market = 20
+refresh_interval_secs = 86400
+
+[ingestion]
+trades_poll_interval_secs = 3600
+activity_poll_interval_secs = 21600
+positions_poll_interval_secs = 86400
+holders_poll_interval_secs = 86400
+rate_limit_delay_ms = 200
+max_retries = 3
+backoff_base_ms = 1000
+
+[paper_trading]
+strategies = ["mirror"]
+mirror_delay_secs = 0
+position_size_usdc = 25.0
+bankroll_usd = 1000.0
+max_total_exposure_pct = 15.0
+max_daily_loss_pct = 3.0
+min_copy_fidelity_pct = 80.0
+per_trade_size_usd = 25.0
+slippage_default_cents = 1.0
+mirror_use_proportional_sizing = true
+mirror_default_their_bankroll_usd = 5000
+
+[wallet_scoring]
+windows_days = [7, 30, 90]
+min_trades_for_score = 10
+edge_weight = 0.30
+consistency_weight = 0.25
+market_skill_weight = 0.20
+timing_skill_weight = 0.15
+behavior_quality_weight = 0.10
+
+[observability]
+prometheus_port = 9094
+
+[polymarket]
+data_api_url = "https://data-api.polymarket.com"
+gamma_api_url = "https://gamma-api.polymarket.com"
+
+[personas]
+stage1_min_total_trades = 10
+stage1_min_wallet_age_days = 30
+stage1_max_inactive_days = 180
+known_bots = []
+parallel_enabled = true
+parallel_tasks = 8
+specialist_max_active_positions = 5
+specialist_min_concentration = 0.60
+specialist_min_win_rate = 0.60
+generalist_min_markets = 20
+generalist_min_win_rate = 0.52
+generalist_max_win_rate = 0.60
+generalist_max_drawdown = 15.0
+generalist_min_sharpe = 1.0
+accumulator_min_hold_hours = 48.0
+accumulator_max_trades_per_week = 5.0
+accumulator_min_roi = 0.05
+execution_master_pnl_ratio = 0.70
+tail_risk_min_win_rate = 0.80
+tail_risk_loss_multiplier = 5.0
+noise_max_trades_per_week = 50.0
+noise_max_abs_roi = 0.02
+sniper_max_age_days = 30
+sniper_min_win_rate = 0.85
+sniper_max_trades = 20
+trust_30_90_multiplier = 0.8
+obscurity_bonus_multiplier = 1.2
+news_sniper_max_burstiness_top_1h_ratio = 0.70
+liquidity_provider_min_buy_sell_balance = 0.45
+liquidity_provider_min_mid_fill_ratio = 0.60
+bot_swarm_min_trades_per_day = 200.0
+bot_swarm_max_avg_trade_size_usdc = 5.0
+jackpot_min_pnl_top1_share = 0.60
+jackpot_max_win_rate = 0.45
+topic_lane_min_top_domain_ratio = 0.65
+bonder_min_extreme_price_ratio = 0.60
+whale_min_avg_trade_size_usdc = 100.0
+stage2_min_roi = 0.03
+
+[wallet_rules]
+min_trades_for_discovery = 50
+max_trades_per_day = 120.0
+max_distinct_markets_30d = 60
+min_median_hold_minutes = 180.0
+max_flip_rate = 0.20
+max_size_gini = 0.75
+min_liquidity_score = 0.35
+max_median_seconds_between_trades = 45.0
+max_fraction_trades_at_spread_edge = 0.70
+paper_window_days = 14
+required_paper_trades = 30
+min_paper_profit_per_trade = 0.0
+max_paper_drawdown = 0.08
+max_paper_slippage_bps = 35.0
+live_breakers_enabled = false
+live_max_drawdown = 0.12
+live_slippage_bps_spike = 80.0
+live_style_drift_score = 0.65
+live_inactivity_days = 10
+live_max_theme_concentration = 0.55
+live_max_correlation_cluster_exposure = 0.65
+per_trade_risk_cap = 0.01
+per_market_risk_cap = 0.03
+per_wallet_risk_cap = 0.06
+
+[anomaly]
+win_rate_drop_pct = 15.0
+max_weekly_drawdown_pct = 20.0
+frequency_change_multiplier = 3.0
+size_change_multiplier = 10.0
+"#;
+
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.personas.parallel_enabled);
+        assert_eq!(cfg.personas.parallel_tasks, 8);
+    }
+
+    #[test]
+    fn test_personas_parallelization_defaults() {
+        let toml = r#"
+[general]
+mode = "paper"
+log_level = "info"
+
+[database]
+path = "data/evaluator.db"
+
+[risk]
+max_exposure_per_market_pct = 10.0
+max_exposure_per_wallet_pct = 5.0
+max_daily_trades = 100
+slippage_pct = 1.0
+no_chase_adverse_move_pct = 5.0
+portfolio_stop_drawdown_pct = 15.0
+paper_bankroll_usdc = 1000.0
+per_wallet_daily_loss_pct = 2.0
+per_wallet_weekly_loss_pct = 5.0
+per_wallet_max_drawdown_pct = 15.0
+per_wallet_max_slippage_vs_edge = 1.0
+portfolio_daily_loss_pct = 3.0
+portfolio_weekly_loss_pct = 8.0
+max_concurrent_positions = 20
+
+[market_scoring]
+top_n_events = 50
+min_liquidity_usdc = 1000.0
+min_daily_volume_usdc = 5000.0
+min_daily_trades = 20
+min_unique_traders = 10
+max_days_to_expiry = 90
+min_days_to_expiry = 1
+refresh_interval_secs = 3600
+weights_liquidity = 0.25
+weights_volume = 0.25
+weights_density = 0.20
+weights_whale_concentration = 0.15
+weights_time_to_expiry = 0.15
+
+[wallet_discovery]
+min_total_trades = 5
+holders_per_market = 20
+refresh_interval_secs = 86400
+
+[ingestion]
+trades_poll_interval_secs = 3600
+activity_poll_interval_secs = 21600
+positions_poll_interval_secs = 86400
+holders_poll_interval_secs = 86400
+rate_limit_delay_ms = 200
+max_retries = 3
+backoff_base_ms = 1000
+
+[paper_trading]
+strategies = ["mirror"]
+mirror_delay_secs = 0
+position_size_usdc = 25.0
+bankroll_usd = 1000.0
+max_total_exposure_pct = 15.0
+max_daily_loss_pct = 3.0
+min_copy_fidelity_pct = 80.0
+per_trade_size_usd = 25.0
+slippage_default_cents = 1.0
+mirror_use_proportional_sizing = true
+mirror_default_their_bankroll_usd = 5000
+
+[wallet_scoring]
+windows_days = [7, 30, 90]
+min_trades_for_score = 10
+edge_weight = 0.30
+consistency_weight = 0.25
+market_skill_weight = 0.20
+timing_skill_weight = 0.15
+behavior_quality_weight = 0.10
+
+[observability]
+prometheus_port = 9094
+
+[polymarket]
+data_api_url = "https://data-api.polymarket.com"
+gamma_api_url = "https://gamma-api.polymarket.com"
+
+[personas]
+stage1_min_total_trades = 10
+stage1_min_wallet_age_days = 30
+stage1_max_inactive_days = 180
+known_bots = []
+specialist_max_active_positions = 5
+specialist_min_concentration = 0.60
+specialist_min_win_rate = 0.60
+generalist_min_markets = 20
+generalist_min_win_rate = 0.52
+generalist_max_win_rate = 0.60
+generalist_max_drawdown = 15.0
+generalist_min_sharpe = 1.0
+accumulator_min_hold_hours = 48.0
+accumulator_max_trades_per_week = 5.0
+accumulator_min_roi = 0.05
+execution_master_pnl_ratio = 0.70
+tail_risk_min_win_rate = 0.80
+tail_risk_loss_multiplier = 5.0
+noise_max_trades_per_week = 50.0
+noise_max_abs_roi = 0.02
+sniper_max_age_days = 30
+sniper_min_win_rate = 0.85
+sniper_max_trades = 20
+trust_30_90_multiplier = 0.8
+obscurity_bonus_multiplier = 1.2
+news_sniper_max_burstiness_top_1h_ratio = 0.70
+liquidity_provider_min_buy_sell_balance = 0.45
+liquidity_provider_min_mid_fill_ratio = 0.60
+bot_swarm_min_trades_per_day = 200.0
+bot_swarm_max_avg_trade_size_usdc = 5.0
+jackpot_min_pnl_top1_share = 0.60
+jackpot_max_win_rate = 0.45
+topic_lane_min_top_domain_ratio = 0.65
+bonder_min_extreme_price_ratio = 0.60
+whale_min_avg_trade_size_usdc = 100.0
+stage2_min_roi = 0.03
+
+[wallet_rules]
+min_trades_for_discovery = 50
+max_trades_per_day = 120.0
+max_distinct_markets_30d = 60
+min_median_hold_minutes = 180.0
+max_flip_rate = 0.20
+max_size_gini = 0.75
+min_liquidity_score = 0.35
+max_median_seconds_between_trades = 45.0
+max_fraction_trades_at_spread_edge = 0.70
+paper_window_days = 14
+required_paper_trades = 30
+min_paper_profit_per_trade = 0.0
+max_paper_drawdown = 0.08
+max_paper_slippage_bps = 35.0
+live_breakers_enabled = false
+live_max_drawdown = 0.12
+live_slippage_bps_spike = 80.0
+live_style_drift_score = 0.65
+live_inactivity_days = 10
+live_max_theme_concentration = 0.55
+live_max_correlation_cluster_exposure = 0.65
+per_trade_risk_cap = 0.01
+per_market_risk_cap = 0.03
+per_wallet_risk_cap = 0.06
+
+[anomaly]
+win_rate_drop_pct = 15.0
+max_weekly_drawdown_pct = 20.0
+frequency_change_multiplier = 3.0
+size_change_multiplier = 10.0
+"#;
+
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.personas.parallel_enabled, "should default to true");
+        assert_eq!(cfg.personas.parallel_tasks, 8, "should default to 8");
     }
 
     #[test]
