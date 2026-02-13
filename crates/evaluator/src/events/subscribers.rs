@@ -152,9 +152,20 @@ pub async fn spawn_discovery_trigger_subscriber(
                     %completed_at,
                     "MarketsScored received — triggering wallet discovery"
                 );
-                if let Err(e) = discovery_tx.send(()).await {
-                    tracing::error!(error = %e, "failed to send discovery trigger");
-                    break;
+
+                // Record metrics
+                metrics::counter!("evaluator_event_triggers_fired_total", "trigger_type" => "discovery").increment(1);
+                let start = std::time::Instant::now();
+
+                match discovery_tx.send(()).await {
+                    Ok(()) => {
+                        let latency = start.elapsed().as_secs_f64();
+                        metrics::histogram!("evaluator_event_trigger_latency_seconds", "trigger_type" => "discovery").record(latency);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to send discovery trigger");
+                        break;
+                    }
                 }
             }
             Ok(_) => {
@@ -242,13 +253,26 @@ pub async fn spawn_classification_trigger_subscriber(
             _ = timer.tick() => {
                 if !accumulator.is_empty() {
                     let batch = accumulator.drain();
+                    let batch_size = batch.len();
                     tracing::info!(
-                        wallets = batch.len(),
+                        wallets = batch_size,
                         "classification trigger: batched wallets, triggering classification"
                     );
-                    if classification_tx.send(()).await.is_err() {
-                        tracing::warn!("classification trigger: channel closed, shutting down");
-                        break;
+
+                    // Record metrics
+                    metrics::counter!("evaluator_event_triggers_fired_total", "trigger_type" => "classification").increment(1);
+                    metrics::histogram!("evaluator_classification_batch_size").record(batch_size as f64);
+                    let start = std::time::Instant::now();
+
+                    match classification_tx.send(()).await {
+                        Ok(()) => {
+                            let latency = start.elapsed().as_secs_f64();
+                            metrics::histogram!("evaluator_event_trigger_latency_seconds", "trigger_type" => "classification").record(latency);
+                        }
+                        Err(_) => {
+                            tracing::warn!("classification trigger: channel closed, shutting down");
+                            break;
+                        }
                     }
                 }
             }
@@ -284,7 +308,13 @@ pub async fn spawn_fast_path_subscriber(event_bus: Arc<EventBus>) {
                     trades_count,
                     "fast-path: TradesIngested -> triggering fast-path"
                 );
+
+                // Record metrics
+                metrics::counter!("evaluator_event_triggers_fired_total", "trigger_type" => "fast_path").increment(1);
+                let start = std::time::Instant::now();
                 event_bus.trigger_fast_path();
+                let latency = start.elapsed().as_secs_f64();
+                metrics::histogram!("evaluator_event_trigger_latency_seconds", "trigger_type" => "fast_path").record(latency);
             }
             Ok(_) => {
                 // Ignore non-TradesIngested pipeline events

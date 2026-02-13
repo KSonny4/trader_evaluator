@@ -190,6 +190,22 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             events::subscribers::spawn_fast_path_subscriber(bus).await;
         });
+
+        // Spawn fast-path worker that converts coalesced triggers to ticks
+        let bus_worker = event_bus.as_ref().unwrap().clone();
+        let (paper_tick_tx, mut paper_tick_rx) = tokio::sync::mpsc::channel::<u64>(8);
+        tokio::spawn(async move {
+            events::subscribers::spawn_fast_path_worker(bus_worker, paper_tick_tx).await;
+        });
+
+        // Wire paper_tick_rx to downstream consumer (future: paper trading scheduler)
+        tokio::spawn(async move {
+            while let Some(generation) = paper_tick_rx.recv().await {
+                tracing::info!(generation, "fast-path tick received (ready for paper trading integration)");
+                // TODO: When trader microservice supports event-driven mode, trigger paper tick here
+            }
+        });
+
         tracing::info!(
             "event-driven fast-path trigger enabled (TradesIngested coalescing → paper tick)"
         );
