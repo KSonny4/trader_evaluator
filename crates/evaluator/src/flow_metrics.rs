@@ -13,7 +13,6 @@ pub fn record_flow_counts(counts: &FlowCounts) {
         .set(counts.funnel.wallets_discovered as f64);
     metrics::gauge!("evaluator_flow_funnel_wallets_tracked")
         .set(counts.funnel.wallets_tracked as f64);
-    metrics::gauge!("evaluator_flow_funnel_paper_wallets").set(counts.funnel.paper_wallets as f64);
     metrics::gauge!("evaluator_flow_funnel_wallets_ranked_today")
         .set(counts.funnel.wallets_ranked_today as f64);
     metrics::gauge!("evaluator_flow_classification_wallets_tracked")
@@ -36,8 +35,6 @@ pub struct FunnelFlowCounts {
     pub markets_scored_today: i64,
     pub wallets_discovered: i64,
     pub wallets_tracked: i64,
-    /// Distinct wallets with ≥1 paper trade (matches dashboard funnel).
-    pub paper_wallets: i64,
     pub wallets_ranked_today: i64,
 }
 
@@ -71,11 +68,6 @@ pub fn compute_flow_counts(conn: &Connection) -> Result<FlowCounts> {
         conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
     let wallets_tracked: i64 = conn.query_row(
         "SELECT COUNT(*) FROM wallets WHERE is_active = 1",
-        [],
-        |r| r.get(0),
-    )?;
-    let paper_wallets: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
         [],
         |r| r.get(0),
     )?;
@@ -137,7 +129,6 @@ pub fn compute_flow_counts(conn: &Connection) -> Result<FlowCounts> {
             markets_scored_today,
             wallets_discovered,
             wallets_tracked,
-            paper_wallets,
             wallets_ranked_today,
         },
         classification: ClassificationFlowCounts {
@@ -181,17 +172,6 @@ mod tests {
             .unwrap();
         db.conn
             .execute(
-                "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, slippage_applied, status) VALUES
-                 ('w1','mirror','c1','BUY',10,0.5,0,'open'),
-                 ('w1','mirror','c1','BUY',10,0.5,0,'settled_win'),
-                 ('w2','mirror','c1','BUY',10,0.5,0,'settled_loss'),
-                 ('w2','mirror','c2','BUY',10,0.5,0,'open'),
-                 ('w2','mirror','c2','BUY',10,0.5,0,'open')",
-                [],
-            )
-            .unwrap();
-        db.conn
-            .execute(
                 "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore) VALUES ('w1', date('now'), 30, 0.9)",
                 [],
             )
@@ -220,7 +200,6 @@ mod tests {
                 markets_scored_today: 1,
                 wallets_discovered: 3,
                 wallets_tracked: 2,
-                paper_wallets: 2,
                 wallets_ranked_today: 1,
             }
         );

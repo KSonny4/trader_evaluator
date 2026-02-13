@@ -8,7 +8,6 @@ pub enum Command {
     Markets,
     Wallets,
     Wallet { address: String },
-    PaperPnl,
     Rankings,
     Classify,
 }
@@ -34,7 +33,6 @@ where
                 .ok_or_else(|| "usage: evaluator wallet <address>".to_string())?;
             Ok(Command::Wallet { address })
         }
-        "paper-pnl" => Ok(Command::PaperPnl),
         "rankings" => Ok(Command::Rankings),
         "classify" => Ok(Command::Classify),
         other => Err(format!("unknown command: {other}")),
@@ -47,7 +45,6 @@ pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
         Command::Markets => show_markets(db),
         Command::Wallets => show_wallets(db),
         Command::Wallet { address } => show_wallet(db, &address),
-        Command::PaperPnl => show_paper_pnl(db),
         Command::Rankings => show_rankings(db),
         Command::Classify => run_classify(db),
     }
@@ -167,16 +164,6 @@ fn show_wallet(db: &Database, address: &str) -> Result<()> {
     )?;
     println!("  paper_pnl_usdc={}", pnl.unwrap_or(0.0));
 
-    Ok(())
-}
-
-fn show_paper_pnl(db: &Database) -> Result<()> {
-    let pnl: Option<f64> = db.conn.query_row(
-        "SELECT SUM(pnl) FROM paper_trades WHERE status != 'open'",
-        [],
-        |row| row.get(0),
-    )?;
-    println!("Paper PnL (settled): {}", pnl.unwrap_or(0.0));
     Ok(())
 }
 
