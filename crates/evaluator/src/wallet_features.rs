@@ -512,20 +512,24 @@ pub async fn compute_features_for_wallet(
 
     db.call_named("on_demand_features.compute", move |conn| {
         // Check settled trade count (same gate as daily batch)
+        let cutoff_epoch = now_epoch - (window_days * 86400);
+
         let settled_count: i64 = conn.query_row(
             "
             SELECT COUNT(DISTINCT t1.transaction_hash)
             FROM trades_raw t1
             WHERE t1.proxy_wallet = ?1
+              AND t1.timestamp >= ?2
               AND EXISTS (
                   SELECT 1 FROM trades_raw t2
                   WHERE t2.proxy_wallet = t1.proxy_wallet
                     AND t2.condition_id = t1.condition_id
                     AND t2.side != t1.side
                     AND t2.timestamp >= t1.timestamp
+                    AND t2.timestamp >= ?2
               )
             ",
-            [&wallet],
+            rusqlite::params![&wallet, cutoff_epoch],
             |row| row.get(0),
         )?;
 
