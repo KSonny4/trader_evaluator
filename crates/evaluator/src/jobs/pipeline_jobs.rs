@@ -11,7 +11,7 @@ use crate::persona_classification::{
     classify_wallet, stage1_filter, stage1_known_bot_check, PersonaConfig, Stage1Config,
 };
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
-use crate::wallet_features::compute_wallet_features;
+use crate::wallet_features::{compute_wallet_features, WalletFeatures};
 use crate::wallet_rules_engine::{
     evaluate_discovery, evaluate_live, evaluate_paper, read_state, record_event,
     style_snapshot_from_features, write_state, WalletRuleState,
@@ -1171,6 +1171,64 @@ fn fetch_wallet_chunk(
     .map_err(Into::into)
 }
 
+/// Compute wallet features in parallel using tokio tasks.
+/// Splits wallets into mini-batches and spawns a task for each batch.
+/// Each task reads trades_raw and computes features independently.
+/// Returns all results (wallet, age_days, Result<WalletFeatures>).
+#[allow(dead_code)] // Wired into process_wallet_chunk in Task 3
+async fn compute_features_parallel(
+    db: &AsyncDb,
+    wallets: Vec<(String, u32, u32, u32)>,
+    window_days: u32,
+    now_epoch: i64,
+    parallel_tasks: usize,
+) -> Vec<(String, u32, Result<WalletFeatures>)> {
+    let total_wallets = wallets.len();
+
+    // Edge case: if fewer wallets than tasks, use one task per wallet
+    let num_tasks = parallel_tasks.min(total_wallets).max(1);
+    let batch_size = total_wallets.div_ceil(num_tasks);
+
+    let mut tasks = Vec::new();
+
+    for chunk in wallets.chunks(batch_size) {
+        let chunk = chunk.to_vec();
+        let db = db.clone();
+
+        let task = tokio::spawn(async move {
+            let mut results = Vec::new();
+
+            for (proxy_wallet, age_days, _total_trades, _days_since_last) in chunk {
+                let wallet = proxy_wallet.clone();
+                let result = db
+                    .call_named("persona.compute_features", move |conn| {
+                        compute_wallet_features(conn, &wallet, window_days, now_epoch)
+                    })
+                    .await;
+
+                results.push((proxy_wallet, age_days, result));
+            }
+
+            results
+        });
+
+        tasks.push(task);
+    }
+
+    // Await all tasks and collect results
+    let mut all_results = Vec::new();
+    for task in tasks {
+        match task.await {
+            Ok(batch_results) => all_results.extend(batch_results),
+            Err(e) => {
+                tracing::error!(error = %e, "compute_features_parallel: task failed");
+            }
+        }
+    }
+
+    all_results
+}
+
 /// Process a chunk of wallets (Stage 1 + Stage 2)
 /// Returns (processed_count, stage1_no_trades, stage1_other, stage2_excluded, suitable)
 fn process_wallet_chunk(
@@ -1180,6 +1238,7 @@ fn process_wallet_chunk(
     persona_config: &PersonaConfig,
     window_days: u32,
     now_epoch: i64,
+    precomputed_features: Option<&std::collections::HashMap<String, (u32, WalletFeatures)>>,
 ) -> Result<(u64, u64, u64, u64, u64)> {
     let mut count = 0_u64;
     let mut stage1_no_trades = 0_u64;
@@ -1217,11 +1276,24 @@ fn process_wallet_chunk(
             tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "Failed to clear Stage 1 exclusion");
         }
 
-        // Compute features
-        let Ok(features) = compute_wallet_features(conn, proxy_wallet, window_days, now_epoch)
-        else {
-            tracing::warn!(proxy_wallet = %proxy_wallet, "compute_wallet_features failed");
-            continue;
+        // Get features: either from precomputed map or compute now
+        let features = if let Some(feature_map) = precomputed_features {
+            match feature_map.get(proxy_wallet) {
+                Some((_, features)) => features.clone(),
+                None => {
+                    tracing::warn!(proxy_wallet = %proxy_wallet, "precomputed features missing");
+                    continue;
+                }
+            }
+        } else {
+            // Serial path: compute features inline
+            match compute_wallet_features(conn, proxy_wallet, window_days, now_epoch) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "compute_wallet_features failed");
+                    continue;
+                }
+            }
         };
 
         // Stage 2 classification
@@ -1349,37 +1421,86 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
     let mut offset = 0_i64;
 
     loop {
-        // Process one chunk
-        let chunk_result = db
-            .call_named("persona_classification.classify_chunk", {
+        // Fetch wallet chunk
+        let wallets: Vec<(String, u32, u32, u32)> = db
+            .call_named("persona_classification.fetch_chunk", move |conn| {
+                fetch_wallet_chunk(conn, offset, chunk_size)
+            })
+            .await?;
+
+        if wallets.is_empty() {
+            break; // No more wallets
+        }
+
+        // Decide: parallel or serial path
+        let chunk_result = if cfg.personas.parallel_enabled {
+            // Parallel path: compute features first, then classify
+            let features_results = compute_features_parallel(
+                db,
+                wallets.clone(),
+                window_days,
+                now_epoch,
+                cfg.personas.parallel_tasks,
+            )
+            .await;
+
+            // Build feature map
+            let mut feature_map = std::collections::HashMap::new();
+            for (wallet, age, result) in features_results {
+                match result {
+                    Ok(features) => {
+                        feature_map.insert(wallet, (age, features));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            proxy_wallet = %wallet,
+                            error = %e,
+                            "parallel path: compute_wallet_features failed"
+                        );
+                        // Still continues - consistent with serial behavior
+                    }
+                }
+            }
+
+            // Process with precomputed features
+            db.call_named("persona_classification.classify_chunk", {
                 let stage1_config = stage1_config.clone();
                 let persona_config = persona_config.clone();
                 move |conn| {
-                    let wallets = fetch_wallet_chunk(conn, offset, chunk_size)?;
-
-                    if wallets.is_empty() {
-                        return Ok(None); // Signal completion
-                    }
-
-                    let counters = process_wallet_chunk(
+                    process_wallet_chunk(
                         conn,
                         &wallets,
                         &stage1_config,
                         &persona_config,
                         window_days,
                         now_epoch,
-                    )?;
-
-                    Ok(Some(counters))
+                        Some(&feature_map),
+                    )
                 }
             })
-            .await?;
-
-        let Some((chunk_processed, chunk_no_trades, chunk_other, chunk_excluded, chunk_suitable)) =
-            chunk_result
-        else {
-            break; // No more wallets
+            .await?
+        } else {
+            // Serial path: compute features inline
+            db.call_named("persona_classification.classify_chunk", {
+                let stage1_config = stage1_config.clone();
+                let persona_config = persona_config.clone();
+                move |conn| {
+                    process_wallet_chunk(
+                        conn,
+                        &wallets,
+                        &stage1_config,
+                        &persona_config,
+                        window_days,
+                        now_epoch,
+                        None,
+                    )
+                }
+            })
+            .await?
         };
+
+        let (chunk_processed, chunk_no_trades, chunk_other, chunk_excluded, chunk_suitable) =
+            chunk_result;
 
         // Accumulate counters
         total_processed += chunk_processed;
@@ -3124,6 +3245,218 @@ mod tests {
         assert!(
             meta_json.get("skipped").is_some(),
             "metadata should indicate skipping"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_parallel_success() {
+        let _cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 24 wallets with trade history (3 batches of 8 tasks each)
+        for i in 0..24 {
+            let wallet = format!("0xwallet{i}");
+            db.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![wallet.clone()],
+                )?;
+                // Create 15 trades for each wallet spread over 30 days
+                for j in 0..15 {
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * (30 - (j * 2)),
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        // Fetch wallets
+        let wallets: Vec<(String, u32, u32, u32)> = db
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT w.proxy_wallet, 30 AS age_days, 15 AS total_trades, 0 AS days_since_last
+                     FROM wallets w ORDER BY w.proxy_wallet"
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(wallets.len(), 24);
+
+        // Call compute_features_parallel
+        let results = compute_features_parallel(&db, wallets, 180, now, 8).await;
+
+        assert_eq!(results.len(), 24, "should return all 24 wallets");
+
+        // Check all succeeded
+        let successful = results.iter().filter(|(_, _, r)| r.is_ok()).count();
+        assert_eq!(successful, 24, "all wallets should have features computed");
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_parallel_respects_task_count() {
+        let _cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 20 wallets
+        for i in 0..20 {
+            let wallet = format!("0xwallet{i}");
+            db.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![wallet.clone()],
+                )?;
+                for j in 0..10 {
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * (j + 1),
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        let wallets: Vec<(String, u32, u32, u32)> = db
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT w.proxy_wallet, 30 AS age_days, 10 AS total_trades, 0 AS days_since_last
+                     FROM wallets w ORDER BY w.proxy_wallet"
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        // Test with 4 tasks (should create 5-wallet batches)
+        let results = compute_features_parallel(&db, wallets.clone(), 180, now, 4).await;
+        assert_eq!(results.len(), 20);
+
+        // Test with 10 tasks (should create 2-wallet batches)
+        let results = compute_features_parallel(&db, wallets, 180, now, 10).await;
+        assert_eq!(results.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn test_persona_classification_parallel_vs_serial() {
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 50 wallets with sufficient trade history
+        // Use 50 to ensure we test chunking (chunk_size=100, so single chunk)
+        for i in 0..50 {
+            let wallet = format!("0xwallet{i:03}");
+            db.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![wallet.clone()],
+                )?;
+                // Create trades spanning 60 days with varying outcomes
+                for j in 0..15 {
+                    let days_ago = 60 - (j * 3);
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * days_ago,
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        // Run with parallel disabled
+        cfg.personas.parallel_enabled = false;
+        let serial_count = run_persona_classification_once(&db, &cfg).await.unwrap();
+
+        // Verify we got results from serial path
+        let serial_personas: Vec<String> = db
+            .call(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT proxy_wallet FROM wallet_personas ORDER BY proxy_wallet")?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        // Clear personas table
+        db.call(|conn| {
+            conn.execute("DELETE FROM wallet_personas", [])?;
+            conn.execute("DELETE FROM wallet_exclusions", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Run with parallel enabled
+        cfg.personas.parallel_enabled = true;
+        let parallel_count = run_persona_classification_once(&db, &cfg).await.unwrap();
+
+        // Get results from parallel path
+        let parallel_personas: Vec<String> = db
+            .call(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT proxy_wallet FROM wallet_personas ORDER BY proxy_wallet")?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        // Both should classify the same number of wallets
+        assert_eq!(
+            serial_count, parallel_count,
+            "serial and parallel should classify same count"
+        );
+        assert!(serial_count > 0, "should classify some wallets");
+
+        // Both should classify the same wallets
+        assert_eq!(
+            serial_personas, parallel_personas,
+            "serial and parallel should classify same wallets"
         );
     }
 }
