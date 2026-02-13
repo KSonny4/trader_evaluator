@@ -1499,7 +1499,8 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
             .await?
         };
 
-        let (chunk_processed, chunk_no_trades, chunk_other, chunk_excluded, chunk_suitable) = chunk_result;
+        let (chunk_processed, chunk_no_trades, chunk_other, chunk_excluded, chunk_suitable) =
+            chunk_result;
 
         // Accumulate counters
         total_processed += chunk_processed;
@@ -3073,7 +3074,7 @@ mod tests {
                 conn.execute(
                     "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                      VALUES ('0xnew', 'm1', 'BUY', 1.0, 0.5, ?1, ?2, '{}')",
-                    rusqlite::params![now - (i as i64) * 3600, format!("0xtx_new{i}")],
+                    rusqlite::params![now - i64::from(i) * 3600, format!("0xtx_new{i}")],
                 )?;
             }
             Ok(())
@@ -3368,7 +3369,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_persona_classification_parallel_vs_serial() {
-        let mut cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         let now = chrono::Utc::now().timestamp();
@@ -3408,7 +3410,8 @@ mod tests {
         // Verify we got results from serial path
         let serial_personas: Vec<String> = db
             .call(|conn| {
-                let mut stmt = conn.prepare("SELECT proxy_wallet FROM wallet_personas ORDER BY proxy_wallet")?;
+                let mut stmt =
+                    conn.prepare("SELECT proxy_wallet FROM wallet_personas ORDER BY proxy_wallet")?;
                 let rows = stmt
                     .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -3433,7 +3436,8 @@ mod tests {
         // Get results from parallel path
         let parallel_personas: Vec<String> = db
             .call(|conn| {
-                let mut stmt = conn.prepare("SELECT proxy_wallet FROM wallet_personas ORDER BY proxy_wallet")?;
+                let mut stmt =
+                    conn.prepare("SELECT proxy_wallet FROM wallet_personas ORDER BY proxy_wallet")?;
                 let rows = stmt
                     .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -3443,10 +3447,16 @@ mod tests {
             .unwrap();
 
         // Both should classify the same number of wallets
-        assert_eq!(serial_count, parallel_count, "serial and parallel should classify same count");
+        assert_eq!(
+            serial_count, parallel_count,
+            "serial and parallel should classify same count"
+        );
         assert!(serial_count > 0, "should classify some wallets");
 
         // Both should classify the same wallets
-        assert_eq!(serial_personas, parallel_personas, "serial and parallel should classify same wallets");
+        assert_eq!(
+            serial_personas, parallel_personas,
+            "serial and parallel should classify same wallets"
+        );
     }
 }
