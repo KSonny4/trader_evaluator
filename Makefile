@@ -104,8 +104,8 @@ SERVER ?= $(shell ./scripts/find_server.sh)
 SSH_KEY ?=
 REMOTE_DIR ?= /opt/evaluator
 DB = $(REMOTE_DIR)/data/evaluator.db
-SSH = ssh $(if $(SSH_KEY),-i $(SSH_KEY)) -o StrictHostKeyChecking=no
-SCP = scp $(if $(SSH_KEY),-i $(SSH_KEY)) -o StrictHostKeyChecking=no
+SSH = ssh $(if $(SSH_KEY),-i $(SSH_KEY)) -o StrictHostKeyChecking=accept-new
+SCP = scp $(if $(SSH_KEY),-i $(SSH_KEY)) -o StrictHostKeyChecking=accept-new
 DB_CMD = $(SSH) $(SERVER) 'sqlite3 $(DB)'
 
 deploy: test build-linux

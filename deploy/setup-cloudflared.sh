@@ -12,7 +12,7 @@ set -euo pipefail
 #   bash deploy/setup-cloudflared.sh [TUNNEL_NAME]
 
 TUNNEL_NAME="${1:-${TUNNEL_NAME:-}}"
-HOSTNAME="${CF_HOSTNAME:-sniper.pkubelka.cz}"
+ROUTE_HOSTNAME="${CF_HOSTNAME:-sniper.pkubelka.cz}"
 LOCAL_SERVICE="http://localhost:8080"
 CONFIG_FILE="/etc/cloudflared/config.yml"
 
@@ -31,8 +31,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # Check if the route already exists
-if grep -q "$HOSTNAME" "$CONFIG_FILE"; then
-    echo "Route for $HOSTNAME already exists in $CONFIG_FILE"
+if grep -q "$ROUTE_HOSTNAME" "$CONFIG_FILE"; then
+    echo "Route for $ROUTE_HOSTNAME already exists in $CONFIG_FILE"
     echo "Nothing to do."
     exit 0
 fi
@@ -50,16 +50,25 @@ fi
 
 echo "=== Adding evaluator route to existing tunnel ==="
 echo "Tunnel:   $TUNNEL_NAME"
-echo "Hostname: $HOSTNAME"
+echo "Hostname: $ROUTE_HOSTNAME"
 echo "Service:  $LOCAL_SERVICE"
 echo ""
 
 # Add the route before the catch-all 404 rule
 echo "Updating $CONFIG_FILE..."
-# Insert the new hostname entry before the catch-all service line
 sudo sed -i "/- service: http_status:404/i\\
-  - hostname: ${HOSTNAME}\\
+  - hostname: ${ROUTE_HOSTNAME}\\
     service: ${LOCAL_SERVICE}" "$CONFIG_FILE"
+
+# Verify the route was actually inserted
+if ! grep -q "$ROUTE_HOSTNAME" "$CONFIG_FILE"; then
+    echo "ERROR: Failed to insert route into $CONFIG_FILE"
+    echo "The catch-all rule '- service: http_status:404' may not exist."
+    echo "Please add the route manually:"
+    echo "  - hostname: $ROUTE_HOSTNAME"
+    echo "    service: $LOCAL_SERVICE"
+    exit 1
+fi
 
 echo "Config updated. New ingress rules:"
 grep -A1 'hostname:' "$CONFIG_FILE" || true
@@ -67,7 +76,7 @@ echo ""
 
 # Add DNS route
 echo "Adding DNS route..."
-cloudflared tunnel route dns "$TUNNEL_NAME" "$HOSTNAME" 2>/dev/null || echo "DNS route may already exist (that's OK)"
+cloudflared tunnel route dns "$TUNNEL_NAME" "$ROUTE_HOSTNAME" 2>/dev/null || echo "DNS route may already exist (that's OK)"
 
 # Restart cloudflared
 echo "Restarting cloudflared..."
@@ -75,7 +84,7 @@ sudo systemctl restart cloudflared
 
 echo ""
 echo "=== Done ==="
-echo "Evaluator dashboard should be accessible at https://$HOSTNAME"
+echo "Evaluator dashboard should be accessible at https://$ROUTE_HOSTNAME"
 echo ""
 echo "Verify with: sudo systemctl status cloudflared"
 echo "Logs: sudo journalctl -u cloudflared -f"

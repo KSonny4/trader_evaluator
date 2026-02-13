@@ -32,8 +32,8 @@ KEY_OPT=""
 if [ -n "$KEY_FILE" ]; then
     KEY_OPT="-i $KEY_FILE"
 fi
-SSH_CMD="ssh $KEY_OPT -o StrictHostKeyChecking=no $SSH_USER@$SERVER_IP"
-SCP_CMD="scp $KEY_OPT -o StrictHostKeyChecking=no"
+SSH_CMD="ssh $KEY_OPT -o StrictHostKeyChecking=accept-new $SSH_USER@$SERVER_IP"
+SCP_CMD="scp $KEY_OPT -o StrictHostKeyChecking=accept-new"
 
 echo "=== Deploying to $SERVER_IP ==="
 

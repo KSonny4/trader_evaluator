@@ -10,7 +10,7 @@ echo "=== Evaluator Server Setup ==="
 # 1. System packages (minimal — no build tools, binaries are cross-compiled on macOS)
 echo "Installing system packages..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq curl sqlite3
+sudo apt-get install -y -qq curl wget sqlite3
 
 # 2. Create evaluator system user/group for service isolation
 if ! id evaluator &>/dev/null; then
