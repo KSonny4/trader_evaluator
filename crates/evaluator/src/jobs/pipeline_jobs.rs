@@ -786,6 +786,30 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
         all_new_wallets.extend(new_wallets);
     }
 
+    // Spawn on-demand feature computation for newly discovered wallets
+    let cfg = std::sync::Arc::new(cfg.clone());
+    for wallet in all_new_wallets {
+        let db = db.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            let span = tracing::info_span!("on_demand_features", wallet = %wallet);
+            let _g = span.enter();
+            match crate::wallet_features::compute_features_for_wallet(&db, &cfg, &wallet, 30).await
+            {
+                Ok(()) => {
+                    tracing::info!("on-demand features computed");
+                    metrics::counter!("evaluator_on_demand_features_total", "status" => "success")
+                        .increment(1);
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, "on-demand features failed, will retry in batch");
+                    metrics::counter!("evaluator_on_demand_features_total", "status" => "failure")
+                        .increment(1);
+                }
+            }
+        });
+    }
+
     metrics::counter!("evaluator_wallets_discovered_total").increment(inserted);
     let watchlist: i64 = db
         .call_named("wallet_discovery.count_active_wallets", |conn| {
@@ -2573,5 +2597,86 @@ mod tests {
 
         // TODO: Verify that new_wallets list contains 0xnew1 and 0xnew2
         // This will be validated when we add the spawn logic in next task
+    }
+
+    #[tokio::test]
+    async fn test_on_demand_features_spawned_after_discovery() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert market score
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('0xmarket', date('now'), 0.9, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Insert trades for new wallet (≥5 for feature computation)
+        let now = chrono::Utc::now().timestamp();
+        db.call(move |conn| {
+            for i in 0..6 {
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp, raw_json)
+                     VALUES (?1, '0xnewwallet', '0xmarket', 'BUY', 100, 0.5, ?2, '{}')",
+                    rusqlite::params![format!("0xtx_buy_{}", i), now - (i * 86400)],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp, raw_json)
+                     VALUES (?1, '0xnewwallet', '0xmarket', 'SELL', 100, 0.6, ?2, '{}')",
+                    rusqlite::params![format!("0xtx_sell_{}", i), now - (i * 86400) + 3600],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let holders = FakeHoldersFetcher {
+            resp: vec![ApiHolderResponse {
+                token: Some("0xtok".to_string()),
+                holders: vec![common::types::ApiHolder {
+                    proxy_wallet: Some("0xnewwallet".to_string()),
+                    amount: Some(123.0),
+                    asset: None,
+                    pseudonym: None,
+                    name: None,
+                    outcome_index: Some(0),
+                }],
+            }],
+            raw: b"[]".to_vec(),
+        };
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![],
+            raw: b"[]".to_vec(),
+        };
+
+        // Run discovery
+        let inserted = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1, "should discover 1 new wallet");
+
+        // Wait for spawned tasks to complete (tokio tasks are async)
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Verify features computed
+        let count: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM wallet_features_daily WHERE proxy_wallet = '0xnewwallet' AND window_days = 30",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "on-demand features should be computed for new wallet"
+        );
     }
 }
