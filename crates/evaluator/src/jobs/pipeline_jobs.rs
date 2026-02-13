@@ -390,6 +390,40 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     }
 
     let tracker = JobTracker::start(db, "wallet_scoring").await?;
+
+    // Quality gate: Check for wallets with at least 5 settled trades
+    let min_settled_trades = 5_i64;
+    let wallets_ready_to_score: i64 = db
+        .call_named("wallet_scoring.count_ready_wallets", move |conn| {
+            Ok(conn.query_row(
+                "
+                SELECT COUNT(DISTINCT proxy_wallet)
+                FROM (
+                    SELECT proxy_wallet, COUNT(*) as settled_count
+                    FROM paper_trades
+                    WHERE status != 'open'
+                    GROUP BY proxy_wallet
+                    HAVING COUNT(*) >= ?1
+                )
+                ",
+                [min_settled_trades],
+                |row| row.get(0),
+            )?)
+        })
+        .await?;
+
+    if wallets_ready_to_score == 0 {
+        tracing::warn!("wallet_scoring: skipping - no wallets with sufficient settled trades");
+        tracker
+            .success(Some(serde_json::json!({
+                "inserted": 0,
+                "skipped": "insufficient settled trades",
+                "min_settled_trades_required": min_settled_trades
+            })))
+            .await?;
+        return Ok(0);
+    }
+
     let today = chrono::Utc::now().date_naive().to_string();
 
     let w = WScoreWeights {
@@ -2582,15 +2616,18 @@ mod tests {
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xw"],
             )?;
-            conn.execute(
-                "
-                INSERT INTO paper_trades
-                    (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
-                VALUES
-                    (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 50.0, datetime('now'), datetime('now'))
-                ",
-                rusqlite::params!["0xw", "0xcond"],
-            )?;
+            // Create 5+ settled trades to pass quality gate
+            for i in 0..6 {
+                conn.execute(
+                    "
+                    INSERT INTO paper_trades
+                        (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
+                    VALUES
+                        (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 10.0, datetime('now'), datetime('now'))
+                    ",
+                    rusqlite::params!["0xw", format!("cond{i}")],
+                )?;
+            }
             Ok(())
         })
         .await
@@ -2610,6 +2647,53 @@ mod tests {
             .await
             .unwrap();
         assert!(cnt > 0);
+    }
+
+    #[tokio::test]
+    async fn test_wallet_scoring_skips_when_insufficient_settled_trades() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Create wallet with only 3 settled trades (need 5+)
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                rusqlite::params!["0xfew"],
+            )?;
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
+                     VALUES (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 10.0, datetime('now'), datetime('now'))",
+                    rusqlite::params!["0xfew", format!("cond{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Run wallet_scoring - should skip because insufficient settled trades
+        let inserted = run_wallet_scoring_once(&db, &cfg).await.unwrap();
+        assert_eq!(inserted, 0, "should score 0 wallets when insufficient settled trades");
+
+        // Verify metadata shows skip reason
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'wallet_scoring'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert!(metadata.is_some(), "metadata should be set");
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+        assert!(
+            meta_json.get("skipped").is_some(),
+            "metadata should indicate skipping"
+        );
     }
 
     #[tokio::test]
