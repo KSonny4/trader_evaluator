@@ -777,8 +777,31 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
     cfg: &Config,
 ) -> Result<u64> {
     let tracker = JobTracker::start(db, "wallet_discovery").await?;
-    let markets: Vec<String> = db
+
+    // Check for recent market scores (within last 24 hours)
+    let (markets, score_date): (Vec<String>, Option<String>) = db
         .call_named("wallet_discovery.select_top_events_markets", move |conn| {
+            // First check if we have recent scores
+            let latest_date: Option<String> = conn
+                .query_row("SELECT MAX(score_date) FROM market_scores", [], |row| {
+                    row.get(0)
+                })
+                .ok();
+
+            if let Some(date_str) = &latest_date {
+                // Check if the date is within the last 24 hours (same day or yesterday)
+                if let Ok(score_date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let now = chrono::Utc::now().date_naive();
+                    let age_days = (now - score_date).num_days();
+
+                    if age_days >= 1 {
+                        // Scores are too old (more than 24h)
+                        return Ok((vec![], latest_date));
+                    }
+                }
+            }
+
+            // Scores are recent, fetch markets
             let mut stmt = conn.prepare(
                 "
                 SELECT condition_id
@@ -790,11 +813,28 @@ pub async fn run_wallet_discovery_once<H: HoldersFetcher + Sync, T: MarketTrades
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
+            Ok((rows, latest_date))
         })
         .await?;
 
     let total = markets.len();
+
+    // If no markets (stale scores), skip gracefully
+    if total == 0 {
+        tracing::warn!(
+            latest_score_date = ?score_date,
+            "wallet_discovery: skipping - no recent market scores (need scores within 24h)"
+        );
+        tracker
+            .success(Some(serde_json::json!({
+                "discovered": 0,
+                "skipped": "no recent market scores",
+                "latest_score_date": score_date
+            })))
+            .await?;
+        return Ok(0);
+    }
+
     if total > 0 {
         tracing::info!(markets = total, "wallet_discovery: processing top events");
     }
@@ -2709,6 +2749,68 @@ mod tests {
             meta_json["processed"].as_i64().unwrap(),
             250,
             "all 250 wallets should be processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wallet_discovery_skips_when_no_recent_market_scores() {
+        let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert old market scores (more than 24h ago)
+        let old_date = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(25))
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO market_scores (condition_id, score_date, mscore, rank) VALUES ('m1', ?1, 0.8, 1)",
+                rusqlite::params![old_date],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Create fake fetchers (won't be called since we skip)
+        let holders = FakeHoldersFetcher {
+            resp: vec![],
+            raw: b"[]".to_vec(),
+        };
+        let trades = FakeMarketTradesFetcher {
+            trades: vec![],
+            raw: b"[]".to_vec(),
+        };
+
+        // Run wallet_discovery - should skip because scores are too old
+        let discovered = run_wallet_discovery_once(&db, &holders, &trades, &cfg)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            discovered, 0,
+            "should discover 0 wallets when scores are stale"
+        );
+
+        // Verify job_status shows skip reason
+        let metadata: Option<String> = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata FROM job_status WHERE job_name = 'wallet_discovery'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        assert!(metadata.is_some(), "metadata should be set");
+        let meta_json: serde_json::Value = serde_json::from_str(&metadata.unwrap()).unwrap();
+        assert!(
+            meta_json.get("skipped").is_some(),
+            "metadata should indicate skipping"
         );
     }
 }
