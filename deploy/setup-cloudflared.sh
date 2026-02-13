@@ -1,71 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install cloudflared and create a tunnel for the evaluator dashboard.
-# Run this on the target server.
+# Add an evaluator dashboard route to an EXISTING cloudflared tunnel.
+# Run this on the target server (which already has cloudflared running).
 #
 # Prerequisites:
-#   - Must be run interactively (cloudflared login opens a browser URL)
+#   - cloudflared already installed and running (e.g., for ai_wars)
+#   - An existing tunnel configured in /etc/cloudflared/config.yml
 #
 # Usage:
-#   bash deploy/setup-cloudflared.sh
+#   bash deploy/setup-cloudflared.sh [TUNNEL_NAME]
 
-TUNNEL_NAME="${TUNNEL_NAME:-evaluator-dashboard}"
+TUNNEL_NAME="${1:-${TUNNEL_NAME:-}}"
 HOSTNAME="${CF_HOSTNAME:-sniper.pkubelka.cz}"
 LOCAL_SERVICE="http://localhost:8080"
+CONFIG_FILE="/etc/cloudflared/config.yml"
 
-echo "=== Installing cloudflared ==="
-# Add Cloudflare's GPG key and repo
-sudo mkdir -p --mode=0755 /usr/share/keyrings
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
-echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | \
-    sudo tee /etc/apt/sources.list.d/cloudflared.list
-sudo apt-get update -y
-sudo apt-get install -y cloudflared
+# Verify cloudflared is installed
+if ! command -v cloudflared &>/dev/null; then
+    echo "ERROR: cloudflared is not installed."
+    echo "Install it first or check that the server has an existing tunnel."
+    exit 1
+fi
 
+# Verify config exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: $CONFIG_FILE not found."
+    echo "This script expects an existing cloudflared tunnel."
+    exit 1
+fi
+
+# Check if the route already exists
+if grep -q "$HOSTNAME" "$CONFIG_FILE"; then
+    echo "Route for $HOSTNAME already exists in $CONFIG_FILE"
+    echo "Nothing to do."
+    exit 0
+fi
+
+# Auto-detect tunnel name if not provided
+if [ -z "$TUNNEL_NAME" ]; then
+    TUNNEL_NAME=$(grep '^tunnel:' "$CONFIG_FILE" | awk '{print $2}')
+    if [ -z "$TUNNEL_NAME" ]; then
+        echo "ERROR: Could not detect tunnel name from $CONFIG_FILE"
+        echo "Usage: $0 <TUNNEL_NAME>"
+        exit 1
+    fi
+    echo "Auto-detected tunnel: $TUNNEL_NAME"
+fi
+
+echo "=== Adding evaluator route to existing tunnel ==="
+echo "Tunnel:   $TUNNEL_NAME"
+echo "Hostname: $HOSTNAME"
+echo "Service:  $LOCAL_SERVICE"
 echo ""
-echo "=== Authenticating with Cloudflare ==="
-echo "This will open a URL — paste it in your browser to authorize."
-cloudflared tunnel login
 
+# Add the route before the catch-all 404 rule
+echo "Updating $CONFIG_FILE..."
+# Insert the new hostname entry before the catch-all service line
+sudo sed -i "/- service: http_status:404/i\\
+  - hostname: ${HOSTNAME}\\
+    service: ${LOCAL_SERVICE}" "$CONFIG_FILE"
+
+echo "Config updated. New ingress rules:"
+grep -A1 'hostname:' "$CONFIG_FILE" || true
 echo ""
-echo "=== Creating tunnel: $TUNNEL_NAME ==="
-cloudflared tunnel create "$TUNNEL_NAME"
 
-# Get the tunnel ID
-TUNNEL_ID=$(cloudflared tunnel list --name "$TUNNEL_NAME" --output json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-CRED_FILE="$HOME/.cloudflared/${TUNNEL_ID}.json"
+# Add DNS route
+echo "Adding DNS route..."
+cloudflared tunnel route dns "$TUNNEL_NAME" "$HOSTNAME" 2>/dev/null || echo "DNS route may already exist (that's OK)"
 
-echo "Tunnel ID: $TUNNEL_ID"
-echo "Credentials: $CRED_FILE"
-
-echo ""
-echo "=== Writing config ==="
-sudo mkdir -p /etc/cloudflared
-sudo tee /etc/cloudflared/config.yml > /dev/null <<EOF
-tunnel: ${TUNNEL_ID}
-credentials-file: ${CRED_FILE}
-
-ingress:
-  - hostname: ${HOSTNAME}
-    service: ${LOCAL_SERVICE}
-  - service: http_status:404
-EOF
-
-echo ""
-echo "=== Creating DNS route ==="
-cloudflared tunnel route dns "$TUNNEL_NAME" "$HOSTNAME"
-
-echo ""
-echo "=== Installing as systemd service ==="
-sudo cloudflared service install
-sudo systemctl enable cloudflared
-sudo systemctl start cloudflared
+# Restart cloudflared
+echo "Restarting cloudflared..."
+sudo systemctl restart cloudflared
 
 echo ""
 echo "=== Done ==="
-echo "Tunnel $TUNNEL_NAME is running."
-echo "Dashboard should be accessible at https://$HOSTNAME"
+echo "Evaluator dashboard should be accessible at https://$HOSTNAME"
 echo ""
 echo "Verify with: sudo systemctl status cloudflared"
 echo "Logs: sudo journalctl -u cloudflared -f"

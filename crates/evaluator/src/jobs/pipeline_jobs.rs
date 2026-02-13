@@ -1317,7 +1317,9 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         .await?;
 
     if ready_wallets == 0 {
-        tracing::warn!("persona_classification: skipping - no wallets with sufficient trade history");
+        tracing::warn!(
+            "persona_classification: skipping - no wallets with sufficient trade history"
+        );
         tracker
             .success(Some(serde_json::json!({
                 "classified": 0,
@@ -2584,7 +2586,10 @@ mod tests {
 
         // Run paper_tick - should skip because no active followable wallets
         let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
-        assert_eq!(inserted, 0, "should create 0 paper trades when no active followable wallets");
+        assert_eq!(
+            inserted, 0,
+            "should create 0 paper trades when no active followable wallets"
+        );
 
         // Verify metadata shows skip reason
         let metadata: Option<String> = db
@@ -2674,7 +2679,10 @@ mod tests {
 
         // Run wallet_scoring - should skip because insufficient settled trades
         let inserted = run_wallet_scoring_once(&db, &cfg).await.unwrap();
-        assert_eq!(inserted, 0, "should score 0 wallets when insufficient settled trades");
+        assert_eq!(
+            inserted, 0,
+            "should score 0 wallets when insufficient settled trades"
+        );
 
         // Verify metadata shows skip reason
         let metadata: Option<String> = db
@@ -2945,7 +2953,7 @@ mod tests {
                 conn.execute(
                     "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
                      VALUES ('0xnew', 'm1', 'BUY', 1.0, 0.5, ?1, ?2, '{}')",
-                    rusqlite::params![now - (i as i64) * 3600, format!("0xtx_new{i}")],
+                    rusqlite::params![now - i64::from(i) * 3600, format!("0xtx_new{i}")],
                 )?;
             }
             Ok(())

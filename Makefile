@@ -98,14 +98,14 @@ build-linux:
 	cross build --release --target x86_64-unknown-linux-musl
 
 # === Deploy ===
-# Default deploy target is discovered via AWS (tag Name=trading-bot).
-# Override with `SERVER=ubuntu@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x`.
-SERVER ?= $(shell ./scripts/aws_find_server.sh)
-SSH_KEY ?= ~/git_projects/trading/trading-bot.pem
+# Default deploy target is discovered via scripts/find_server.sh (reads deploy/.server-info).
+# Override with `SERVER=ksonny@x.x.x.x` or `TRADING_SERVER_IP=x.x.x.x`.
+SERVER ?= $(shell ./scripts/find_server.sh)
+SSH_KEY ?=
 REMOTE_DIR ?= /opt/evaluator
 DB = $(REMOTE_DIR)/data/evaluator.db
-SSH = ssh -i $(SSH_KEY)
-SCP = scp -i $(SSH_KEY)
+SSH = ssh $(if $(SSH_KEY),-i $(SSH_KEY)) -o StrictHostKeyChecking=no
+SCP = scp $(if $(SSH_KEY),-i $(SSH_KEY)) -o StrictHostKeyChecking=no
 DB_CMD = $(SSH) $(SERVER) 'sqlite3 $(DB)'
 
 deploy: test build-linux

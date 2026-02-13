@@ -1,0 +1,4 @@
+# Server connection info
+# Edit these or set environment variables before running deploy.sh
+SERVER_IP=172.23.229.176
+SSH_USER=ksonny
