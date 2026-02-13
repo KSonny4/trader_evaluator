@@ -1,7 +1,6 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-#[allow(dead_code)] // Used by tests now, wired into scheduler in Task 21
 #[derive(Debug, Clone)]
 pub struct WalletFeatures {
     pub proxy_wallet: String,
@@ -28,6 +27,8 @@ pub struct WalletFeatures {
     /// Dominant domain (wallet's lane) — e.g. Sports, Politics, Crypto.
     pub top_domain: Option<String>,
     pub top_domain_ratio: f64,
+    /// Number of markets where total FIFO-paired PnL > 0.
+    pub profitable_markets: u32,
 }
 
 /// Paired round-trip stats: wins, losses, and hold durations (seconds) for each closed position.
@@ -37,6 +38,8 @@ struct PairedStats {
     hold_seconds: Vec<f64>,
     /// (timestamp of close, pnl) for daily series
     closed_pnls: Vec<(i64, f64)>,
+    /// Number of markets where total paired PnL > 0
+    profitable_markets: u32,
 }
 
 /// Pair BUY and SELL trades within each condition_id (FIFO). Compute win/loss from actual PnL,
@@ -88,8 +91,10 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         }
     }
 
+    let mut profitable_markets = 0u32;
     for (_cid, (buys, sells)) in by_market {
         let n = buys.len().min(sells.len());
+        let mut market_pnl = 0.0f64;
         for i in 0..n {
             let (buy_size, buy_price, buy_ts) = buys[i];
             let (sell_size, sell_price, sell_ts) = sells[i];
@@ -98,6 +103,7 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
                 continue;
             }
             let pnl = (sell_price - buy_price) * size;
+            market_pnl += pnl;
             if pnl > 0.0 {
                 wins += 1;
             } else {
@@ -106,6 +112,9 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
             hold_seconds.push((sell_ts - buy_ts) as f64);
             closed_pnls.push((sell_ts, pnl));
         }
+        if market_pnl > 0.0 {
+            profitable_markets += 1;
+        }
     }
 
     Ok(PairedStats {
@@ -113,6 +122,7 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         losses,
         hold_seconds,
         closed_pnls,
+        profitable_markets,
     })
 }
 
@@ -184,48 +194,6 @@ fn drawdown_and_sharpe_from_daily_pnl(closed_pnls: &[(i64, f64)]) -> Result<(f64
     Ok((max_drawdown_pct, sharpe_ratio))
 }
 
-/// Prefer paper PnL (our copy) when settled paper trades exist; otherwise fallback to positions_snapshots.
-fn total_pnl_from_paper_or_positions(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> f64 {
-    let paper_pnl: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(pnl), 0.0) FROM paper_trades
-             WHERE proxy_wallet = ?1 AND status != 'open'
-             AND created_at >= datetime(?2, 'unixepoch')",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
-
-    let has_settled_paper_trades: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM paper_trades
-             WHERE proxy_wallet = ?1 AND status != 'open'
-             AND created_at >= datetime(?2, 'unixepoch'))",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if has_settled_paper_trades {
-        paper_pnl
-    } else {
-        conn.query_row(
-            "SELECT COALESCE(SUM(cash_pnl), 0.0) FROM positions_snapshots
-             WHERE proxy_wallet = ?1 AND snapshot_at >= datetime(?2, 'unixepoch')
-             AND (proxy_wallet, condition_id, snapshot_at) IN (
-               SELECT proxy_wallet, condition_id, MAX(snapshot_at)
-               FROM positions_snapshots
-               WHERE proxy_wallet = ?1 AND snapshot_at >= datetime(?2, 'unixepoch')
-               GROUP BY proxy_wallet, condition_id
-             )",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0)
-    }
-}
-
-#[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn compute_wallet_features(
     conn: &Connection,
     proxy_wallet: &str,
@@ -260,7 +228,7 @@ pub fn compute_wallet_features(
         )
         .unwrap_or(0.0);
 
-    let total_pnl = total_pnl_from_paper_or_positions(conn, proxy_wallet, cutoff);
+    let total_pnl: f64 = paired.closed_pnls.iter().map(|(_, pnl)| pnl).sum();
 
     let weeks = f64::from(window_days) / 7.0;
     let trades_per_week = if weeks > 0.0 {
@@ -285,11 +253,17 @@ pub fn compute_wallet_features(
     // Max drawdown and Sharpe from daily PnL series (built from closed positions).
     let (max_drawdown_pct, sharpe_ratio) = drawdown_and_sharpe_from_daily_pnl(&paired.closed_pnls)?;
 
-    // Active positions: count of currently open paper_positions
+    // Active positions: count of markets with size > 0 in latest positions_snapshots
     let active_positions: u32 = conn
         .query_row(
-            "SELECT COUNT(DISTINCT condition_id) FROM paper_positions
-             WHERE proxy_wallet = ?1",
+            "SELECT COUNT(DISTINCT condition_id) FROM positions_snapshots
+             WHERE proxy_wallet = ?1
+             AND (proxy_wallet, condition_id, snapshot_at) IN (
+               SELECT proxy_wallet, condition_id, MAX(snapshot_at)
+               FROM positions_snapshots WHERE proxy_wallet = ?1
+               GROUP BY proxy_wallet, condition_id
+             )
+             AND size > 0",
             [proxy_wallet],
             |row| row.get(0),
         )
@@ -464,10 +438,10 @@ pub fn compute_wallet_features(
         burstiness_top_1h_ratio,
         top_domain,
         top_domain_ratio,
+        profitable_markets: paired.profitable_markets,
     })
 }
 
-#[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn save_wallet_features(
     conn: &Connection,
     features: &WalletFeatures,
@@ -479,8 +453,8 @@ pub fn save_wallet_features(
           total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct,
           trades_per_week, trades_per_day, sharpe_ratio, active_positions, concentration_ratio,
           avg_trade_size_usdc, size_cv, buy_sell_balance, mid_fill_ratio, extreme_price_ratio,
-          burstiness_top_1h_ratio, top_domain, top_domain_ratio)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+          burstiness_top_1h_ratio, top_domain, top_domain_ratio, profitable_markets)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         rusqlite::params![
             features.proxy_wallet,
             feature_date,
@@ -506,6 +480,7 @@ pub fn save_wallet_features(
             features.burstiness_top_1h_ratio,
             features.top_domain,
             features.top_domain_ratio,
+            features.profitable_markets,
         ],
     )?;
     Ok(())
@@ -599,6 +574,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.5,
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.8,
+            profitable_markets: 4,
         };
 
         save_wallet_features(&db.conn, &features, "2026-02-08").unwrap();

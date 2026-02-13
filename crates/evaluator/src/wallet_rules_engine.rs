@@ -1,4 +1,4 @@
-use crate::wallet_features::WalletFeatures;
+use crate::wallet_features::{compute_wallet_features, WalletFeatures};
 use anyhow::Result;
 use common::config::WalletRules;
 use rusqlite::{Connection, OptionalExtension};
@@ -89,65 +89,39 @@ pub fn evaluate_paper(
     proxy_wallet: &str,
     cfg: &WalletRules,
 ) -> Result<WalletRuleDecision> {
-    let window = format!("-{} days", cfg.paper_window_days);
-    let pnl_values: Vec<f64> = conn
-        .prepare(
-            "SELECT COALESCE(pnl, 0.0) FROM paper_trades
-             WHERE proxy_wallet = ?1
-               AND status != 'open'
-               AND created_at >= datetime('now', ?2)
-             ORDER BY created_at ASC",
-        )?
-        .query_map(rusqlite::params![proxy_wallet, window], |row| row.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let now = chrono::Utc::now().timestamp();
+    let features = compute_wallet_features(conn, proxy_wallet, cfg.paper_window_days, now)?;
 
-    if pnl_values.len() < cfg.required_paper_trades {
+    let total_closed = features.win_count + features.loss_count;
+    if (total_closed as usize) < cfg.required_paper_trades {
         return Ok(WalletRuleDecision {
             allow: false,
-            reason: "not_enough_paper_trades".to_string(),
+            reason: "not_enough_closed_trades".to_string(),
         });
     }
 
-    let avg_profit = mean(&pnl_values);
-    if avg_profit < cfg.min_paper_profit_per_trade {
+    let avg_pnl = if total_closed > 0 {
+        features.total_pnl / f64::from(total_closed)
+    } else {
+        0.0
+    };
+    if avg_pnl < cfg.min_paper_profit_per_trade {
         return Ok(WalletRuleDecision {
             allow: false,
-            reason: "paper_profit_too_low".to_string(),
+            reason: "onchain_profit_too_low".to_string(),
         });
     }
 
-    let max_dd = max_drawdown_from_pnl(&pnl_values);
-    if max_dd > cfg.max_paper_drawdown {
+    if features.max_drawdown_pct / 100.0 > cfg.max_paper_drawdown {
         return Ok(WalletRuleDecision {
             allow: false,
-            reason: "paper_drawdown_too_high".to_string(),
-        });
-    }
-
-    let slippage_bps: Vec<f64> = conn
-        .prepare(
-            "SELECT their_entry_price, slippage_cents
-             FROM follower_slippage
-             WHERE proxy_wallet = ?1
-               AND created_at >= datetime('now', ?2)",
-        )?
-        .query_map(rusqlite::params![proxy_wallet, window], |row| {
-            let price: f64 = row.get(0)?;
-            let slippage_cents: f64 = row.get(1)?;
-            Ok(slippage_cents_to_bps(price, slippage_cents))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    if !slippage_bps.is_empty() && mean(&slippage_bps) > cfg.max_paper_slippage_bps {
-        return Ok(WalletRuleDecision {
-            allow: false,
-            reason: "paper_slippage_too_high".to_string(),
+            reason: "onchain_drawdown_too_high".to_string(),
         });
     }
 
     Ok(WalletRuleDecision {
         allow: true,
-        reason: "paper_validation_passed".to_string(),
+        reason: "onchain_validation_passed".to_string(),
     })
 }
 
@@ -164,6 +138,7 @@ pub fn evaluate_live(
         });
     }
 
+    // Inactivity check (reads trades_raw — on-chain data)
     let last_seen: Option<i64> = conn
         .query_row(
             "SELECT MAX(timestamp) FROM trades_raw WHERE proxy_wallet = ?1",
@@ -186,42 +161,16 @@ pub fn evaluate_live(
         });
     }
 
-    let pnl_values: Vec<f64> = conn
-        .prepare(
-            "SELECT COALESCE(pnl, 0.0) FROM paper_trades
-             WHERE proxy_wallet = ?1 AND status != 'open'
-             ORDER BY created_at ASC",
-        )?
-        .query_map(rusqlite::params![proxy_wallet], |row| row.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if !pnl_values.is_empty() && max_drawdown_from_pnl(&pnl_values) > cfg.live_max_drawdown {
+    // Drawdown check from on-chain features (FIFO paired trades)
+    let features = compute_wallet_features(conn, proxy_wallet, 90, now_epoch)?;
+    if features.max_drawdown_pct / 100.0 > cfg.live_max_drawdown {
         return Ok(WalletRuleDecision {
             allow: false,
             reason: "live_drawdown_breach".to_string(),
         });
     }
 
-    let recent_slippage_bps: Vec<f64> = conn
-        .prepare(
-            "SELECT their_entry_price, slippage_cents
-             FROM follower_slippage
-             WHERE proxy_wallet = ?1
-             ORDER BY created_at DESC
-             LIMIT 30",
-        )?
-        .query_map(rusqlite::params![proxy_wallet], |row| {
-            let price: f64 = row.get(0)?;
-            let slippage_cents: f64 = row.get(1)?;
-            Ok(slippage_cents_to_bps(price, slippage_cents))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if !recent_slippage_bps.is_empty() && mean(&recent_slippage_bps) > cfg.live_slippage_bps_spike {
-        return Ok(WalletRuleDecision {
-            allow: false,
-            reason: "live_slippage_spike".to_string(),
-        });
-    }
-
+    // Style drift check (reads wallet_features_daily)
     let baseline_json: Option<String> = conn
         .query_row(
             "SELECT baseline_style_json FROM wallet_rules_state WHERE proxy_wallet = ?1",
@@ -365,36 +314,7 @@ pub fn style_drift_score(base: &StyleSnapshot, cur: &StyleSnapshot) -> f64 {
     0.30 * tpd + 0.20 * mkts + 0.25 * burst + 0.15 * bal + 0.10 * theme
 }
 
-fn max_drawdown_from_pnl(pnl_values: &[f64]) -> f64 {
-    if pnl_values.is_empty() {
-        return 0.0;
-    }
-    let mut equity = 1.0;
-    let mut peak = 1.0;
-    let mut max_dd = 0.0;
-    for pnl in pnl_values {
-        equity = (equity + pnl).max(0.0);
-        if equity > peak {
-            peak = equity;
-        }
-        if peak > 0.0 {
-            let dd = (peak - equity) / peak;
-            if dd > max_dd {
-                max_dd = dd;
-            }
-        }
-    }
-    max_dd
-}
-
-fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        0.0
-    } else {
-        xs.iter().sum::<f64>() / xs.len() as f64
-    }
-}
-
+#[cfg(test)]
 fn slippage_cents_to_bps(price: f64, slippage_cents: f64) -> f64 {
     let denom = price.abs().max(1e-6);
     let slippage_prob = slippage_cents.abs() / 100.0;
@@ -437,6 +357,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.1,
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.7,
+            profitable_markets: 12,
         }
     }
 
@@ -465,21 +386,33 @@ mod tests {
         assert!(decision.allow);
     }
     #[test]
-    fn test_paper_trading_to_approved_on_paper_pass() {
+    fn test_paper_trading_to_approved_on_onchain_pass() {
         let db = Database::open(":memory:").unwrap();
         db.run_migrations().unwrap();
-        for i in 0..40 {
+        let now = chrono::Utc::now().timestamp();
+        // Insert 35 BUY/SELL paired round-trips across markets (>= required_paper_trades=30)
+        // All within paper_window_days=14 days
+        for i in 0..35 {
+            let cid = format!("m{i}");
+            let offset = i64::from(i * 1000);
             db.conn
                 .execute(
-                    "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at)
-                     VALUES ('0xw', 'mirror', 'm1', 'BUY', 10.0, 0.5, 'settled_win', 0.01, datetime('now', ?1))",
-                    rusqlite::params![format!("-{} hour", i)],
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES ('0xw', ?1, 'BUY', 10.0, 0.50, ?2)",
+                    rusqlite::params![cid, now - 86400 * 10 + offset],
+                )
+                .unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES ('0xw', ?1, 'SELL', 10.0, 0.51, ?2)",
+                    rusqlite::params![cid, now - 86400 * 5 + offset],
                 )
                 .unwrap();
         }
         let cfg = default_rules();
         let decision = evaluate_paper(&db.conn, "0xw", &cfg).unwrap();
-        assert!(decision.allow);
+        assert!(decision.allow, "reason: {}", decision.reason);
     }
     #[test]
     fn test_approved_to_stopped_on_live_fail() {

@@ -11,11 +11,12 @@ use crate::persona_classification::{
 };
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_features::compute_wallet_features;
+use crate::wallet_features::save_wallet_features;
 use crate::wallet_rules_engine::{
     evaluate_discovery, evaluate_live, evaluate_paper, read_state, record_event,
     style_snapshot_from_features, write_state, WalletRuleState,
 };
-use crate::wallet_scoring::{compute_wscore, WScoreWeights, WalletScoreInput};
+use crate::wallet_scoring::{compute_wscore, score_input_from_features, WScoreWeights};
 
 use super::fetcher_traits::*;
 use super::tracker::JobTracker;
@@ -191,40 +192,39 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
 
     let tracker = JobTracker::start(db, "wallet_scoring").await?;
 
-    // Quality gate: Check for wallets with at least 5 settled trades
-    let min_settled_trades = 5_i64;
-    let wallets_ready_to_score: i64 = db
+    let min_trades = i64::from(cfg.wallet_scoring.min_trades_for_score);
+    let wallets_ready: i64 = db
         .call_named("wallet_scoring.count_ready_wallets", move |conn| {
             Ok(conn.query_row(
-                "
-                SELECT COUNT(DISTINCT proxy_wallet)
-                FROM (
-                    SELECT proxy_wallet, COUNT(*) as settled_count
-                    FROM paper_trades
-                    WHERE status != 'open'
-                    GROUP BY proxy_wallet
-                    HAVING COUNT(*) >= ?1
-                )
-                ",
-                [min_settled_trades],
+                "SELECT COUNT(DISTINCT proxy_wallet)
+                 FROM (
+                     SELECT proxy_wallet, COUNT(*) as trade_count
+                     FROM trades_raw
+                     GROUP BY proxy_wallet
+                     HAVING COUNT(*) >= ?1
+                 )",
+                [min_trades],
                 |row| row.get(0),
             )?)
         })
         .await?;
 
-    if wallets_ready_to_score == 0 {
-        tracing::warn!("wallet_scoring: skipping - no wallets with sufficient settled trades");
+    if wallets_ready == 0 {
+        tracing::warn!(
+            "wallet_scoring: skipping - no wallets with sufficient trades in trades_raw"
+        );
         tracker
             .success(Some(serde_json::json!({
                 "inserted": 0,
-                "skipped": "insufficient settled trades",
-                "min_settled_trades_required": min_settled_trades
+                "skipped": "insufficient trades_raw",
+                "min_trades_required": min_trades
             })))
             .await?;
         return Ok(0);
     }
 
     let today = chrono::Utc::now().date_naive().to_string();
+    let now_epoch = chrono::Utc::now().timestamp();
 
     let w = WScoreWeights {
         edge_weight: cfg.wallet_scoring.edge_weight,
@@ -235,137 +235,97 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
     };
 
     let windows_days = cfg.wallet_scoring.windows_days.clone();
-    let bankroll = cfg.risk.paper_bankroll_usdc;
     let trust_30_90_multiplier = cfg.personas.trust_30_90_multiplier;
     let obscurity_bonus_multiplier = cfg.personas.obscurity_bonus_multiplier;
+    let min_trades_u32 = cfg.wallet_scoring.min_trades_for_score;
 
-    // Batch read: fetch all (wallet, window) PnL values in one db.call().
-    let windows_c = windows_days.clone();
-    let pnl_data: Vec<(String, String, i64, i64, f64, u32, u32)> = db
-        .call_named("wallet_scoring.read_pnl_batch", move |conn| {
-            let mut stmt = conn.prepare(
-                "
-                SELECT proxy_wallet,
-                       discovered_from,
-                       CAST((julianday('now') - julianday(discovered_at)) AS INTEGER) AS age_days
-                FROM wallets
-                WHERE is_active = 1
-                ORDER BY discovered_at DESC
-                LIMIT 500
-                ",
-            )?;
-            let wallets: Vec<(String, String, i64)> = stmt
+    // Compute features, scores, and persist — all in one db.call() to avoid overhead.
+    let today_c = today.clone();
+    let (inserted, features_saved): (u64, u64) = db
+        .call_named("wallet_scoring.compute_and_upsert", move |conn| {
+            let wallets: Vec<(String, String, i64)> = conn
+                .prepare(
+                    "SELECT proxy_wallet,
+                            discovered_from,
+                            CAST((julianday('now') - julianday(discovered_at)) AS INTEGER) AS age_days
+                     FROM wallets
+                     WHERE is_active = 1
+                     ORDER BY discovered_at DESC
+                     LIMIT 500",
+                )?
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            let mut results = Vec::new();
-            let mut pnl_stmt = conn.prepare(
-                "SELECT SUM(pnl) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
-            )?;
-            let mut total_markets_stmt = conn.prepare(
-                "SELECT COUNT(DISTINCT condition_id) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)",
-            )?;
-            let mut profitable_markets_stmt = conn.prepare(
-                "
-                SELECT COUNT(*) FROM (
-                    SELECT condition_id, SUM(pnl) AS pnl_sum
-                    FROM paper_trades
-                    WHERE proxy_wallet = ?1 AND status != 'open' AND created_at >= datetime('now', ?2)
-                    GROUP BY condition_id
-                    HAVING pnl_sum > 0
-                )
-                ",
-            )?;
+            let mut score_rows = Vec::new();
+            let mut feat_count = 0_u64;
 
             for (wallet, discovered_from, age_days) in &wallets {
-                for &wd in &windows_c {
-                    let window = format!("-{wd} days");
-                    let pnl: Option<f64> = pnl_stmt.query_row(
-                        rusqlite::params![wallet, window],
-                        |row| row.get(0),
-                    )?;
-                    let total_markets: u32 = total_markets_stmt.query_row(
-                        rusqlite::params![wallet, window],
-                        |row| row.get(0),
-                    )?;
-                    let profitable_markets: u32 = profitable_markets_stmt.query_row(
-                        rusqlite::params![wallet, window],
-                        |row| row.get(0),
-                    )?;
-                    results.push((
-                        wallet.clone(),
-                        discovered_from.clone(),
-                        *age_days,
-                        i64::from(wd),
-                        pnl.unwrap_or(0.0),
-                        profitable_markets,
-                        total_markets,
-                    ));
+                for &wd in &windows_days {
+                    let features = match compute_wallet_features(conn, wallet, wd, now_epoch) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!(
+                                proxy_wallet = %wallet, window = wd,
+                                error = %e, "wallet_scoring: skipping feature computation"
+                            );
+                            continue;
+                        }
+                    };
+
+                    if features.trade_count < min_trades_u32 {
+                        continue;
+                    }
+
+                    // Persist features
+                    if let Err(e) = save_wallet_features(conn, &features, &today_c) {
+                        tracing::warn!(
+                            proxy_wallet = %wallet, error = %e,
+                            "wallet_scoring: failed to save features"
+                        );
+                    } else {
+                        feat_count += 1;
+                    }
+
+                    let is_leaderboard = discovered_from == "LEADERBOARD";
+                    let input = score_input_from_features(
+                        &features,
+                        (*age_days).max(0) as u32,
+                        is_leaderboard,
+                    );
+                    let wscore = compute_wscore(
+                        &input, &w,
+                        trust_30_90_multiplier,
+                        obscurity_bonus_multiplier,
+                    );
+                    score_rows.push(ScoreRow {
+                        proxy_wallet: wallet.clone(),
+                        window_days: i64::from(wd),
+                        wscore,
+                        edge_score: crate::wallet_scoring::edge_score(input.roi_pct),
+                        consistency_score: crate::wallet_scoring::consistency_score(input.daily_return_stdev_pct),
+                        roi_pct: input.roi_pct,
+                    });
                 }
             }
-            Ok(results)
-        })
-        .await?;
 
-    // Compute scores in Rust (no DB needed).
-    let mut score_rows = Vec::with_capacity(pnl_data.len());
-    for (wallet, discovered_from, age_days, window_days, pnl, profitable_markets, total_markets) in
-        &pnl_data
-    {
-        let roi_pct = if bankroll > 0.0 {
-            100.0 * pnl / bankroll
-        } else {
-            0.0
-        };
-        let input = WalletScoreInput {
-            paper_roi_pct: roi_pct,
-            daily_return_stdev_pct: 0.0,
-            hit_rate: 0.50, // TODO(Task 38): calculate real hit rate from DB
-            profitable_markets: *profitable_markets,
-            total_markets: *total_markets,
-            avg_post_entry_drift_cents: 0.0, // TODO(Task 38): compute from post-entry price drift metrics
-            noise_trade_ratio: 0.0, // TODO(Task 38): compute based on persona/exclusion heuristics
-            wallet_age_days: (*age_days).max(0) as u32,
-            is_public_leaderboard_top_500: discovered_from == "LEADERBOARD",
-        };
-        let wscore = compute_wscore(
-            &input,
-            &w,
-            trust_30_90_multiplier,
-            obscurity_bonus_multiplier,
-        );
-        score_rows.push(ScoreRow {
-            proxy_wallet: wallet.clone(),
-            window_days: *window_days,
-            wscore,
-            edge_score: input.paper_roi_pct.max(0.0) / 20.0,
-            consistency_score: 1.0,
-            roi_pct,
-        });
-    }
-
-    // Batch write: upsert all scores in one db.call() with a transaction.
-    let inserted: u64 = db
-        .call_named("wallet_scoring.upsert_scores_batch", move |conn| {
+            // Upsert scores in a transaction
             let tx = conn.transaction()?;
             let mut ins = 0_u64;
             for r in &score_rows {
                 tx.execute(
-                    "
-                    INSERT INTO wallet_scores_daily
-                        (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score, paper_roi_pct, recommended_follow_mode)
-                    VALUES
-                        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                    ON CONFLICT(proxy_wallet, score_date, window_days) DO UPDATE SET
+                    "INSERT INTO wallet_scores_daily
+                        (proxy_wallet, score_date, window_days, wscore, edge_score,
+                         consistency_score, paper_roi_pct, recommended_follow_mode)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(proxy_wallet, score_date, window_days) DO UPDATE SET
                         wscore = excluded.wscore,
                         edge_score = excluded.edge_score,
                         consistency_score = excluded.consistency_score,
                         paper_roi_pct = excluded.paper_roi_pct,
-                        recommended_follow_mode = excluded.recommended_follow_mode
-                    ",
+                        recommended_follow_mode = excluded.recommended_follow_mode",
                     rusqlite::params![
                         r.proxy_wallet,
-                        today,
+                        today_c,
                         r.window_days,
                         r.wscore,
                         r.edge_score,
@@ -377,12 +337,16 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
                 ins += 1;
             }
             tx.commit()?;
-            Ok(ins)
+            Ok((ins, feat_count))
         })
         .await?;
 
+    metrics::gauge!("evaluator_wallet_scoring_features_saved").set(features_saved as f64);
     tracker
-        .success(Some(serde_json::json!({"inserted": inserted})))
+        .success(Some(serde_json::json!({
+            "inserted": inserted,
+            "features_saved": features_saved
+        })))
         .await?;
     Ok(inserted)
 }
@@ -2083,22 +2047,25 @@ mod tests {
     async fn test_run_wallet_scoring_inserts_wallet_scores() {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
+        let now = chrono::Utc::now().timestamp();
 
-        db.call(|conn| {
+        db.call(move |conn| {
             conn.execute(
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xw"],
             )?;
-            // Create 5+ settled trades to pass quality gate
+            // Create 12 trades in trades_raw (>= min_trades_for_score=10) with BUY/SELL pairs
             for i in 0..6 {
+                let cid = format!("cond{i}");
                 conn.execute(
-                    "
-                    INSERT INTO paper_trades
-                        (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
-                    VALUES
-                        (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 10.0, datetime('now'), datetime('now'))
-                    ",
-                    rusqlite::params!["0xw", format!("cond{i}")],
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, ?2, 'BUY', 25.0, 0.50, ?3)",
+                    rusqlite::params!["0xw", cid, now - 86400 * (i + 2)],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, ?2, 'SELL', 25.0, 0.60, ?3)",
+                    rusqlite::params!["0xw", cid, now - 86400 * (i + 1)],
                 )?;
             }
             Ok(())
@@ -2120,24 +2087,38 @@ mod tests {
             .await
             .unwrap();
         assert!(cnt > 0);
+
+        // Verify features were also persisted
+        let feat_cnt: i64 = db
+            .call(|conn| {
+                Ok(
+                    conn.query_row("SELECT COUNT(*) FROM wallet_features_daily", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(feat_cnt > 0);
     }
 
     #[tokio::test]
-    async fn test_wallet_scoring_skips_when_insufficient_settled_trades() {
+    async fn test_wallet_scoring_skips_when_insufficient_trades() {
         let cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
         let db = AsyncDb::open(":memory:").await.unwrap();
+        let now = chrono::Utc::now().timestamp();
 
-        // Create wallet with only 3 settled trades (need 5+)
-        db.call(|conn| {
+        // Create wallet with only 3 trades in trades_raw (need min_trades_for_score=10)
+        db.call(move |conn| {
             conn.execute(
                 "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
                 rusqlite::params!["0xfew"],
             )?;
             for i in 0..3 {
                 conn.execute(
-                    "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl, created_at, settled_at)
-                     VALUES (?1, 'mirror', ?2, 'BUY', 25.0, 0.5, 'settled_win', 10.0, datetime('now'), datetime('now'))",
-                    rusqlite::params!["0xfew", format!("cond{i}")],
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, ?2, 'BUY', 25.0, 0.5, ?3)",
+                    rusqlite::params!["0xfew", format!("cond{i}"), now - 86400 * (i + 1)],
                 )?;
             }
             Ok(())
@@ -2145,11 +2126,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Run wallet_scoring - should skip because insufficient settled trades
+        // Run wallet_scoring - should skip because insufficient trades in trades_raw
         let inserted = run_wallet_scoring_once(&db, &cfg).await.unwrap();
         assert_eq!(
             inserted, 0,
-            "should score 0 wallets when insufficient settled trades"
+            "should score 0 wallets when insufficient trades"
         );
 
         // Verify metadata shows skip reason
