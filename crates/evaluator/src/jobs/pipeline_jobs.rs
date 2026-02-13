@@ -11,7 +11,7 @@ use crate::persona_classification::{
     classify_wallet, stage1_filter, stage1_known_bot_check, PersonaConfig, Stage1Config,
 };
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
-use crate::wallet_features::compute_wallet_features;
+use crate::wallet_features::{compute_wallet_features, WalletFeatures};
 use crate::wallet_rules_engine::{
     evaluate_discovery, evaluate_live, evaluate_paper, read_state, record_event,
     style_snapshot_from_features, write_state, WalletRuleState,
@@ -1171,6 +1171,64 @@ fn fetch_wallet_chunk(
     .map_err(Into::into)
 }
 
+/// Compute wallet features in parallel using tokio tasks.
+/// Splits wallets into mini-batches and spawns a task for each batch.
+/// Each task reads trades_raw and computes features independently.
+/// Returns all results (wallet, age_days, Result<WalletFeatures>).
+#[allow(dead_code)] // Wired into process_wallet_chunk in Task 3
+async fn compute_features_parallel(
+    db: &AsyncDb,
+    wallets: Vec<(String, u32, u32, u32)>,
+    window_days: u32,
+    now_epoch: i64,
+    parallel_tasks: usize,
+) -> Vec<(String, u32, Result<WalletFeatures>)> {
+    let total_wallets = wallets.len();
+
+    // Edge case: if fewer wallets than tasks, use one task per wallet
+    let num_tasks = parallel_tasks.min(total_wallets).max(1);
+    let batch_size = total_wallets.div_ceil(num_tasks);
+
+    let mut tasks = Vec::new();
+
+    for chunk in wallets.chunks(batch_size) {
+        let chunk = chunk.to_vec();
+        let db = db.clone();
+
+        let task = tokio::spawn(async move {
+            let mut results = Vec::new();
+
+            for (proxy_wallet, age_days, _total_trades, _days_since_last) in chunk {
+                let wallet = proxy_wallet.clone();
+                let result = db
+                    .call_named("persona.compute_features", move |conn| {
+                        compute_wallet_features(conn, &wallet, window_days, now_epoch)
+                    })
+                    .await;
+
+                results.push((proxy_wallet, age_days, result));
+            }
+
+            results
+        });
+
+        tasks.push(task);
+    }
+
+    // Await all tasks and collect results
+    let mut all_results = Vec::new();
+    for task in tasks {
+        match task.await {
+            Ok(batch_results) => all_results.extend(batch_results),
+            Err(e) => {
+                tracing::error!(error = %e, "compute_features_parallel: task failed");
+            }
+        }
+    }
+
+    all_results
+}
+
 /// Process a chunk of wallets (Stage 1 + Stage 2)
 /// Returns (processed_count, stage1_no_trades, stage1_other, stage2_excluded, suitable)
 fn process_wallet_chunk(
@@ -1317,7 +1375,9 @@ pub async fn run_persona_classification_once(db: &AsyncDb, cfg: &Config) -> Resu
         .await?;
 
     if ready_wallets == 0 {
-        tracing::warn!("persona_classification: skipping - no wallets with sufficient trade history");
+        tracing::warn!(
+            "persona_classification: skipping - no wallets with sufficient trade history"
+        );
         tracker
             .success(Some(serde_json::json!({
                 "classified": 0,
@@ -2584,7 +2644,10 @@ mod tests {
 
         // Run paper_tick - should skip because no active followable wallets
         let inserted = run_paper_tick_once(&db, &cfg).await.unwrap();
-        assert_eq!(inserted, 0, "should create 0 paper trades when no active followable wallets");
+        assert_eq!(
+            inserted, 0,
+            "should create 0 paper trades when no active followable wallets"
+        );
 
         // Verify metadata shows skip reason
         let metadata: Option<String> = db
@@ -2674,7 +2737,10 @@ mod tests {
 
         // Run wallet_scoring - should skip because insufficient settled trades
         let inserted = run_wallet_scoring_once(&db, &cfg).await.unwrap();
-        assert_eq!(inserted, 0, "should score 0 wallets when insufficient settled trades");
+        assert_eq!(
+            inserted, 0,
+            "should score 0 wallets when insufficient settled trades"
+        );
 
         // Verify metadata shows skip reason
         let metadata: Option<String> = db
@@ -3117,5 +3183,124 @@ mod tests {
             meta_json.get("skipped").is_some(),
             "metadata should indicate skipping"
         );
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_parallel_success() {
+        let _cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 24 wallets with trade history (3 batches of 8 tasks each)
+        for i in 0..24 {
+            let wallet = format!("0xwallet{i}");
+            db.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![wallet.clone()],
+                )?;
+                // Create 15 trades for each wallet spread over 30 days
+                for j in 0..15 {
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * (30 - (j * 2)),
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        // Fetch wallets
+        let wallets: Vec<(String, u32, u32, u32)> = db
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT w.proxy_wallet, 30 AS age_days, 15 AS total_trades, 0 AS days_since_last
+                     FROM wallets w ORDER BY w.proxy_wallet"
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(wallets.len(), 24);
+
+        // Call compute_features_parallel
+        let results = compute_features_parallel(&db, wallets, 180, now, 8).await;
+
+        assert_eq!(results.len(), 24, "should return all 24 wallets");
+
+        // Check all succeeded
+        let successful = results.iter().filter(|(_, _, r)| r.is_ok()).count();
+        assert_eq!(successful, 24, "all wallets should have features computed");
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_parallel_respects_task_count() {
+        let _cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Create 20 wallets
+        for i in 0..20 {
+            let wallet = format!("0xwallet{i}");
+            db.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![wallet.clone()],
+                )?;
+                for j in 0..10 {
+                    conn.execute(
+                        "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                         VALUES (?1, 'm1', 'BUY', 1.0, 0.5, ?2, ?3, '{}')",
+                        rusqlite::params![
+                            wallet.clone(),
+                            now - 86400 * (j + 1),
+                            format!("0xtx{i}_{j}")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        let wallets: Vec<(String, u32, u32, u32)> = db
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT w.proxy_wallet, 30 AS age_days, 10 AS total_trades, 0 AS days_since_last
+                     FROM wallets w ORDER BY w.proxy_wallet"
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        // Test with 4 tasks (should create 5-wallet batches)
+        let results = compute_features_parallel(&db, wallets.clone(), 180, now, 4).await;
+        assert_eq!(results.len(), 20);
+
+        // Test with 10 tasks (should create 2-wallet batches)
+        let results = compute_features_parallel(&db, wallets, 180, now, 10).await;
+        assert_eq!(results.len(), 20);
     }
 }
