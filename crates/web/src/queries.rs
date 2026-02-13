@@ -220,34 +220,9 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
         let all_wallets: i64 = conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
         let suitable_personas: i64 =
             conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
-        // Evaluated = active, passed Stage 1, classified, and oldest trade >= 45 days ago (matches stage1_min_wallet_age_days).
-        // Use a single CTE for wallet age to avoid O(n) correlated subqueries over trades_raw.
-        let personas_evaluated: i64 = conn.query_row(
-            "
-            WITH wallet_age_days AS (
-              SELECT proxy_wallet,
-                     CAST((julianday('now') - julianday(datetime(MIN(timestamp), 'unixepoch'))) AS INTEGER) AS age_days
-              FROM trades_raw
-              GROUP BY proxy_wallet
-            )
-            SELECT COUNT(*)
-            FROM wallets w
-            LEFT JOIN wallet_age_days wad ON wad.proxy_wallet = w.proxy_wallet
-            WHERE w.is_active = 1
-              AND NOT EXISTS (
-                SELECT 1 FROM wallet_exclusions e
-                WHERE e.proxy_wallet = w.proxy_wallet AND e.reason LIKE 'STAGE1_%'
-              )
-              AND (
-                EXISTS (SELECT 1 FROM wallet_personas p WHERE p.proxy_wallet = w.proxy_wallet)
-                OR EXISTS (SELECT 1 FROM wallet_exclusions e2
-                           WHERE e2.proxy_wallet = w.proxy_wallet AND e2.reason NOT LIKE 'STAGE1_%')
-              )
-              AND COALESCE(wad.age_days, 0) >= 45
-            ",
-            [],
-            |r| r.get(0),
-        )?;
+        // Evaluated = active, passed Stage 1, classified, and oldest trade >= 45 days ago.
+        // Uses shared helper to avoid duplicate CTE scans.
+        let personas_evaluated = personas_evaluated_count(conn)?;
         let actively_paper_traded: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT proxy_wallet) FROM paper_trades",
             [],
@@ -283,12 +258,10 @@ pub fn unified_funnel_counts(conn: &Connection) -> Result<UnifiedFunnelCounts> {
     })
 }
 
-/// Returns (suitable_count, evaluated_count) for the suitable personas section.
-/// Evaluated = wallets whose oldest trade is at least 45 days ago (matches stage1_min_wallet_age_days).
-/// Uses a single CTE for wallet age to avoid O(n) correlated subqueries over trades_raw.
-pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
-    let suitable: i64 = conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
-    let evaluated: i64 = conn.query_row(
+/// Helper: Count personas evaluated (>= 45 days wallet age).
+/// Shared by unified_funnel_counts and suitable_personas_counts to avoid duplicate CTE scans.
+fn personas_evaluated_count(conn: &Connection) -> Result<i64> {
+    let count: i64 = conn.query_row(
         "
         WITH wallet_age_days AS (
           SELECT proxy_wallet,
@@ -314,6 +287,14 @@ pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
         [],
         |r| r.get(0),
     )?;
+    Ok(count)
+}
+
+/// Returns (suitable_count, evaluated_count) for the suitable personas section.
+/// Evaluated = wallets whose oldest trade is at least 45 days ago (matches stage1_min_wallet_age_days).
+pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
+    let suitable: i64 = conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
+    let evaluated = personas_evaluated_count(conn)?;
     Ok((suitable, evaluated))
 }
 
@@ -396,14 +377,24 @@ pub fn follow_worthy_rankings(conn: &Connection, limit: Option<usize>) -> Result
             SELECT ws.proxy_wallet, ws.wscore,
                     COALESCE(ws.edge_score, 0), COALESCE(ws.consistency_score, 0),
                     COALESCE(ws.recommended_follow_mode, 'mirror'),
-                    (SELECT COUNT(*) FROM trades_raw t WHERE t.proxy_wallet = ws.proxy_wallet),
-                    COALESCE((SELECT SUM(pnl) FROM paper_trades pt
-                              WHERE pt.proxy_wallet = ws.proxy_wallet AND pt.status != 'open'), 0)
+                    COALESCE(tc.trade_count, 0),
+                    COALESCE(pnl.total_pnl, 0)
             FROM wallet_scores_daily ws
             JOIN wallet_scores_daily ws30
               ON ws30.proxy_wallet = ws.proxy_wallet
              AND ws30.score_date = ws.score_date
              AND ws30.window_days = 30
+            LEFT JOIN (
+              SELECT proxy_wallet, COUNT(*) as trade_count
+              FROM trades_raw
+              GROUP BY proxy_wallet
+            ) tc ON tc.proxy_wallet = ws.proxy_wallet
+            LEFT JOIN (
+              SELECT proxy_wallet, SUM(pnl) as total_pnl
+              FROM paper_trades
+              WHERE status != 'open'
+              GROUP BY proxy_wallet
+            ) pnl ON pnl.proxy_wallet = ws.proxy_wallet
             WHERE ws.score_date = (SELECT MAX(score_date) FROM wallet_scores_daily)
               AND ws.window_days = 7
               AND COALESCE(ws.paper_roi_pct, 0) > 5.0
@@ -1056,6 +1047,109 @@ fn wallet_closed_positions_count(conn: &Connection, proxy_wallet: &str) -> Resul
         |r| r.get(0),
     )?;
     Ok(n as usize)
+}
+
+/// Consolidated positions summary: both active and closed positions in a single query.
+struct PositionsSummary {
+    active_positions: Vec<WalletPositionRow>,
+    active_count: usize,
+    closed_positions: Vec<WalletPositionRow>,
+    closed_count: usize,
+}
+
+/// Fetch both active and closed positions in a single query using CTE.
+/// Replaces 4 separate queries (2 counts + 2 data queries) with 1.
+fn wallet_positions_summary(
+    conn: &Connection,
+    proxy_wallet: &str,
+    limit: u32,
+) -> Result<PositionsSummary> {
+    let limit = limit.min(100);
+    let sql = "
+        WITH position_base AS (
+          SELECT
+            tr.condition_id,
+            m.title,
+            tr.outcome,
+            SUM(CASE WHEN tr.side = 'BUY' THEN tr.size ELSE 0 END)
+              - SUM(CASE WHEN tr.side = 'SELL' THEN tr.size ELSE 0 END) AS net_shares,
+            CASE WHEN SUM(CASE WHEN tr.side = 'BUY' THEN tr.size ELSE 0 END) > 0
+              THEN SUM(CASE WHEN tr.side = 'BUY' THEN tr.size * tr.price ELSE 0 END)
+                   / SUM(CASE WHEN tr.side = 'BUY' THEN tr.size ELSE 0 END)
+              ELSE 0 END AS avg_entry_price,
+            SUM(CASE WHEN tr.side = 'BUY' THEN tr.size * tr.price ELSE 0 END) AS total_bet,
+            COUNT(*) AS trade_count,
+            m.event_slug,
+            m.slug,
+            MAX(tr.timestamp) AS last_trade_at
+          FROM trades_raw tr
+          LEFT JOIN markets m ON m.condition_id = tr.condition_id
+          WHERE tr.proxy_wallet = ?1
+          GROUP BY tr.condition_id, tr.outcome
+        )
+        SELECT condition_id, title, outcome, net_shares, avg_entry_price, total_bet, trade_count,
+               event_slug, slug,
+               CASE WHEN net_shares > 0.5 THEN 1 ELSE 0 END AS is_active
+        FROM position_base
+        ORDER BY last_trade_at DESC
+    ";
+
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([proxy_wallet], |r| {
+        Ok((
+            r.get::<_, String>(0)?,          // condition_id
+            r.get::<_, Option<String>>(1)?,  // title
+            r.get::<_, Option<String>>(2)?,  // outcome
+            r.get::<_, f64>(3)?,             // net_shares
+            r.get::<_, f64>(4)?,             // avg_entry_price
+            r.get::<_, f64>(5)?,             // total_bet
+            r.get::<_, i64>(6)?,             // trade_count
+            r.get::<_, Option<String>>(7)?,  // event_slug
+            r.get::<_, Option<String>>(8)?,  // slug
+            r.get::<_, i64>(9)?,             // is_active
+        ))
+    })?;
+
+    let mut active_positions = Vec::new();
+    let mut closed_positions = Vec::new();
+    let mut active_count = 0;
+    let mut closed_count = 0;
+
+    for row in rows {
+        let (condition_id, market_title, outcome, net_shares, avg_entry_price, total_bet,
+             trade_count, event_slug, slug, is_active) = row?;
+
+        let pm_url = polymarket_url(event_slug.as_deref(), slug.as_deref());
+        let position = WalletPositionRow {
+            condition_id,
+            market_title,
+            outcome,
+            shares_display: format_with_commas(net_shares),
+            avg_price_display: format_price_cents(avg_entry_price),
+            total_bet_display: format!("${total_bet:.2}"),
+            trade_count: trade_count as u32,
+            polymarket_url: pm_url,
+        };
+
+        if is_active == 1 {
+            active_count += 1;
+            if active_positions.len() < limit as usize {
+                active_positions.push(position);
+            }
+        } else {
+            closed_count += 1;
+            if closed_positions.len() < limit as usize {
+                closed_positions.push(position);
+            }
+        }
+    }
+
+    Ok(PositionsSummary {
+        active_count,
+        active_positions,
+        closed_count,
+        closed_positions,
+    })
 }
 
 /// Internal: query positions with a HAVING filter for active/closed split.
@@ -1780,10 +1874,12 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
 
         events.sort_by(|a, b| a.at.cmp(&b.at));
 
-        let (active_positions, total_active_positions_count) =
-            wallet_active_positions_page(conn, proxy_wallet, 0, 20)?;
-        let (closed_positions, total_closed_positions_count) =
-            wallet_closed_positions_page(conn, proxy_wallet, 0, 20)?;
+        // Consolidate position queries: fetch both active and closed in single query
+        let positions_summary = wallet_positions_summary(conn, proxy_wallet, 20)?;
+        let active_positions = positions_summary.active_positions;
+        let total_active_positions_count = positions_summary.active_count;
+        let closed_positions = positions_summary.closed_positions;
+        let total_closed_positions_count = positions_summary.closed_count;
 
         let (activities, total_activities_count) = wallet_activity_page(conn, proxy_wallet, 0, 20)?;
 
@@ -2863,5 +2959,220 @@ mod tests {
         assert_eq!(journey.score_history[0].score_date, "2026-02-13");
         assert_eq!(journey.score_history[1].score_date, "2026-02-12");
         assert_eq!(journey.score_history[0].wscore_display, "0.72");
+    }
+
+    /// Characterization test for position queries before consolidation optimization.
+    /// Tests active/closed position split and counts.
+    #[test]
+    fn test_wallet_positions_active_and_closed_split() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xpos', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title, event_slug, slug) VALUES ('0xm1', 'Market 1', 'event1', 'market1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO markets (condition_id, title, event_slug, slug) VALUES ('0xm2', 'Market 2', 'event2', 'market2')",
+            [],
+        )
+        .unwrap();
+
+        // Active position: BUY 100, SELL 40 = net 60 shares (> 0.5)
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xpos', '0xm1', 'BUY', 100.0, 0.50, 1000000000, 'Yes')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xpos', '0xm1', 'SELL', 40.0, 0.60, 1000000100, 'Yes')",
+            [],
+        )
+        .unwrap();
+
+        // Closed position: BUY 50, SELL 50 = net 0 shares (<= 0.5)
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xpos', '0xm2', 'BUY', 50.0, 0.45, 1000000200, 'No')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, outcome)
+             VALUES ('0xpos', '0xm2', 'SELL', 50.0, 0.55, 1000000300, 'No')",
+            [],
+        )
+        .unwrap();
+
+        let (active, active_count) = wallet_active_positions_page(&conn, "0xpos", 0, 20).unwrap();
+        let (closed, closed_count) = wallet_closed_positions_page(&conn, "0xpos", 0, 20).unwrap();
+
+        assert_eq!(active_count, 1, "should have 1 active position");
+        assert_eq!(closed_count, 1, "should have 1 closed position");
+        assert_eq!(active.len(), 1);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(active[0].condition_id, "0xm1");
+        assert_eq!(closed[0].condition_id, "0xm2");
+    }
+
+    /// Characterization test for follow_worthy_rankings before N+1 fix.
+    /// Tests that trade counts and PnL are correctly retrieved.
+    #[test]
+    fn test_follow_worthy_rankings_with_trade_counts_and_pnl() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xrank1', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xrank2', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+
+        // rank1: 3 trades, 10.0 PnL
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+             VALUES ('0xrank1', '0xm1', 'BUY', 10.0, 0.50, 1000000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+             VALUES ('0xrank1', '0xm1', 'SELL', 10.0, 0.60, 1000000100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+             VALUES ('0xrank1', '0xm2', 'BUY', 5.0, 0.40, 1000000200)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl)
+             VALUES ('0xrank1', 'mirror', '0xm1', 'BUY', 25.0, 0.60, 'settled_win', 8.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl)
+             VALUES ('0xrank1', 'mirror', '0xm2', 'BUY', 25.0, 0.55, 'settled_win', 2.0)",
+            [],
+        )
+        .unwrap();
+
+        // rank2: 1 trade, -5.0 PnL
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+             VALUES ('0xrank2', '0xm3', 'BUY', 20.0, 0.50, 1000000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paper_trades (proxy_wallet, strategy, condition_id, side, size_usdc, entry_price, status, pnl)
+             VALUES ('0xrank2', 'mirror', '0xm3', 'BUY', 25.0, 0.60, 'settled_loss', -5.0)",
+            [],
+        )
+        .unwrap();
+
+        // Add wallet scores to make them eligible for rankings
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xrank1', date('now'), 7, 0.80, 6.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xrank1', date('now'), 30, 0.85, 11.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xrank2', date('now'), 7, 0.70, 5.5)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, paper_roi_pct)
+             VALUES ('0xrank2', date('now'), 30, 0.75, 10.5)",
+            [],
+        )
+        .unwrap();
+
+        let rankings = follow_worthy_rankings(&conn, Some(10)).unwrap();
+        assert_eq!(rankings.len(), 2);
+
+        // rank1 has higher wscore, should be first
+        assert_eq!(rankings[0].proxy_wallet, "0xrank1");
+        assert_eq!(rankings[0].trade_count, 3);
+        assert_eq!(rankings[0].pnl_display, "+$10.00");
+
+        assert_eq!(rankings[1].proxy_wallet, "0xrank2");
+        assert_eq!(rankings[1].trade_count, 1);
+        assert_eq!(rankings[1].pnl_display, "$-5.00");
+    }
+
+    /// Characterization test for unified_funnel_counts before CTE optimization.
+    /// Tests that wallet age filtering works correctly.
+    #[test]
+    fn test_unified_funnel_counts_wallet_age_filtering() {
+        use chrono::{Duration, Utc};
+        let conn = test_db();
+
+        // Old wallet (60 days old) - should be evaluated
+        let old_ts = (Utc::now() - Duration::days(60)).timestamp();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xold', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+             VALUES ('0xold', '0xm1', 'BUY', 10.0, 0.50, ?1)",
+            [old_ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence)
+             VALUES ('0xold', 'Informed Specialist', 0.87)",
+            [],
+        )
+        .unwrap();
+
+        // Young wallet (10 days old) - should not be evaluated
+        let young_ts = (Utc::now() - Duration::days(10)).timestamp();
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xyoung', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp)
+             VALUES ('0xyoung', '0xm2', 'BUY', 10.0, 0.50, ?1)",
+            [young_ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence)
+             VALUES ('0xyoung', 'Informed Specialist', 0.85)",
+            [],
+        )
+        .unwrap();
+
+        let counts = unified_funnel_counts(&conn).unwrap();
+        assert_eq!(counts.all_wallets, 2);
+        assert_eq!(counts.suitable_personas, 2);
+        assert_eq!(counts.personas_evaluated, 1, "only old wallet should be evaluated (>= 45 days)");
     }
 }
