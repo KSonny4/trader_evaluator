@@ -7,7 +7,12 @@
             <h2 class="text-xl font-semibold text-gray-100">Wallet scorecard</h2>
             <a href="https://polymarket.com/profile/{{ journey.proxy_wallet }}" target="_blank" rel="noopener" class="text-sm text-blue-400 hover:text-blue-300 font-mono" title="{{ journey.proxy_wallet }}">{{ journey.wallet_display_label }}</a>
         </div>
-        <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
+        <div class="flex items-center gap-3">
+            {% if trader_connected %}
+            <button id="follow-btn" onclick="followOnTrader()" class="text-sm bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded-md transition-colors">Follow on Trader</button>
+            {% endif %}
+            <a class="text-sm text-blue-400 hover:text-blue-300" href="/">Back</a>
+        </div>
     </div>
 
     <!-- Summary Cards -->
@@ -27,22 +32,172 @@
             </div>
             <span class="inline-block mt-1 text-xs font-mono px-1.5 py-0.5 rounded bg-gray-700 text-gray-300" title="Wallet rules engine state">Pipeline: {{ journey.pipeline_state }}</span>
         </div>
+        {% match journey.score %}
+        {% when Some with (s) %}
         <div class="bg-gray-800/50 rounded-lg p-3">
-            <div class="text-xs text-gray-500">Paper PnL</div>
-            <div class="text-sm text-gray-200">{{ journey.paper_pnl_display }}</div>
-            {% if journey.pipeline_state != "PAPER_TRADING" && journey.pipeline_state != "APPROVED" %}
-            <div class="text-xs text-gray-500 mt-0.5">Not yet paper trading</div>
-            {% endif %}
+            <div class="text-xs text-gray-500">WScore</div>
+            <div class="text-lg font-bold text-gray-100">{{ s.wscore_display }}</div>
+            <div class="w-full bg-gray-700 rounded-full h-1.5 mt-1">
+                <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ s.wscore_pct }}%"></div>
+            </div>
+            <div class="text-xs text-gray-500 mt-1">Edge {{ s.edge_display }} / Cons {{ s.consistency_display }}</div>
+        </div>
+        {% when None %}
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">WScore</div>
+            <div class="text-sm text-gray-500 italic">Not scored yet</div>
+        </div>
+        {% endmatch %}
+        {% match journey.features %}
+        {% when Some with (f) %}
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">On-Chain PnL</div>
+            <div class="text-sm {{ f.pnl_color }}">{{ f.pnl_display }}</div>
+            <div class="text-xs text-gray-500 mt-0.5">ROI: <span class="{{ f.roi_color }}">{{ f.roi_display }}</span></div>
         </div>
         <div class="bg-gray-800/50 rounded-lg p-3">
-            <div class="text-xs text-gray-500">Exposure</div>
-            <div class="text-sm text-gray-200">{{ journey.exposure_display }}</div>
+            <div class="text-xs text-gray-500">Win Rate</div>
+            <div class="text-sm text-gray-200">{{ f.hit_rate_display }}</div>
+        </div>
+        {% when None %}
+        <div class="bg-gray-800/50 rounded-lg p-3">
+            <div class="text-xs text-gray-500">On-Chain PnL</div>
+            <div class="text-sm text-gray-500 italic">No features</div>
         </div>
         <div class="bg-gray-800/50 rounded-lg p-3">
-            <div class="text-xs text-gray-500">Copy Fidelity</div>
-            <div class="text-sm text-gray-200">{{ journey.copy_fidelity_display }}</div>
+            <div class="text-xs text-gray-500">Win Rate</div>
+            <div class="text-sm text-gray-500 italic">No features</div>
+        </div>
+        {% endmatch %}
+    </div>
+
+    <!-- Score Components -->
+    {% match journey.score %}
+    {% when Some with (s) %}
+    <div class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-3">Score Components</h3>
+        <div class="space-y-2">
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 w-32 shrink-0">Edge (30%)</span>
+                <div class="flex-1 bg-gray-800 rounded-full h-1.5">
+                    <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ s.edge_pct }}%"></div>
+                </div>
+                <span class="text-xs text-gray-300 w-10 text-right">{{ s.edge_display }}</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 w-32 shrink-0">Consistency (25%)</span>
+                <div class="flex-1 bg-gray-800 rounded-full h-1.5">
+                    <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ s.consistency_pct }}%"></div>
+                </div>
+                <span class="text-xs text-gray-300 w-10 text-right">{{ s.consistency_display }}</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 w-32 shrink-0">Market Skill (20%)</span>
+                <div class="flex-1 bg-gray-800 rounded-full h-1.5">
+                    <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ s.market_skill_pct }}%"></div>
+                </div>
+                <span class="text-xs text-gray-300 w-10 text-right">{{ s.market_skill_display }}</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 w-32 shrink-0">Timing (15%)</span>
+                <div class="flex-1 bg-gray-800 rounded-full h-1.5">
+                    <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ s.timing_skill_pct }}%"></div>
+                </div>
+                <span class="text-xs text-gray-300 w-10 text-right">{{ s.timing_skill_display }}</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 w-32 shrink-0">Behavior (10%)</span>
+                <div class="flex-1 bg-gray-800 rounded-full h-1.5">
+                    <div class="bg-emerald-500 h-1.5 rounded-full" style="width: {{ s.behavior_quality_pct }}%"></div>
+                </div>
+                <span class="text-xs text-gray-300 w-10 text-right">{{ s.behavior_quality_display }}</span>
+            </div>
         </div>
     </div>
+    {% when None %}{% endmatch %}
+
+    <!-- On-Chain Features -->
+    {% match journey.features %}
+    {% when Some with (f) %}
+    <div class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-3">On-Chain Features <span class="font-normal text-gray-600">({{ f.feature_date }}, 30d window)</span></h3>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Total PnL</div>
+                <div class="text-sm {{ f.pnl_color }}">{{ f.pnl_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Max Drawdown</div>
+                <div class="text-sm text-gray-200">{{ f.drawdown_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Sharpe Ratio</div>
+                <div class="text-sm text-gray-200">{{ f.sharpe_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">ROI %</div>
+                <div class="text-sm {{ f.roi_color }}">{{ f.roi_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Trades/Day</div>
+                <div class="text-sm text-gray-200">{{ f.trades_per_day_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Unique Markets</div>
+                <div class="text-sm text-gray-200">{{ f.unique_markets }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Profitable Markets</div>
+                <div class="text-sm text-gray-200">{{ f.market_skill_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Concentration</div>
+                <div class="text-sm text-gray-200">{{ f.concentration_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Buy/Sell Balance</div>
+                <div class="text-sm text-gray-200">{{ f.buy_sell_balance_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Burstiness</div>
+                <div class="text-sm text-gray-200">{{ f.burstiness_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Size CV</div>
+                <div class="text-sm text-gray-200">{{ f.size_cv_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Avg Trade Size</div>
+                <div class="text-sm text-gray-200">{{ f.avg_size_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Top Domain</div>
+                <div class="text-sm text-gray-200">{{ f.top_domain_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Mid Fill %</div>
+                <div class="text-sm text-gray-200">{{ f.mid_fill_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Extreme Price %</div>
+                <div class="text-sm text-gray-200">{{ f.extreme_price_display }}</div>
+            </div>
+            <div class="bg-gray-800/50 rounded-lg p-2">
+                <div class="text-xs text-gray-500">Active Positions</div>
+                <div class="text-sm text-gray-200">{{ f.active_positions }}</div>
+            </div>
+        </div>
+    </div>
+    {% when None %}{% endmatch %}
+
+    <!-- Traits -->
+    {% if !journey.traits.is_empty() %}
+    <div class="flex flex-wrap gap-2">
+        {% for t in journey.traits %}
+        <span class="text-xs font-medium px-2.5 py-1 rounded-full {{ t.badge_color }}">{{ t.display }}</span>
+        {% endfor %}
+    </div>
+    {% endif %}
 
     <div class="text-sm text-gray-500">
         <span class="text-gray-400">Last trades ingestion:</span>
@@ -77,6 +232,35 @@
         {% endif %}
     </div>
 
+    <!-- Trader Performance (client-side JS, only when trader connected) -->
+    {% if trader_connected %}
+    <div id="trader-panel" class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-lg font-semibold text-gray-200 mb-3">Trader Performance</h3>
+        <div id="trader-loading" class="text-gray-500 text-sm">Loading trader data...</div>
+        <div id="trader-data" class="hidden">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="bg-gray-800/50 rounded-lg p-3">
+                    <div class="text-xs text-gray-500">Paper PnL</div>
+                    <div id="trader-pnl" class="text-sm text-gray-200">&mdash;</div>
+                </div>
+                <div class="bg-gray-800/50 rounded-lg p-3">
+                    <div class="text-xs text-gray-500">Trading Mode</div>
+                    <div id="trader-mode" class="text-sm text-gray-200">&mdash;</div>
+                </div>
+                <div class="bg-gray-800/50 rounded-lg p-3">
+                    <div class="text-xs text-gray-500">Open Trades</div>
+                    <div id="trader-open" class="text-sm text-gray-200">&mdash;</div>
+                </div>
+                <div class="bg-gray-800/50 rounded-lg p-3">
+                    <div class="text-xs text-gray-500">Win Rate</div>
+                    <div id="trader-winrate" class="text-sm text-gray-200">&mdash;</div>
+                </div>
+            </div>
+        </div>
+        <div id="trader-not-followed" class="hidden text-gray-500 text-sm italic">Not followed on trader</div>
+    </div>
+    {% endif %}
+
     <!-- Tabs Navigation -->
     <div class="border-b border-gray-700">
         <nav class="-mb-px flex gap-6" aria-label="Tabs">
@@ -85,6 +269,9 @@
             </button>
             <button onclick="switchTab('activity')" id="tab-btn-activity" class="border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium">
                 Activity
+            </button>
+            <button onclick="switchTab('score-history')" id="tab-btn-score-history" class="border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium">
+                Score History
             </button>
         </nav>
     </div>
@@ -140,7 +327,7 @@
                             <td class="py-3 px-4 font-mono text-gray-400">
                                 {% match p.outcome %}
                                 {% when Some with (o) %}{{ o }}
-                                {% when None %}—
+                                {% when None %}&mdash;
                                 {% endmatch %}
                             </td>
                             <td class="py-3 px-4 text-right font-mono">{{ p.shares_display }}</td>
@@ -198,7 +385,7 @@
                             <td class="py-3 px-4 font-mono text-gray-400">
                                 {% match p.outcome %}
                                 {% when Some with (o) %}{{ o }}
-                                {% when None %}—
+                                {% when None %}&mdash;
                                 {% endmatch %}
                             </td>
                             <td class="py-3 px-4 text-right font-mono">{{ p.total_bet_display }}</td>
@@ -246,14 +433,14 @@
                                 <a href="{{ url }}" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 block truncate max-w-xs">
                                     {% match a.market_title %}
                                         {% when Some with (t) %}{{ t }}
-                                        {% when None %}{% match a.condition_id %}{% when Some with (cid) %}{{ cid }}{% when None %}—{% endmatch %}
+                                        {% when None %}{% match a.condition_id %}{% when Some with (cid) %}{{ cid }}{% when None %}&mdash;{% endmatch %}
                                     {% endmatch %}
                                 </a>
                                 {% when None %}
                                 <span class="block truncate max-w-xs">
                                     {% match a.market_title %}
                                         {% when Some with (t) %}{{ t }}
-                                        {% when None %}{% match a.condition_id %}{% when Some with (cid) %}{{ cid }}{% when None %}—{% endmatch %}
+                                        {% when None %}{% match a.condition_id %}{% when Some with (cid) %}{{ cid }}{% when None %}&mdash;{% endmatch %}
                                     {% endmatch %}
                                 </span>
                             {% endmatch %}
@@ -261,7 +448,7 @@
                         <td class="py-3 px-4 font-mono text-gray-400">
                             {% match a.outcome %}
                             {% when Some with (o) %}{{ o }}
-                            {% when None %}—
+                            {% when None %}&mdash;
                             {% endmatch %}
                         </td>
                         <td class="py-3 px-4 text-right font-mono">{{ a.shares_display }} shares</td>
@@ -286,25 +473,58 @@
         </div>
         {% endif %}
     </div>
+
+    <!-- Score History Content -->
+    <div id="tab-content-score-history" class="hidden bg-gray-900 rounded-lg overflow-hidden mt-4">
+        {% if journey.score_history.is_empty() %}
+        <div class="p-8 text-center text-gray-500 italic">No score history.</div>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm text-left">
+                <thead class="bg-gray-800 text-gray-400 sticky top-0 z-10">
+                    <tr>
+                        <th class="py-3 px-4 font-medium">Date</th>
+                        <th class="py-3 px-4 font-medium text-right">WScore</th>
+                        <th class="py-3 px-4 font-medium text-right">Edge</th>
+                        <th class="py-3 px-4 font-medium text-right">Consistency</th>
+                        <th class="py-3 px-4 font-medium text-right">ROI %</th>
+                    </tr>
+                </thead>
+                <tbody class="text-gray-300 divide-y divide-gray-800">
+                    {% for h in journey.score_history %}
+                    <tr class="hover:bg-gray-800/50 transition-colors">
+                        <td class="py-3 px-4 font-mono text-gray-400">{{ h.score_date }}</td>
+                        <td class="py-3 px-4 text-right font-mono">{{ h.wscore_display }}</td>
+                        <td class="py-3 px-4 text-right font-mono">{{ h.edge_display }}</td>
+                        <td class="py-3 px-4 text-right font-mono">{{ h.consistency_display }}</td>
+                        <td class="py-3 px-4 text-right font-mono {{ h.roi_color }}">{{ h.roi_display }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
 </div>
 
 <script>
 function switchTab(tab) {
-    // Buttons
-    document.getElementById('tab-btn-positions').className = tab === 'positions'
-        ? 'border-blue-500 text-blue-400 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium'
-        : 'border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium';
-    document.getElementById('tab-btn-activity').className = tab === 'activity'
-        ? 'border-blue-500 text-blue-400 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium'
-        : 'border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium';
-
-    // Content
-    document.getElementById('tab-content-positions').className = tab === 'positions' ? 'block' : 'hidden';
-    document.getElementById('tab-content-activity').className = tab === 'activity' ? 'block mt-4' : 'hidden';
+    var tabs = ['positions', 'activity', 'score-history'];
+    var active = 'border-blue-500 text-blue-400 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium';
+    var inactive = 'border-transparent text-gray-400 hover:border-gray-300 hover:text-gray-300 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium';
+    for (var i = 0; i < tabs.length; i++) {
+        var t = tabs[i];
+        document.getElementById('tab-btn-' + t).className = (t === tab) ? active : inactive;
+        var content = document.getElementById('tab-content-' + t);
+        if (t === tab) {
+            content.className = t === 'positions' ? 'block' : 'block mt-4';
+        } else {
+            content.className = 'hidden';
+        }
+    }
 }
 
 function switchSubTab(subtab) {
-    // Buttons
     document.getElementById('subtab-btn-active').className = subtab === 'active'
         ? 'bg-gray-700 text-white px-3 py-1.5 rounded-md text-sm font-medium'
         : 'text-gray-400 hover:text-white px-3 py-1.5 rounded-md text-sm font-medium';
@@ -312,7 +532,6 @@ function switchSubTab(subtab) {
         ? 'bg-gray-700 text-white px-3 py-1.5 rounded-md text-sm font-medium'
         : 'text-gray-400 hover:text-white px-3 py-1.5 rounded-md text-sm font-medium';
 
-    // Content
     document.getElementById('subtab-content-active').className = subtab === 'active' ? 'block bg-gray-900 rounded-lg overflow-hidden' : 'hidden';
     document.getElementById('subtab-content-closed').className = subtab === 'closed' ? 'block bg-gray-900 rounded-lg overflow-hidden' : 'hidden';
 }
@@ -348,7 +567,7 @@ function switchSubTab(subtab) {
             fetch('/wallet/' + encodeURIComponent(wallet) + '/' + endpointKey + '?offset=' + offset + '&limit=' + limit)
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
-                    var items = data.positions || data.activities; // Handles both responses
+                    var items = data.positions || data.activities;
                     if (!items) items = [];
 
                     items.forEach(function(item) {
@@ -378,16 +597,15 @@ function switchSubTab(subtab) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
 
-    // Row Renders
     function renderActiveRow(tbody, sentinel, p) {
         var tr = document.createElement('tr');
         tr.className = 'hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-0 text-gray-300';
-        
-        var marketLink = p.polymarket_url 
+
+        var marketLink = p.polymarket_url
             ? '<a href="' + escapeHtml(p.polymarket_url) + '" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 font-medium block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</a>'
             : '<span class="block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</span>';
 
-        tr.innerHTML = 
+        tr.innerHTML =
             '<td class="py-3 px-4">' + marketLink + '</td>' +
             '<td class="py-3 px-4 font-mono text-gray-400">' + escapeHtml(p.outcome || '—') + '</td>' +
             '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(p.shares_display) + '</td>' +
@@ -399,12 +617,12 @@ function switchSubTab(subtab) {
     function renderClosedRow(tbody, sentinel, p) {
         var tr = document.createElement('tr');
         tr.className = 'hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-0 text-gray-300';
-        
-        var marketLink = p.polymarket_url 
+
+        var marketLink = p.polymarket_url
             ? '<a href="' + escapeHtml(p.polymarket_url) + '" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 font-medium block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</a>'
             : '<span class="block truncate max-w-sm">' + escapeHtml(p.market_title || p.condition_id) + '</span>';
 
-        tr.innerHTML = 
+        tr.innerHTML =
             '<td class="py-3 px-4">' + marketLink + '</td>' +
             '<td class="py-3 px-4 font-mono text-gray-400">' + escapeHtml(p.outcome || '—') + '</td>' +
             '<td class="py-3 px-4 text-right font-mono">' + escapeHtml(p.total_bet_display) + '</td>' +
@@ -416,7 +634,7 @@ function switchSubTab(subtab) {
         var tr = document.createElement('tr');
         tr.className = 'hover:bg-gray-800/50 transition-colors border-b border-gray-800 last:border-0 text-gray-300';
 
-        var marketLink = a.polymarket_url 
+        var marketLink = a.polymarket_url
              ? '<a href="' + escapeHtml(a.polymarket_url) + '" target="_blank" rel="noopener" class="text-blue-400 hover:text-blue-300 block truncate max-w-xs">' + escapeHtml(a.market_title || a.condition_id || '—') + '</a>'
              : '<span class="block truncate max-w-xs">' + escapeHtml(a.market_title || a.condition_id || '—') + '</span>';
 
@@ -424,7 +642,7 @@ function switchSubTab(subtab) {
             ? '<a href="' + escapeHtml(a.polygonscan_url) + '" target="_blank" rel="noopener" class="inline-block mt-0.5 text-xs text-blue-500 hover:text-blue-400" title="View on Polygonscan">↗ Tx</a>'
             : '';
 
-        tr.innerHTML = 
+        tr.innerHTML =
             '<td class="py-3 px-4">' +
                 '<div class="font-medium text-gray-200">' + escapeHtml(a.activity_type) + '</div>' +
                 '<div class="text-xs text-gray-500 font-mono">' + escapeHtml(a.usdc_amount_display) + '</div>' +
@@ -439,10 +657,80 @@ function switchSubTab(subtab) {
         tbody.insertBefore(tr, sentinel);
     }
 
-    // Initialize Observers
     setupObserver('active-sentinel', 'active-positions-tbody', 'active-positions-container', 'active-positions', renderActiveRow);
     setupObserver('closed-sentinel', 'closed-positions-tbody', 'closed-positions-container', 'closed-positions', renderClosedRow);
     setupObserver('activity-sentinel', 'activity-tbody', 'activity-container', 'activity', renderActivityRow);
 })();
+
+{% if trader_connected %}
+function followOnTrader() {
+    var btn = document.getElementById('follow-btn');
+    btn.disabled = true;
+    btn.textContent = 'Following...';
+    btn.className = 'text-sm bg-gray-600 text-gray-300 px-3 py-1.5 rounded-md cursor-not-allowed';
+
+    fetch('/trader/api/wallets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy_wallet: '{{ journey.proxy_wallet }}' })
+    }).then(function(r) {
+        if (r.ok) {
+            btn.textContent = 'Followed';
+            btn.className = 'text-sm bg-green-900 text-green-300 px-3 py-1.5 rounded-md cursor-default';
+        } else {
+            return r.json().then(function(data) {
+                btn.textContent = data.message || 'Error';
+                btn.className = 'text-sm bg-red-800 text-red-200 px-3 py-1.5 rounded-md';
+                btn.disabled = false;
+            });
+        }
+    }).catch(function(e) {
+        btn.textContent = 'Error';
+        btn.className = 'text-sm bg-red-800 text-red-200 px-3 py-1.5 rounded-md';
+        btn.disabled = false;
+    });
+}
+
+// Trader Performance panel: fetch live data from trader API
+(function() {
+    var wallet = '{{ journey.proxy_wallet }}';
+    fetch('/trader/api/wallets')
+        .then(function(r) { return r.json(); })
+        .then(function(wallets) {
+            var w = wallets.find(function(w) { return w.proxy_wallet === wallet; });
+            if (!w) {
+                document.getElementById('trader-loading').className = 'hidden';
+                document.getElementById('trader-not-followed').className = 'text-gray-500 text-sm italic';
+                return;
+            }
+            document.getElementById('trader-mode').textContent = w.trading_mode + ' (' + w.status + ')';
+            // Nested fetch avoids undefined propagation through the promise chain
+            fetch('/trader/api/trades?wallet=' + encodeURIComponent(wallet))
+                .then(function(r) { return r.json(); })
+                .then(function(trades) {
+                    var pnl = 0, wins = 0, losses = 0, open = 0;
+                    trades.forEach(function(t) {
+                        if (t.pnl != null) pnl += t.pnl;
+                        if (t.status === 'settled_win') wins++;
+                        if (t.status === 'settled_loss') losses++;
+                        if (t.status === 'open') open++;
+                    });
+                    var total = wins + losses;
+                    var sign = pnl >= 0 ? '+' : '';
+                    document.getElementById('trader-pnl').textContent = sign + '$' + pnl.toFixed(2);
+                    document.getElementById('trader-pnl').className = 'text-sm ' + (pnl >= 0 ? 'text-green-400' : 'text-red-400');
+                    document.getElementById('trader-open').textContent = open;
+                    document.getElementById('trader-winrate').textContent = total > 0
+                        ? Math.round(wins / total * 100) + '% (' + wins + 'W / ' + losses + 'L)'
+                        : 'N/A';
+                    document.getElementById('trader-loading').className = 'hidden';
+                    document.getElementById('trader-data').className = 'block';
+                });
+        })
+        .catch(function() {
+            document.getElementById('trader-loading').textContent = 'Trader unavailable';
+        });
+})();
+{% endif %}
 </script>
 {% endblock %}

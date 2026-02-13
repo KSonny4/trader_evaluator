@@ -8,9 +8,9 @@ pub enum Command {
     Markets,
     Wallets,
     Wallet { address: String },
-    PaperPnl,
     Rankings,
     Classify,
+    PickForPaper,
 }
 
 pub fn parse_args<I>(mut args: I) -> std::result::Result<Command, String>
@@ -34,9 +34,9 @@ where
                 .ok_or_else(|| "usage: evaluator wallet <address>".to_string())?;
             Ok(Command::Wallet { address })
         }
-        "paper-pnl" => Ok(Command::PaperPnl),
         "rankings" => Ok(Command::Rankings),
         "classify" => Ok(Command::Classify),
+        "pick-for-paper" => Ok(Command::PickForPaper),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -47,9 +47,9 @@ pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
         Command::Markets => show_markets(db),
         Command::Wallets => show_wallets(db),
         Command::Wallet { address } => show_wallet(db, &address),
-        Command::PaperPnl => show_paper_pnl(db),
         Command::Rankings => show_rankings(db),
         Command::Classify => run_classify(db),
+        Command::PickForPaper => show_pick_for_paper(db),
     }
 }
 
@@ -160,23 +160,111 @@ fn show_wallet(db: &Database, address: &str) -> Result<()> {
     )?;
     println!("  trades_raw rows={trades}");
 
-    let pnl: Option<f64> = db.conn.query_row(
-        "SELECT SUM(pnl) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open'",
-        rusqlite::params![address],
-        |row| row.get(0),
-    )?;
-    println!("  paper_pnl_usdc={}", pnl.unwrap_or(0.0));
+    // On-chain features (latest 30d)
+    let features_row: Option<(f64, u32, u32, u32, f64)> = db
+        .conn
+        .query_row(
+            "SELECT total_pnl, win_count, loss_count, unique_markets, max_drawdown_pct
+             FROM wallet_features_daily
+             WHERE proxy_wallet = ?1 AND window_days = 30
+             ORDER BY feature_date DESC LIMIT 1",
+            rusqlite::params![address],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((pnl, wins, losses, markets, dd)) = features_row {
+        println!("  on_chain_pnl={pnl:.2}  wins={wins}  losses={losses}  markets={markets}  drawdown={dd:.1}%");
+    }
+
+    // WScore
+    let score_row: Option<(f64, i64)> = db
+        .conn
+        .query_row(
+            "SELECT wscore, window_days FROM wallet_scores_daily
+             WHERE proxy_wallet = ?1 AND window_days = 30
+             ORDER BY score_date DESC LIMIT 1",
+            rusqlite::params![address],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((wscore, wd)) = score_row {
+        println!("  wscore={wscore:.3} ({wd}d)");
+    }
+
+    // Rules state
+    let state: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT state FROM wallet_rules_state WHERE proxy_wallet = ?1",
+            rusqlite::params![address],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(state) = state {
+        println!("  state={state}");
+    }
+
+    // Persona
+    let persona: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT persona FROM wallet_personas WHERE proxy_wallet = ?1
+             ORDER BY classified_at DESC LIMIT 1",
+            rusqlite::params![address],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(persona) = persona {
+        println!("  persona={persona}");
+    }
 
     Ok(())
 }
 
-fn show_paper_pnl(db: &Database) -> Result<()> {
-    let pnl: Option<f64> = db.conn.query_row(
-        "SELECT SUM(pnl) FROM paper_trades WHERE status != 'open'",
-        [],
-        |row| row.get(0),
+fn show_pick_for_paper(db: &Database) -> Result<()> {
+    let mut stmt = db.conn.prepare(
+        "SELECT s.proxy_wallet, s.wscore, s.window_days,
+                COALESCE(p.persona, 'unknown') AS persona
+         FROM wallet_scores_daily s
+         LEFT JOIN wallet_rules_state r ON r.proxy_wallet = s.proxy_wallet
+         LEFT JOIN (
+             SELECT proxy_wallet, persona,
+                    ROW_NUMBER() OVER (PARTITION BY proxy_wallet ORDER BY classified_at DESC) AS rn
+             FROM wallet_personas
+         ) p ON p.proxy_wallet = s.proxy_wallet AND p.rn = 1
+         WHERE s.window_days = 30
+           AND s.score_date = date('now')
+           AND (r.state = 'PAPER_TRADING' OR r.state IS NULL)
+         ORDER BY s.wscore DESC
+         LIMIT 20",
     )?;
-    println!("Paper PnL (settled): {}", pnl.unwrap_or(0.0));
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+
+    println!("Top wallets eligible for paper trading:");
+    let mut count = 0;
+    for r in rows {
+        let (wallet, wscore, wd, persona) = r?;
+        println!("{wscore:>6.3}  {wd}d  {persona:<25}  {wallet}");
+        count += 1;
+    }
+    if count == 0 {
+        println!("  (no wallets eligible yet — run scoring first)");
+    }
     Ok(())
 }
 

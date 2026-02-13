@@ -309,6 +309,73 @@ pub struct ExcludedWalletRow {
     pub excluded_at: String,
 }
 
+/// Latest 30-day on-chain features snapshot for the wallet scorecard.
+pub struct WalletFeaturesSnapshot {
+    pub feature_date: String,
+    pub total_pnl: f64,
+    pub pnl_display: String,
+    pub pnl_color: String,
+    pub win_count: i64,
+    pub loss_count: i64,
+    pub hit_rate_display: String,
+    pub max_drawdown_pct: f64,
+    pub drawdown_display: String,
+    pub sharpe_ratio: f64,
+    pub sharpe_display: String,
+    pub roi_pct: f64,
+    pub roi_display: String,
+    pub roi_color: String,
+    pub trades_per_day: f64,
+    pub trades_per_day_display: String,
+    pub trade_count: i64,
+    pub unique_markets: i64,
+    pub profitable_markets: i64,
+    pub market_skill_display: String,
+    pub concentration_display: String,
+    pub avg_size_display: String,
+    pub size_cv_display: String,
+    pub buy_sell_balance_display: String,
+    pub burstiness_display: String,
+    pub top_domain_display: String,
+    pub mid_fill_display: String,
+    pub extreme_price_display: String,
+    pub active_positions: i64,
+}
+
+/// Latest 30-day WScore + component scores for the wallet scorecard.
+pub struct WalletScoreSnapshot {
+    pub score_date: String,
+    pub wscore: f64,
+    pub wscore_display: String,
+    pub wscore_pct: String,
+    pub edge_display: String,
+    pub edge_pct: String,
+    pub consistency_display: String,
+    pub consistency_pct: String,
+    pub market_skill_display: String,
+    pub market_skill_pct: String,
+    pub timing_skill_display: String,
+    pub timing_skill_pct: String,
+    pub behavior_quality_display: String,
+    pub behavior_quality_pct: String,
+}
+
+/// One row in the WScore history table (newest-first, 30-day window).
+pub struct ScoreHistoryRow {
+    pub score_date: String,
+    pub wscore_display: String,
+    pub edge_display: String,
+    pub consistency_display: String,
+    pub roi_display: String,
+    pub roi_color: String,
+}
+
+/// Persona trait badge (e.g., BONDER, WHALE, TOPIC_LANE) with Tailwind color classes.
+pub struct WalletTrait {
+    pub display: String,
+    pub badge_color: String,
+}
+
 pub struct JourneyEvent {
     pub at: String,
     pub label: String,
@@ -377,6 +444,10 @@ pub struct WalletJourney {
     pub exposure_display: String,
     pub copy_fidelity_display: String,
     pub follower_slippage_display: String,
+    pub score: Option<WalletScoreSnapshot>,
+    pub features: Option<WalletFeaturesSnapshot>,
+    pub traits: Vec<WalletTrait>,
+    pub score_history: Vec<ScoreHistoryRow>,
     pub events: Vec<JourneyEvent>,
     /// Active positions (net_shares > 0.5) — initial page of 20.
     pub active_positions: Vec<WalletPositionRow>,

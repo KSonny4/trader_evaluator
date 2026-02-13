@@ -1284,6 +1284,315 @@ pub fn wallet_activity_page(
     })
 }
 
+/// Latest 30-day features snapshot for a wallet.
+fn wallet_features_latest(
+    conn: &Connection,
+    proxy_wallet: &str,
+) -> Result<Option<WalletFeaturesSnapshot>> {
+    let row = conn
+        .query_row(
+            "
+            SELECT feature_date, COALESCE(total_pnl, 0), COALESCE(win_count, 0), COALESCE(loss_count, 0),
+                   COALESCE(max_drawdown_pct, 0), COALESCE(sharpe_ratio, 0),
+                   COALESCE(trades_per_day, 0), COALESCE(trade_count, 0), COALESCE(unique_markets, 0),
+                   COALESCE(profitable_markets, 0), COALESCE(concentration_ratio, 0),
+                   COALESCE(avg_trade_size_usdc, 0), COALESCE(size_cv, 0),
+                   COALESCE(buy_sell_balance, 0), COALESCE(burstiness_top_1h_ratio, 0),
+                   COALESCE(top_domain, ''), COALESCE(top_domain_ratio, 0),
+                   COALESCE(mid_fill_ratio, 0), COALESCE(extreme_price_ratio, 0),
+                   COALESCE(active_positions, 0), COALESCE(avg_position_size, 0)
+            FROM wallet_features_daily
+            WHERE proxy_wallet = ?1 AND window_days = 30
+            ORDER BY feature_date DESC
+            LIMIT 1
+            ",
+            [proxy_wallet],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, f64>(5)?,
+                    r.get::<_, f64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, f64>(10)?,
+                    r.get::<_, f64>(11)?,
+                    r.get::<_, f64>(12)?,
+                    r.get::<_, f64>(13)?,
+                    r.get::<_, f64>(14)?,
+                    r.get::<_, String>(15)?,
+                    r.get::<_, f64>(16)?,
+                    r.get::<_, f64>(17)?,
+                    r.get::<_, f64>(18)?,
+                    r.get::<_, i64>(19)?,
+                    r.get::<_, f64>(20)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((
+        feature_date,
+        total_pnl,
+        win_count,
+        loss_count,
+        max_drawdown_pct,
+        sharpe_ratio,
+        trades_per_day,
+        trade_count,
+        unique_markets,
+        profitable_markets,
+        concentration_ratio,
+        avg_trade_size_usdc,
+        size_cv,
+        buy_sell_balance,
+        burstiness,
+        top_domain,
+        top_domain_ratio,
+        mid_fill_ratio,
+        extreme_price_ratio,
+        active_positions,
+        avg_position_size,
+    )) = row
+    else {
+        return Ok(None);
+    };
+
+    let pnl_sign = if total_pnl >= 0.0 { "+" } else { "" };
+    let pnl_color = if total_pnl >= 0.0 {
+        "text-green-400"
+    } else {
+        "text-red-400"
+    };
+    let total_closed = win_count + loss_count;
+    let hit_rate = if total_closed > 0 {
+        100.0 * win_count as f64 / total_closed as f64
+    } else {
+        0.0
+    };
+    let invested = avg_position_size * trade_count as f64;
+    let roi_pct = if invested > 0.0 {
+        100.0 * total_pnl / invested
+    } else {
+        0.0
+    };
+    let roi_sign = if roi_pct >= 0.0 { "+" } else { "" };
+    let roi_color = if roi_pct >= 0.0 {
+        "text-green-400"
+    } else {
+        "text-red-400"
+    };
+    let top_domain_display = if top_domain.is_empty() {
+        "N/A".to_string()
+    } else {
+        format!("{top_domain} ({:.0}%)", top_domain_ratio * 100.0)
+    };
+
+    Ok(Some(WalletFeaturesSnapshot {
+        feature_date,
+        total_pnl,
+        pnl_display: format!("{pnl_sign}${total_pnl:.2}"),
+        pnl_color: pnl_color.to_string(),
+        win_count,
+        loss_count,
+        hit_rate_display: format!("{hit_rate:.0}% ({win_count}W / {loss_count}L)"),
+        max_drawdown_pct,
+        drawdown_display: format!("{max_drawdown_pct:.1}%"),
+        sharpe_ratio,
+        sharpe_display: format!("{sharpe_ratio:.2}"),
+        roi_pct,
+        roi_display: format!("{roi_sign}{roi_pct:.1}%"),
+        roi_color: roi_color.to_string(),
+        trades_per_day,
+        trades_per_day_display: format!("{trades_per_day:.1}"),
+        trade_count,
+        unique_markets,
+        profitable_markets,
+        market_skill_display: format!("{profitable_markets} / {unique_markets} profitable"),
+        concentration_display: format!("{:.0}%", concentration_ratio * 100.0),
+        avg_size_display: format!("${avg_trade_size_usdc:.2}"),
+        size_cv_display: format!("{size_cv:.2}"),
+        buy_sell_balance_display: format!("{buy_sell_balance:.2}"),
+        burstiness_display: format!("{:.0}%", burstiness * 100.0),
+        top_domain_display,
+        mid_fill_display: format!("{:.0}%", mid_fill_ratio * 100.0),
+        extreme_price_display: format!("{:.0}%", extreme_price_ratio * 100.0),
+        active_positions,
+    }))
+}
+
+/// Latest 30-day WScore snapshot for a wallet.
+fn wallet_score_latest(
+    conn: &Connection,
+    proxy_wallet: &str,
+) -> Result<Option<WalletScoreSnapshot>> {
+    let row = conn
+        .query_row(
+            "
+            SELECT score_date, wscore,
+                   COALESCE(edge_score, 0), COALESCE(consistency_score, 0),
+                   COALESCE(market_skill_score, 0), COALESCE(timing_skill_score, 0),
+                   COALESCE(behavior_quality_score, 0)
+            FROM wallet_scores_daily
+            WHERE proxy_wallet = ?1 AND window_days = 30
+            ORDER BY score_date DESC
+            LIMIT 1
+            ",
+            [proxy_wallet],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, f64>(5)?,
+                    r.get::<_, f64>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((score_date, wscore, edge, consistency, market_skill, timing, behavior)) = row else {
+        return Ok(None);
+    };
+
+    Ok(Some(WalletScoreSnapshot {
+        score_date,
+        wscore,
+        wscore_display: format!("{wscore:.2}"),
+        wscore_pct: format!("{:.0}", wscore * 100.0),
+        edge_display: format!("{edge:.2}"),
+        edge_pct: format!("{:.0}", edge * 100.0),
+        consistency_display: format!("{consistency:.2}"),
+        consistency_pct: format!("{:.0}", consistency * 100.0),
+        market_skill_display: format!("{market_skill:.2}"),
+        market_skill_pct: format!("{:.0}", market_skill * 100.0),
+        timing_skill_display: format!("{timing:.2}"),
+        timing_skill_pct: format!("{:.0}", timing * 100.0),
+        behavior_quality_display: format!("{behavior:.2}"),
+        behavior_quality_pct: format!("{:.0}", behavior * 100.0),
+    }))
+}
+
+/// Last 30 score history rows (30-day window) for a wallet, newest first.
+fn wallet_score_history(conn: &Connection, proxy_wallet: &str) -> Result<Vec<ScoreHistoryRow>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT score_date, wscore, COALESCE(edge_score, 0), COALESCE(consistency_score, 0),
+               COALESCE(paper_roi_pct, 0)
+        FROM wallet_scores_daily
+        WHERE proxy_wallet = ?1 AND window_days = 30
+        ORDER BY score_date DESC
+        LIMIT 30
+        ",
+    )?;
+    let rows = stmt
+        .query_map([proxy_wallet], |r| {
+            let score_date: String = r.get(0)?;
+            let wscore: f64 = r.get(1)?;
+            let edge: f64 = r.get(2)?;
+            let consistency: f64 = r.get(3)?;
+            let roi: f64 = r.get(4)?;
+            let roi_sign = if roi >= 0.0 { "+" } else { "" };
+            let roi_color = if roi >= 0.0 {
+                "text-green-400"
+            } else {
+                "text-red-400"
+            };
+            Ok(ScoreHistoryRow {
+                score_date,
+                wscore_display: format!("{wscore:.2}"),
+                edge_display: format!("{edge:.2}"),
+                consistency_display: format!("{consistency:.2}"),
+                roi_display: format!("{roi_sign}{roi:.1}%"),
+                roi_color: roi_color.to_string(),
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Persona traits for a wallet, with badge colors.
+fn wallet_traits(conn: &Connection, proxy_wallet: &str) -> Result<Vec<WalletTrait>> {
+    let mut stmt = conn.prepare(
+        "SELECT trait_key, trait_value FROM wallet_persona_traits WHERE proxy_wallet = ?1",
+    )?;
+    let rows = stmt
+        .query_map([proxy_wallet], |r| {
+            let key: String = r.get(0)?;
+            let value: String = r.get(1)?;
+            Ok((key, value))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(key, value)| {
+            let badge_color = match key.as_str() {
+                "BONDER" => "bg-purple-900 text-purple-200",
+                "WHALE" => "bg-blue-900 text-blue-200",
+                "TOPIC_LANE" => "bg-green-900 text-green-200",
+                _ => "bg-gray-700 text-gray-300",
+            };
+            let display = if key == "TOPIC_LANE" {
+                format!("TOPIC: {value}")
+            } else {
+                key
+            };
+            WalletTrait {
+                display,
+                badge_color: badge_color.to_string(),
+            }
+        })
+        .collect())
+}
+
+/// Rules engine events for a wallet, converted to JourneyEvent timeline entries.
+fn wallet_rules_events_timeline(
+    conn: &Connection,
+    proxy_wallet: &str,
+) -> Result<Vec<JourneyEvent>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT phase, allow, reason, created_at
+        FROM wallet_rules_events
+        WHERE proxy_wallet = ?1
+        ORDER BY created_at ASC
+        ",
+    )?;
+    let rows = stmt
+        .query_map([proxy_wallet], |r| {
+            let phase: String = r.get(0)?;
+            let allow: bool = r.get::<_, i64>(1)? != 0;
+            let reason: String = r.get(2)?;
+            let created_at: String = r.get(3)?;
+            Ok((phase, allow, reason, created_at))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(phase, allow, reason, created_at)| {
+            let label = format!(
+                "{} {}",
+                phase.to_uppercase(),
+                if allow { "PASSED" } else { "BLOCKED" }
+            );
+            JourneyEvent {
+                at: created_at,
+                label,
+                detail: reason,
+            }
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_lines)]
 pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<WalletJourney>> {
     timed_db_op("web.wallet_journey", || {
         let discovered_at: Option<String> = conn
@@ -1347,22 +1656,40 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             .optional()?
             .unwrap_or_else(|| "CANDIDATE".to_string());
 
-        let paper_pnl: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE proxy_wallet = ?1 AND status != 'open'",
-            [proxy_wallet],
-            |r| r.get(0),
-        )?;
-        let paper_pnl_display = {
-            let sign = if paper_pnl >= 0.0 { "+" } else { "" };
-            format!("{sign}${paper_pnl:.2}")
-        };
+        // On-chain data: features, scores, traits, history
+        let mut features = wallet_features_latest(conn, proxy_wallet)?;
+        let score = wallet_score_latest(conn, proxy_wallet)?;
 
-        let exposure_usdc: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(total_size_usdc), 0) FROM paper_positions WHERE proxy_wallet = ?1",
-            [proxy_wallet],
-            |r| r.get(0),
-        )?;
-        let exposure_display = format!("${exposure_usdc:.2}");
+        // Use upstream ROI from wallet_scores_daily when available (more accurate than
+        // the approximation in features, which double-counts capital for round-trips).
+        if let (Some(ref mut f), Some(ref s)) = (&mut features, &score) {
+            let upstream_roi: Option<f64> = conn
+                .query_row(
+                    "SELECT paper_roi_pct FROM wallet_scores_daily WHERE proxy_wallet = ?1 AND window_days = 30 AND score_date = ?2",
+                    rusqlite::params![proxy_wallet, s.score_date],
+                    |r| r.get::<_, Option<f64>>(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(roi) = upstream_roi {
+                f.roi_pct = roi;
+                let roi_sign = if roi >= 0.0 { "+" } else { "" };
+                f.roi_display = format!("{roi_sign}{roi:.1}%");
+                f.roi_color = if roi >= 0.0 {
+                    "text-green-400".to_string()
+                } else {
+                    "text-red-400".to_string()
+                };
+            }
+        }
+        let score_history = wallet_score_history(conn, proxy_wallet)?;
+        let traits = wallet_traits(conn, proxy_wallet)?;
+
+        // Use on-chain PnL from features as fallback for paper_pnl_display
+        let paper_pnl_display = features
+            .as_ref()
+            .map_or_else(|| "N/A".to_string(), |f| f.pnl_display.clone());
+        let exposure_display = "N/A".to_string();
 
         let (copied, total): (i64, i64) = conn.query_row(
             "
@@ -1446,6 +1773,10 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
                 detail,
             });
         }
+
+        // Add rules engine events to the timeline
+        let rules_events = wallet_rules_events_timeline(conn, proxy_wallet)?;
+        events.extend(rules_events);
 
         events.sort_by(|a, b| a.at.cmp(&b.at));
 
@@ -1534,6 +1865,10 @@ pub fn wallet_journey(conn: &Connection, proxy_wallet: &str) -> Result<Option<Wa
             exposure_display,
             copy_fidelity_display,
             follower_slippage_display,
+            score,
+            features,
+            traits,
+            score_history,
             events,
             active_positions,
             total_active_positions_count,
@@ -2373,5 +2708,160 @@ mod tests {
     fn test_age_seconds_unknown_format() {
         let age = age_seconds_from_timestamp("garbage");
         assert_eq!(age, i64::MAX);
+    }
+
+    /// Helper: insert a wallet with features, scores, traits, and rules events for scorecard tests.
+    fn insert_scored_wallet(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xscored', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash)
+             VALUES ('0xscored', '0xm1', 'BUY', 50.0, 0.50, 1700000000, '0xtx_scored')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_features_daily (proxy_wallet, feature_date, window_days, trade_count, win_count, loss_count, total_pnl, avg_position_size, unique_markets, max_drawdown_pct, sharpe_ratio, trades_per_day, profitable_markets, concentration_ratio, avg_trade_size_usdc, size_cv, buy_sell_balance, mid_fill_ratio, extreme_price_ratio, burstiness_top_1h_ratio, active_positions)
+             VALUES ('0xscored', '2026-02-13', 30, 100, 60, 40, 500.0, 50.0, 8, 15.0, 1.50, 3.3, 5, 0.45, 50.0, 0.60, 0.52, 0.65, 0.12, 0.15, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score, market_skill_score, timing_skill_score, behavior_quality_score, paper_roi_pct)
+             VALUES ('0xscored', '2026-02-13', 30, 0.72, 0.65, 0.80, 0.63, 0.55, 0.88, 12.3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_scores_daily (proxy_wallet, score_date, window_days, wscore, edge_score, consistency_score, market_skill_score, timing_skill_score, behavior_quality_score, paper_roi_pct)
+             VALUES ('0xscored', '2026-02-12', 30, 0.70, 0.60, 0.78, 0.61, 0.50, 0.85, 10.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_persona_traits (proxy_wallet, trait_key, trait_value) VALUES ('0xscored', 'BONDER', 'true')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_persona_traits (proxy_wallet, trait_key, trait_value) VALUES ('0xscored', 'TOPIC_LANE', 'crypto')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_rules_events (proxy_wallet, phase, allow, reason) VALUES ('0xscored', 'discovery', 1, 'All gates passed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallet_personas (proxy_wallet, persona, confidence) VALUES ('0xscored', 'INFORMED_SPECIALIST', 0.87)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_wallet_journey_includes_features() {
+        let conn = test_db();
+        insert_scored_wallet(&conn);
+        let journey = wallet_journey(&conn, "0xscored").unwrap().unwrap();
+        let f = journey.features.expect("features should be populated");
+        assert_eq!(f.trade_count, 100);
+        assert_eq!(f.win_count, 60);
+        assert_eq!(f.loss_count, 40);
+        assert!(f.total_pnl > 0.0);
+        assert_eq!(f.pnl_display, "+$500.00");
+        assert_eq!(f.pnl_color, "text-green-400");
+        assert_eq!(f.hit_rate_display, "60% (60W / 40L)");
+        assert_eq!(f.drawdown_display, "15.0%");
+        assert_eq!(f.sharpe_display, "1.50");
+        assert_eq!(f.unique_markets, 8);
+        assert_eq!(f.profitable_markets, 5);
+        assert_eq!(f.active_positions, 3);
+    }
+
+    #[test]
+    fn test_wallet_journey_includes_scores() {
+        let conn = test_db();
+        insert_scored_wallet(&conn);
+        let journey = wallet_journey(&conn, "0xscored").unwrap().unwrap();
+        let s = journey.score.expect("score should be populated");
+        assert_eq!(s.wscore_display, "0.72");
+        assert_eq!(s.wscore_pct, "72");
+        assert_eq!(s.edge_display, "0.65");
+        assert_eq!(s.consistency_display, "0.80");
+        assert_eq!(s.market_skill_display, "0.63");
+        assert_eq!(s.timing_skill_display, "0.55");
+        assert_eq!(s.behavior_quality_display, "0.88");
+    }
+
+    #[test]
+    fn test_wallet_journey_includes_traits() {
+        let conn = test_db();
+        insert_scored_wallet(&conn);
+        let journey = wallet_journey(&conn, "0xscored").unwrap().unwrap();
+        assert_eq!(journey.traits.len(), 2);
+        let bonder = journey.traits.iter().find(|t| t.display == "BONDER");
+        assert!(bonder.is_some(), "should have BONDER trait");
+        assert!(
+            bonder.unwrap().badge_color.contains("purple"),
+            "BONDER should be purple"
+        );
+        let topic = journey
+            .traits
+            .iter()
+            .find(|t| t.display.starts_with("TOPIC:"));
+        assert!(topic.is_some(), "should have TOPIC_LANE trait");
+        assert!(
+            topic.unwrap().badge_color.contains("green"),
+            "TOPIC_LANE should be green"
+        );
+    }
+
+    #[test]
+    fn test_wallet_journey_rules_events_in_timeline() {
+        let conn = test_db();
+        insert_scored_wallet(&conn);
+        let journey = wallet_journey(&conn, "0xscored").unwrap().unwrap();
+        let rules_event = journey
+            .events
+            .iter()
+            .find(|e| e.label.contains("DISCOVERY PASSED"));
+        assert!(
+            rules_event.is_some(),
+            "timeline should include rules engine events"
+        );
+    }
+
+    #[test]
+    fn test_wallet_journey_graceful_without_data() {
+        let conn = test_db();
+        // Insert wallet with no features, scores, traits
+        conn.execute(
+            "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xbare', 'HOLDER', 1)",
+            [],
+        )
+        .unwrap();
+        let journey = wallet_journey(&conn, "0xbare").unwrap().unwrap();
+        assert!(journey.features.is_none());
+        assert!(journey.score.is_none());
+        assert!(journey.traits.is_empty());
+        assert!(journey.score_history.is_empty());
+        assert_eq!(journey.paper_pnl_display, "N/A");
+    }
+
+    #[test]
+    fn test_wallet_journey_score_history() {
+        let conn = test_db();
+        insert_scored_wallet(&conn);
+        let journey = wallet_journey(&conn, "0xscored").unwrap().unwrap();
+        assert_eq!(journey.score_history.len(), 2);
+        // Newest first
+        assert_eq!(journey.score_history[0].score_date, "2026-02-13");
+        assert_eq!(journey.score_history[1].score_date, "2026-02-12");
+        assert_eq!(journey.score_history[0].wscore_display, "0.72");
     }
 }

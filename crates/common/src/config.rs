@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::str::FromStr;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub general: General,
     pub database: Database,
@@ -20,18 +20,18 @@ pub struct Config {
     pub web: Option<Web>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct General {
     pub mode: String,
     pub log_level: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Database {
     pub path: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Risk {
     pub max_exposure_per_market_pct: f64,
     pub max_exposure_per_wallet_pct: f64,
@@ -51,7 +51,7 @@ pub struct Risk {
     pub max_concurrent_positions: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MarketScoring {
     #[serde(alias = "top_n_markets")]
     pub top_n_events: usize,
@@ -69,7 +69,7 @@ pub struct MarketScoring {
     pub weights_time_to_expiry: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WalletDiscovery {
     pub min_total_trades: u32,
     pub holders_per_market: usize,
@@ -99,7 +99,7 @@ fn default_wallet_discovery_mode() -> String {
     "scheduled".to_string()
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct WalletDiscoveryLeaderboard {
     #[serde(default)]
     pub enabled: bool,
@@ -141,7 +141,7 @@ fn default_parallel_tasks() -> usize {
     8
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Ingestion {
     #[serde(default = "default_wallets_per_ingestion_run")]
     pub wallets_per_ingestion_run: u32,
@@ -154,7 +154,7 @@ pub struct Ingestion {
     pub backoff_base_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PaperTrading {
     pub strategies: Vec<String>,
     pub mirror_delay_secs: u64,
@@ -170,7 +170,7 @@ pub struct PaperTrading {
     pub mirror_default_their_bankroll_usd: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WalletScoring {
     pub windows_days: Vec<u32>,
     pub min_trades_for_score: u32,
@@ -181,12 +181,12 @@ pub struct WalletScoring {
     pub behavior_quality_weight: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Observability {
     pub prometheus_port: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Polymarket {
     pub data_api_url: String,
     pub gamma_api_url: String,
@@ -197,9 +197,12 @@ pub struct Web {
     pub port: u16,
     pub host: String,
     pub auth_password: Option<String>,
+    /// Base URL of the trader microservice (e.g. "http://aws-trader:8081").
+    /// When set, the dashboard proxies /trader/** routes and shows "Follow" buttons.
+    pub trader_api_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Personas {
     // Stage 1 fast filters
     pub stage1_min_wallet_age_days: u32,
@@ -292,7 +295,7 @@ pub struct WalletRules {
     pub per_wallet_risk_cap: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Anomaly {
     pub win_rate_drop_pct: f64,
     pub max_weekly_drawdown_pct: f64,

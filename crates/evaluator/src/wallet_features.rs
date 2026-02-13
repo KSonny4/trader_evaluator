@@ -1,7 +1,6 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-#[allow(dead_code)] // Used by tests now, wired into scheduler in Task 21
 #[derive(Debug, Clone)]
 pub struct WalletFeatures {
     pub proxy_wallet: String,
@@ -28,6 +27,8 @@ pub struct WalletFeatures {
     /// Dominant domain (wallet's lane) — e.g. Sports, Politics, Crypto.
     pub top_domain: Option<String>,
     pub top_domain_ratio: f64,
+    /// Number of markets where total FIFO-paired PnL > 0.
+    pub profitable_markets: u32,
 }
 
 /// Paired round-trip stats: wins, losses, and hold durations (seconds) for each closed position.
@@ -37,6 +38,8 @@ struct PairedStats {
     hold_seconds: Vec<f64>,
     /// (timestamp of close, pnl) for daily series
     closed_pnls: Vec<(i64, f64)>,
+    /// Number of markets where total paired PnL > 0
+    profitable_markets: u32,
 }
 
 /// Pair BUY and SELL trades within each condition_id (FIFO). Compute win/loss from actual PnL,
@@ -88,8 +91,10 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         }
     }
 
+    let mut profitable_markets = 0u32;
     for (_cid, (buys, sells)) in by_market {
         let n = buys.len().min(sells.len());
+        let mut market_pnl = 0.0f64;
         for i in 0..n {
             let (buy_size, buy_price, buy_ts) = buys[i];
             let (sell_size, sell_price, sell_ts) = sells[i];
@@ -98,6 +103,7 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
                 continue;
             }
             let pnl = (sell_price - buy_price) * size;
+            market_pnl += pnl;
             if pnl > 0.0 {
                 wins += 1;
             } else {
@@ -106,6 +112,9 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
             hold_seconds.push((sell_ts - buy_ts) as f64);
             closed_pnls.push((sell_ts, pnl));
         }
+        if market_pnl > 0.0 {
+            profitable_markets += 1;
+        }
     }
 
     Ok(PairedStats {
@@ -113,6 +122,7 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         losses,
         hold_seconds,
         closed_pnls,
+        profitable_markets,
     })
 }
 
@@ -184,48 +194,6 @@ fn drawdown_and_sharpe_from_daily_pnl(closed_pnls: &[(i64, f64)]) -> Result<(f64
     Ok((max_drawdown_pct, sharpe_ratio))
 }
 
-/// Prefer paper PnL (our copy) when settled paper trades exist; otherwise fallback to positions_snapshots.
-fn total_pnl_from_paper_or_positions(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> f64 {
-    let paper_pnl: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(pnl), 0.0) FROM paper_trades
-             WHERE proxy_wallet = ?1 AND status != 'open'
-             AND created_at >= datetime(?2, 'unixepoch')",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
-
-    let has_settled_paper_trades: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM paper_trades
-             WHERE proxy_wallet = ?1 AND status != 'open'
-             AND created_at >= datetime(?2, 'unixepoch'))",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if has_settled_paper_trades {
-        paper_pnl
-    } else {
-        conn.query_row(
-            "SELECT COALESCE(SUM(cash_pnl), 0.0) FROM positions_snapshots
-             WHERE proxy_wallet = ?1 AND snapshot_at >= datetime(?2, 'unixepoch')
-             AND (proxy_wallet, condition_id, snapshot_at) IN (
-               SELECT proxy_wallet, condition_id, MAX(snapshot_at)
-               FROM positions_snapshots
-               WHERE proxy_wallet = ?1 AND snapshot_at >= datetime(?2, 'unixepoch')
-               GROUP BY proxy_wallet, condition_id
-             )",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0)
-    }
-}
-
-#[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn compute_wallet_features(
     conn: &Connection,
     proxy_wallet: &str,
@@ -260,7 +228,7 @@ pub fn compute_wallet_features(
         )
         .unwrap_or(0.0);
 
-    let total_pnl = total_pnl_from_paper_or_positions(conn, proxy_wallet, cutoff);
+    let total_pnl: f64 = paired.closed_pnls.iter().map(|(_, pnl)| pnl).sum();
 
     let weeks = f64::from(window_days) / 7.0;
     let trades_per_week = if weeks > 0.0 {
@@ -285,11 +253,17 @@ pub fn compute_wallet_features(
     // Max drawdown and Sharpe from daily PnL series (built from closed positions).
     let (max_drawdown_pct, sharpe_ratio) = drawdown_and_sharpe_from_daily_pnl(&paired.closed_pnls)?;
 
-    // Active positions: count of currently open paper_positions
+    // Active positions: count of markets with size > 0 in latest positions_snapshots
     let active_positions: u32 = conn
         .query_row(
-            "SELECT COUNT(DISTINCT condition_id) FROM paper_positions
-             WHERE proxy_wallet = ?1",
+            "SELECT COUNT(DISTINCT condition_id) FROM positions_snapshots
+             WHERE proxy_wallet = ?1
+             AND (proxy_wallet, condition_id, snapshot_at) IN (
+               SELECT proxy_wallet, condition_id, MAX(snapshot_at)
+               FROM positions_snapshots WHERE proxy_wallet = ?1
+               GROUP BY proxy_wallet, condition_id
+             )
+             AND size > 0",
             [proxy_wallet],
             |row| row.get(0),
         )
@@ -464,10 +438,10 @@ pub fn compute_wallet_features(
         burstiness_top_1h_ratio,
         top_domain,
         top_domain_ratio,
+        profitable_markets: paired.profitable_markets,
     })
 }
 
-#[allow(dead_code)] // Wired into scheduler in Task 21
 pub fn save_wallet_features(
     conn: &Connection,
     features: &WalletFeatures,
@@ -479,8 +453,8 @@ pub fn save_wallet_features(
           total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct,
           trades_per_week, trades_per_day, sharpe_ratio, active_positions, concentration_ratio,
           avg_trade_size_usdc, size_cv, buy_sell_balance, mid_fill_ratio, extreme_price_ratio,
-          burstiness_top_1h_ratio, top_domain, top_domain_ratio)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+          burstiness_top_1h_ratio, top_domain, top_domain_ratio, profitable_markets)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         rusqlite::params![
             features.proxy_wallet,
             feature_date,
@@ -506,9 +480,82 @@ pub fn save_wallet_features(
             features.burstiness_top_1h_ratio,
             features.top_domain,
             features.top_domain_ratio,
+            features.profitable_markets,
         ],
     )?;
     Ok(())
+}
+
+/// Compute and save features for a single wallet and window.
+///
+/// This is a wrapper around the batch feature computation logic,
+/// designed for on-demand computation when wallets are first discovered.
+///
+/// # Errors
+/// Returns error if:
+/// - Wallet has <5 settled trades (insufficient data)
+/// - Database query/insert fails
+#[allow(dead_code)] // Used in Task 3 (spawned from discovery)
+pub async fn compute_features_for_wallet(
+    db: &common::db::AsyncDb,
+    _cfg: &common::config::Config,
+    proxy_wallet: &str,
+    window_days: i64,
+) -> anyhow::Result<()> {
+    use chrono::Utc;
+
+    let wallet = proxy_wallet.to_string();
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let min_trades = 5_u32;
+    let window_days_u32 = window_days as u32;
+    let now_epoch = Utc::now().timestamp();
+
+    db.call_named("on_demand_features.compute", move |conn| {
+        // Check settled trade count (same gate as daily batch)
+        let cutoff_epoch = now_epoch - (window_days * 86400);
+
+        let settled_count: i64 = conn.query_row(
+            "
+            SELECT COUNT(DISTINCT t1.transaction_hash)
+            FROM trades_raw t1
+            WHERE t1.proxy_wallet = ?1
+              AND t1.timestamp >= ?2
+              AND EXISTS (
+                  SELECT 1 FROM trades_raw t2
+                  WHERE t2.proxy_wallet = t1.proxy_wallet
+                    AND t2.condition_id = t1.condition_id
+                    AND t2.side != t1.side
+                    AND t2.timestamp >= t1.timestamp
+                    AND t2.timestamp >= ?2
+              )
+            ",
+            rusqlite::params![&wallet, cutoff_epoch],
+            |row| row.get(0),
+        )?;
+
+        if settled_count < i64::from(min_trades) {
+            return Err(anyhow::anyhow!(
+                "insufficient settled trades: {settled_count} < {min_trades}"
+            ));
+        }
+
+        // Compute features (reuse existing logic)
+        let features = compute_wallet_features(conn, &wallet, window_days_u32, now_epoch)?;
+
+        if features.trade_count < min_trades {
+            return Err(anyhow::anyhow!(
+                "insufficient total trades: {} < {min_trades}",
+                features.trade_count
+            ));
+        }
+
+        // Persist
+        save_wallet_features(conn, &features, &today)?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("on-demand feature computation failed: {e}"))
 }
 
 #[cfg(test)]
@@ -599,6 +646,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.5,
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.8,
+            profitable_markets: 4,
         };
 
         save_wallet_features(&db.conn, &features, "2026-02-08").unwrap();
@@ -730,5 +778,189 @@ mod tests {
         let f = compute_wallet_features(&db.conn, "0xabc", 30, now).unwrap();
         assert!(f.burstiness_top_1h_ratio >= 0.5);
         assert!(f.trades_per_day > 0.1);
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_for_wallet_success() {
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let db = common::db::AsyncDb::open(":memory:").await.unwrap();
+
+        // Use current time so trades fall within the 30-day window
+        let now = chrono::Utc::now().timestamp();
+        let day = 86400i64;
+
+        // Insert wallet with 5+ settled trades (BUY-SELL pairs)
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xtest', 'HOLDER', 1)",
+                [],
+            )?;
+            // Create 5 settled round-trips (BUY followed by SELL in each condition)
+            for i in 0..5 {
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xtest', ?2, 'BUY', 100.0, 0.5, ?3)",
+                    rusqlite::params![
+                        format!("0xtxbuy{}", i),
+                        format!("0xcond{}", i),
+                        now - (i + 1) * day
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xtest', ?2, 'SELL', 100.0, 0.6, ?3)",
+                    rusqlite::params![
+                        format!("0xtxsell{}", i),
+                        format!("0xcond{}", i),
+                        now - i * day
+                    ],
+                )?;
+            }
+            Ok(())
+        }).await.unwrap();
+
+        // Call on-demand feature computation
+        let result = compute_features_for_wallet(&db, &cfg, "0xtest", 30).await;
+        assert!(
+            result.is_ok(),
+            "should compute features successfully: {:?}",
+            result.err()
+        );
+
+        // Verify features row inserted
+        let count: i64 = db.call(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM wallet_features_daily WHERE proxy_wallet = '0xtest' AND window_days = 30",
+                [],
+                |row| row.get(0),
+            ).map_err(anyhow::Error::from)
+        }).await.unwrap();
+        assert_eq!(count, 1, "should have 1 feature row");
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_for_wallet_insufficient_trades() {
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let db = common::db::AsyncDb::open(":memory:").await.unwrap();
+
+        // Use current time so trades fall within the 30-day window
+        let now = chrono::Utc::now().timestamp();
+        let day = 86400i64;
+
+        // Insert wallet with only 2 settled trades (below threshold of 5)
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xfew', 'HOLDER', 1)",
+                [],
+            )?;
+            // Only 2 settled round-trips
+            for i in 0..2 {
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xfew', ?2, 'BUY', 100.0, 0.5, ?3)",
+                    rusqlite::params![
+                        format!("0xtxbuy{}", i),
+                        format!("0xcond{}", i),
+                        now - (i + 1) * day
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xfew', ?2, 'SELL', 100.0, 0.6, ?3)",
+                    rusqlite::params![
+                        format!("0xtxsell{}", i),
+                        format!("0xcond{}", i),
+                        now - i * day
+                    ],
+                )?;
+            }
+            Ok(())
+        }).await.unwrap();
+
+        // Call on-demand feature computation
+        let result = compute_features_for_wallet(&db, &cfg, "0xfew", 30).await;
+        assert!(result.is_err(), "should fail with insufficient trades");
+        assert!(
+            result.unwrap_err().to_string().contains("insufficient"),
+            "error should mention insufficient trades"
+        );
+
+        // Verify no features row inserted
+        let count: i64 = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM wallet_features_daily WHERE proxy_wallet = '0xfew'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "should have 0 feature rows");
+    }
+
+    #[tokio::test]
+    async fn test_compute_features_for_wallet_idempotent() {
+        let cfg =
+            common::config::Config::from_toml_str(include_str!("../../../config/default.toml"))
+                .unwrap();
+        let db = common::db::AsyncDb::open(":memory:").await.unwrap();
+
+        // Use current time so trades fall within the 30-day window
+        let now = chrono::Utc::now().timestamp();
+        let day = 86400i64;
+
+        // Insert wallet with sufficient trades
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xidempotent', 'HOLDER', 1)",
+                [],
+            )?;
+            for i in 0..6 {
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xidempotent', '0xcond', 'BUY', 100.0, 0.5, ?2)",
+                    rusqlite::params![format!("0xtx_buy_{}", i), now - (i + 1) * day],
+                )?;
+                conn.execute(
+                    "INSERT INTO trades_raw (transaction_hash, proxy_wallet, condition_id, side, size, price, timestamp)
+                     VALUES (?1, '0xidempotent', '0xcond', 'SELL', 100.0, 0.6, ?2)",
+                    rusqlite::params![format!("0xtx_sell_{}", i), now - i * day],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Call twice
+        compute_features_for_wallet(&db, &cfg, "0xidempotent", 30)
+            .await
+            .unwrap();
+        compute_features_for_wallet(&db, &cfg, "0xidempotent", 30)
+            .await
+            .unwrap();
+
+        // Verify only 1 row (INSERT OR REPLACE with same date/window)
+        let count: i64 = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM wallet_features_daily WHERE proxy_wallet = '0xidempotent' AND window_days = 30",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "should have exactly 1 row due to UNIQUE constraint"
+        );
     }
 }

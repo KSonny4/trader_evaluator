@@ -1,4 +1,5 @@
-#[allow(dead_code)]
+use crate::wallet_features::WalletFeatures;
+
 #[derive(Debug, Clone, Copy)]
 pub struct WScoreWeights {
     pub edge_weight: f64,
@@ -8,7 +9,6 @@ pub struct WScoreWeights {
     pub behavior_quality_weight: f64,
 }
 
-#[allow(dead_code)]
 impl Default for WScoreWeights {
     fn default() -> Self {
         Self {
@@ -21,11 +21,10 @@ impl Default for WScoreWeights {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct WalletScoreInput {
-    /// Total paper ROI over the scoring window, percent (e.g. +12.3).
-    pub paper_roi_pct: f64,
+    /// Total ROI over the scoring window, percent (e.g. +12.3).
+    pub roi_pct: f64,
     /// Stddev of daily returns over the window, percent.
     pub daily_return_stdev_pct: f64,
     /// Win rate (hit rate) in range [0, 1].
@@ -44,20 +43,17 @@ pub struct WalletScoreInput {
     pub is_public_leaderboard_top_500: bool,
 }
 
-#[allow(dead_code)]
 fn clamp01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }
 
-#[allow(dead_code)]
-fn edge_score(paper_roi_pct: f64) -> f64 {
+pub fn edge_score(roi_pct: f64) -> f64 {
     // Normalize ROI into [0, 1], treating <=0 as 0.
     // In early MVP we cap at +20% => 1.0.
-    clamp01(paper_roi_pct.max(0.0) / 20.0)
+    clamp01(roi_pct.max(0.0) / 20.0)
 }
 
-#[allow(dead_code)]
-fn consistency_score(daily_return_stdev_pct: f64) -> f64 {
+pub fn consistency_score(daily_return_stdev_pct: f64) -> f64 {
     // Normalize stdev into [0, 1] where 0% stdev => 1.0 and >=10% => 0.0.
     let max_stdev = 10.0;
     clamp01(1.0 - (daily_return_stdev_pct / max_stdev))
@@ -85,14 +81,13 @@ pub fn behavior_quality_score(noise_trade_ratio: f64) -> f64 {
     clamp01(1.0 - noise_trade_ratio)
 }
 
-#[allow(dead_code)]
 pub fn compute_wscore(
     input: &WalletScoreInput,
     w: &WScoreWeights,
     trust_30_90_multiplier: f64,
     obscurity_bonus_multiplier: f64,
 ) -> f64 {
-    let e = edge_score(input.paper_roi_pct);
+    let e = edge_score(input.roi_pct);
     let c = consistency_score(input.daily_return_stdev_pct);
     let ms = market_skill_score(input.profitable_markets, input.total_markets);
     let ts = timing_skill_score(input.avg_post_entry_drift_cents);
@@ -141,6 +136,48 @@ pub fn compute_wscore(
     clamp01(score)
 }
 
+/// Build a WalletScoreInput from on-chain WalletFeatures (no paper_trades needed).
+pub fn score_input_from_features(
+    features: &WalletFeatures,
+    wallet_age_days: u32,
+    is_leaderboard: bool,
+) -> WalletScoreInput {
+    let total_trades = features.win_count + features.loss_count;
+    let hit_rate = if total_trades > 0 {
+        f64::from(features.win_count) / f64::from(total_trades)
+    } else {
+        0.0
+    };
+
+    // ROI% based on total volume (avg_position_size * trade_count) as proxy bankroll.
+    let bankroll_proxy = features.avg_position_size * f64::from(features.trade_count).max(1.0);
+    let roi_pct = if bankroll_proxy > 0.0 {
+        100.0 * features.total_pnl / bankroll_proxy
+    } else {
+        0.0
+    };
+
+    // daily_return_stdev_pct: use max_drawdown as heuristic proxy.
+    // Rationale: wallets with high drawdown have high return variance.
+    let daily_return_stdev_pct = features.max_drawdown_pct * 0.5;
+
+    // noise_trade_ratio: blend of extreme_price fills and burstiness.
+    let noise_trade_ratio =
+        features.extreme_price_ratio * 0.5 + features.burstiness_top_1h_ratio * 0.5;
+
+    WalletScoreInput {
+        roi_pct,
+        daily_return_stdev_pct,
+        hit_rate,
+        profitable_markets: features.profitable_markets,
+        total_markets: features.unique_markets,
+        avg_post_entry_drift_cents: 0.0, // TODO: compute from post-entry price movement
+        noise_trade_ratio,
+        wallet_age_days,
+        is_public_leaderboard_top_500: is_leaderboard,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,7 +214,7 @@ mod tests {
     #[test]
     fn test_full_wscore_all_5_components() {
         let input = WalletScoreInput {
-            paper_roi_pct: 10.0,
+            roi_pct: 10.0,
             daily_return_stdev_pct: 3.0,
             hit_rate: 0.55,
             profitable_markets: 5,
@@ -203,7 +240,7 @@ mod tests {
         let w = WScoreWeights::default();
         let s = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 12.0,
+                roi_pct: 12.0,
                 daily_return_stdev_pct: 3.0,
                 hit_rate: 0.55,
                 profitable_markets: 0,
@@ -226,7 +263,7 @@ mod tests {
         let w = WScoreWeights::default();
         let good = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 10.0,
+                roi_pct: 10.0,
                 daily_return_stdev_pct: 2.0,
                 hit_rate: 0.60,
                 profitable_markets: 0,
@@ -242,7 +279,7 @@ mod tests {
         );
         let bad = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 0.0,
+                roi_pct: 0.0,
                 daily_return_stdev_pct: 2.0,
                 hit_rate: 0.60,
                 profitable_markets: 0,
@@ -264,7 +301,7 @@ mod tests {
         let w = WScoreWeights::default();
         let stable = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 10.0,
+                roi_pct: 10.0,
                 daily_return_stdev_pct: 1.0,
                 hit_rate: 0.60,
                 profitable_markets: 0,
@@ -280,7 +317,7 @@ mod tests {
         );
         let unstable = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 10.0,
+                roi_pct: 10.0,
                 daily_return_stdev_pct: 12.0,
                 hit_rate: 0.60,
                 profitable_markets: 0,
@@ -302,7 +339,7 @@ mod tests {
         let w = WScoreWeights::default();
         let high_wr = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 10.0,
+                roi_pct: 10.0,
                 daily_return_stdev_pct: 2.0,
                 hit_rate: 0.60,
                 profitable_markets: 0,
@@ -318,7 +355,7 @@ mod tests {
         );
         let low_wr = compute_wscore(
             &WalletScoreInput {
-                paper_roi_pct: 10.0,
+                roi_pct: 10.0,
                 daily_return_stdev_pct: 2.0,
                 hit_rate: 0.40,
                 profitable_markets: 0,
@@ -333,5 +370,46 @@ mod tests {
             1.0,
         );
         assert!(high_wr > low_wr);
+    }
+
+    #[test]
+    fn test_score_input_from_features() {
+        let features = WalletFeatures {
+            proxy_wallet: "0xabc".to_string(),
+            window_days: 30,
+            trade_count: 100,
+            win_count: 60,
+            loss_count: 40,
+            total_pnl: 500.0,
+            avg_position_size: 50.0,
+            unique_markets: 10,
+            avg_hold_time_hours: 24.0,
+            max_drawdown_pct: 8.0,
+            trades_per_week: 25.0,
+            trades_per_day: 3.5,
+            sharpe_ratio: 1.2,
+            active_positions: 3,
+            concentration_ratio: 0.5,
+            avg_trade_size_usdc: 50.0,
+            size_cv: 0.2,
+            buy_sell_balance: 0.8,
+            mid_fill_ratio: 0.1,
+            extreme_price_ratio: 0.05,
+            burstiness_top_1h_ratio: 0.1,
+            top_domain: Some("sports".to_string()),
+            top_domain_ratio: 0.7,
+            profitable_markets: 7,
+        };
+        let input = score_input_from_features(&features, 120, false);
+        assert!((input.hit_rate - 0.6).abs() < 0.01);
+        assert_eq!(input.profitable_markets, 7);
+        assert_eq!(input.total_markets, 10);
+        assert!(input.roi_pct > 0.0);
+        assert_eq!(input.wallet_age_days, 120);
+        assert!(!input.is_public_leaderboard_top_500);
+        // daily_return_stdev_pct = max_drawdown_pct * 0.5 = 4.0
+        assert!((input.daily_return_stdev_pct - 4.0).abs() < 0.01);
+        // noise = 0.05*0.5 + 0.1*0.5 = 0.075
+        assert!((input.noise_trade_ratio - 0.075).abs() < 0.01);
     }
 }

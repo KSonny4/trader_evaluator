@@ -81,33 +81,6 @@
       "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
     },
     {
-      "title": "Paper PnL (USDC)",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 16 },
-      "targets": [
-        {
-          "expr": "evaluator_paper_pnl",
-          "legendFormat": "pnl",
-          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
-        }
-      ],
-      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
-    },
-    {
-      "title": "Risk Violations (rate)",
-      "type": "timeseries",
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 16 },
-      "targets": [
-        {
-          "expr": "sum(rate(evaluator_risk_violations_total[15m]))",
-          "legendFormat": "violations/s",
-          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
-      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" }
-    },
-    {
       "title": "Disk IO (bytes/s)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },

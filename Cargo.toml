@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/common",
     "crates/evaluator",
+    "crates/trader",
     "crates/web",
 ]
 
@@ -31,6 +32,9 @@ askama = "0.15"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tower = { version = "0.5", features = ["util"] }
 base64 = "0.22"
+tokio-util = "0.7"
+urlencoding = "2"
+tempfile = "3"
 
 # === Workspace-wide lint configuration ===
 # These lints enforce clean architecture. Run `cargo clippy` to check.

@@ -1217,6 +1217,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         }
     }
 
@@ -1324,6 +1325,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         }
     }
 
@@ -1422,6 +1424,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         }
     }
 
@@ -1679,6 +1682,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1729,6 +1733,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1782,6 +1787,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         };
 
         let mut config = PersonaConfig::default_for_test();
@@ -1835,6 +1841,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.0,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1874,6 +1881,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.1,
             top_domain: None,
             top_domain_ratio: 0.0,
+            profitable_markets: 3,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1926,6 +1934,7 @@ mod tests {
             burstiness_top_1h_ratio: 0.1,
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.9,
+            profitable_markets: 4,
         };
 
         let config = PersonaConfig::default_for_test();

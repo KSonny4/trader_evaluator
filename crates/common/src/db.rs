@@ -212,7 +212,7 @@ fn migrate_markets_is_crypto_15m(conn: &Connection) -> std::result::Result<(), r
 fn migrate_wallet_features_ag_columns(
     conn: &Connection,
 ) -> std::result::Result<(), rusqlite::Error> {
-    let required: [(&str, &str); 9] = [
+    let required: [(&str, &str); 13] = [
         ("trades_per_day", "REAL NOT NULL DEFAULT 0.0"),
         ("avg_trade_size_usdc", "REAL NOT NULL DEFAULT 0.0"),
         ("size_cv", "REAL NOT NULL DEFAULT 0.0"),
@@ -222,6 +222,10 @@ fn migrate_wallet_features_ag_columns(
         ("burstiness_top_1h_ratio", "REAL NOT NULL DEFAULT 0.0"),
         ("top_domain", "TEXT"),
         ("top_domain_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("profitable_markets", "INTEGER NOT NULL DEFAULT 0"),
+        ("sharpe_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("concentration_ratio", "REAL NOT NULL DEFAULT 0.0"),
+        ("active_positions", "INTEGER NOT NULL DEFAULT 0"),
     ];
     for (name, ty) in required {
         let has: i64 = conn.query_row(
@@ -429,6 +433,7 @@ CREATE TABLE IF NOT EXISTS wallet_features_daily (
     burstiness_top_1h_ratio REAL NOT NULL DEFAULT 0.0,
     top_domain TEXT,               -- dominant domain (wallet's lane)
     top_domain_ratio REAL NOT NULL DEFAULT 0.0,
+    profitable_markets INTEGER NOT NULL DEFAULT 0,
     UNIQUE(proxy_wallet, feature_date, window_days)
 );
 
