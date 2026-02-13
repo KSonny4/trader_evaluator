@@ -90,6 +90,84 @@ pub struct JobHeartbeat {
     pub color: String,
 }
 
+/// Job status row for the async task visualization
+#[derive(serde::Serialize)]
+pub struct JobStatusRow {
+    pub job_name: String,
+    pub status: String,
+    pub last_run_at: Option<String>,
+    pub next_run_at: Option<String>,
+    pub last_error: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub metadata: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl JobStatusRow {
+    /// Format metadata for display in the UI
+    pub fn progress_display(&self) -> String {
+        let Some(meta) = &self.metadata else {
+            return String::new();
+        };
+
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(meta) else {
+            return meta.clone();
+        };
+
+        match self.job_name.as_str() {
+            "wallet_discovery" => {
+                // In-progress: {"progress": 10, "total": 100, "inserted": 5, "phase": "discovering_wallets"}
+                if let (Some(progress), Some(total), Some(inserted)) = (
+                    json.get("progress").and_then(serde_json::Value::as_i64),
+                    json.get("total").and_then(serde_json::Value::as_i64),
+                    json.get("inserted").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{progress}/{total} markets ({inserted} inserted)");
+                }
+                // Completed: {"inserted": 261, "total": 392, "completed": true}
+                if let (Some(inserted), Some(total)) = (
+                    json.get("inserted").and_then(serde_json::Value::as_i64),
+                    json.get("total").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{inserted} wallets inserted ({total} markets)");
+                }
+            }
+            "persona_classification" => {
+                // In-progress: {"processed": 5000, "total": 21239, "suitable": 1200, "phase": "classifying"}
+                if let (Some(processed), Some(total), Some(suitable)) = (
+                    json.get("processed").and_then(serde_json::Value::as_i64),
+                    json.get("total").and_then(serde_json::Value::as_i64),
+                    json.get("suitable").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{processed}/{total} wallets ({suitable} suitable)");
+                }
+                // Completed: {"classified": 17489, "suitable": 1234, "stage1_excluded": 15000, "stage2_excluded": 1255, "completed": true}
+                if let (Some(classified), Some(suitable)) = (
+                    json.get("classified").and_then(serde_json::Value::as_i64),
+                    json.get("suitable").and_then(serde_json::Value::as_i64),
+                ) {
+                    let stage1 = json
+                        .get("stage1_excluded")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let stage2 = json
+                        .get("stage2_excluded")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let excluded = stage1 + stage2;
+                    return format!(
+                        "{classified} classified ({suitable} suitable, {excluded} excluded)"
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        // Fallback: return raw JSON
+        meta.clone()
+    }
+}
+
 /// System status info
 pub struct SystemStatus {
     pub db_size_mb: String,
@@ -564,5 +642,104 @@ mod tests {
         let infos = vec!["x".to_string(); 6];
         let stages = counts.to_stages(&infos);
         assert!(stages.last().unwrap().drop_pct.is_none());
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_wallet_discovery_in_progress() {
+        let job = JobStatusRow {
+            job_name: "wallet_discovery".to_string(),
+            status: "running".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(
+                r#"{"progress":10,"total":100,"inserted":5,"phase":"discovering_wallets"}"#
+                    .to_string(),
+            ),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "10/100 markets (5 inserted)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_wallet_discovery_completed() {
+        let job = JobStatusRow {
+            job_name: "wallet_discovery".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"inserted":261,"total":392,"completed":true}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "261 wallets inserted (392 markets)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_persona_classification_in_progress() {
+        let job = JobStatusRow {
+            job_name: "persona_classification".to_string(),
+            status: "running".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(
+                r#"{"processed":5000,"total":21239,"suitable":1200,"phase":"classifying"}"#
+                    .to_string(),
+            ),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "5000/21239 wallets (1200 suitable)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_persona_classification_completed() {
+        let job = JobStatusRow {
+            job_name: "persona_classification".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"classified":17489,"suitable":1234,"stage1_excluded":15000,"stage2_excluded":1255,"completed":true}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(
+            job.progress_display(),
+            "17489 classified (1234 suitable, 16255 excluded)"
+        );
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_fallback_raw_json() {
+        let job = JobStatusRow {
+            job_name: "unknown_job".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"some":"data"}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), r#"{"some":"data"}"#);
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_no_metadata() {
+        let job = JobStatusRow {
+            job_name: "wallet_discovery".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: None,
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "");
     }
 }

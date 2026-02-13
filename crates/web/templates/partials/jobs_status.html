@@ -1,0 +1,57 @@
+<div class="bg-gray-800/50 rounded-lg p-4 mb-6">
+    <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Async Jobs</h3>
+    <div class="overflow-x-auto">
+        <table class="min-w-full text-sm text-left text-gray-400">
+            <thead class="text-xs text-gray-500 uppercase bg-gray-700/50">
+                <tr>
+                    <th class="px-3 py-2">Job</th>
+                    <th class="px-3 py-2">Status</th>
+                    <th class="px-3 py-2">Duration</th>
+                    <th class="px-3 py-2">Last Run</th>
+                    <th class="px-3 py-2">Message</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-700/50">
+                {% for job in jobs %}
+                <tr class="hover:bg-gray-700/30">
+                    <td class="px-3 py-2 font-medium text-gray-200">{{ job.job_name }}</td>
+                    <td class="px-3 py-2">
+                        {% if job.status == "running" %}
+                        <span
+                            class="px-2 py-0.5 rounded text-xs font-medium bg-blue-900 text-blue-300 animate-pulse">Running</span>
+                        {% else if job.status == "failed" %}
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-900 text-red-300">Failed</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-900 text-green-300">Idle</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-3 py-2">
+                        {% if let Some(ms) = job.duration_ms %}
+                        {{ ms }}ms
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td class="px-3 py-2">
+                        {% if let Some(ts) = job.last_run_at %}
+                        {{ ts }}
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td class="px-3 py-2 text-xs truncate max-w-xs"
+                        title="{{ job.last_error.as_deref().unwrap_or(job.metadata.as_deref().unwrap_or("")) }}">
+                        {% if let Some(err) = job.last_error %}
+                        <span class="text-red-400">{{ err }}</span>
+                        {% else %}
+                        <span class="{% if job.status == "running" %}text-blue-300{% else %}text-gray-400{% endif %}">
+                            {{ job.progress_display() }}
+                        </span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
