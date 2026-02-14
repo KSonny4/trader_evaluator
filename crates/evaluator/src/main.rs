@@ -73,19 +73,11 @@ async fn main() -> Result<()> {
         tracing::info!("event logging subscriber started");
     }
 
-    // ── Bootstrap: seed markets + wallets, then let scheduler handle the rest ──
-    // Order: event_scoring first (wallet_discovery reads market_scores). Then run
-    // wallet_discovery, leaderboard_discovery, and recovery in parallel (they are independent).
-    // Finally wallet_rules (needs wallets to exist).
-    tracing::info!("bootstrap: seeding markets and wallets");
+    // ── Bootstrap: Run all jobs concurrently for immediate startup ──
+    tracing::info!("bootstrap: running all jobs in parallel");
 
-    match jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref(), event_bus.as_deref()).await
-    {
-        Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
-    }
-
-    let (wallet_res, leaderboard_res) = tokio::join!(
+    let (scoring_res, wallet_res, leaderboard_res, classification_res, rules_res) = tokio::join!(
+        jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref(), event_bus.as_deref()),
         jobs::run_wallet_discovery_once(
             &db,
             api.as_ref(),
@@ -94,7 +86,14 @@ async fn main() -> Result<()> {
             event_bus.as_deref()
         ),
         jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
+        jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref()),
+        jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()),
     );
+
+    match scoring_res {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
+    }
     match wallet_res {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
@@ -103,8 +102,11 @@ async fn main() -> Result<()> {
         Ok(n) => tracing::info!(inserted = n, "bootstrap: leaderboard_discovery done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
     }
-
-    match jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()).await {
+    match classification_res {
+        Ok(classified) => tracing::info!(classified, "bootstrap: persona_classification done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: persona_classification failed"),
+    }
+    match rules_res {
         Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
         Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
     }
@@ -201,7 +203,10 @@ async fn main() -> Result<()> {
         // Wire paper_tick_rx to downstream consumer (future: paper trading scheduler)
         tokio::spawn(async move {
             while let Some(generation) = paper_tick_rx.recv().await {
-                tracing::info!(generation, "fast-path tick received (ready for paper trading integration)");
+                tracing::info!(
+                    generation,
+                    "fast-path tick received (ready for paper trading integration)"
+                );
                 // TODO: When trader microservice supports event-driven mode, trigger paper tick here
             }
         });
@@ -383,12 +388,14 @@ async fn main() -> Result<()> {
                 let span = tracing::info_span!("job_run", job = "trades_ingestion");
                 let _g = span.enter();
                 let w = cfg.ingestion.wallets_per_ingestion_run;
+                let pt = cfg.ingestion.parallel_tasks;
                 match jobs::run_trades_ingestion_once(
                     &db,
-                    api.as_ref(),
+                    api.clone(),
                     200,
                     w,
-                    event_bus.as_deref(),
+                    pt,
+                    event_bus.clone(),
                 )
                 .await
                 {
@@ -410,7 +417,8 @@ async fn main() -> Result<()> {
                 let span = tracing::info_span!("job_run", job = "activity_ingestion");
                 let _g = span.enter();
                 let w = cfg.ingestion.wallets_per_ingestion_run;
-                match jobs::run_activity_ingestion_once(&db, api.as_ref(), 200, w).await {
+                let pt = cfg.ingestion.parallel_tasks;
+                match jobs::run_activity_ingestion_once(&db, api.clone(), 200, w, pt).await {
                     Ok(inserted) => tracing::info!(inserted, "activity_ingestion done"),
                     Err(e) => tracing::error!(error = %e, "activity_ingestion failed"),
                 }
@@ -427,7 +435,8 @@ async fn main() -> Result<()> {
                 let span = tracing::info_span!("job_run", job = "positions_snapshot");
                 let _g = span.enter();
                 let w = cfg.ingestion.wallets_per_ingestion_run;
-                match jobs::run_positions_snapshot_once(&db, api.as_ref(), 200, w).await {
+                let pt = cfg.ingestion.parallel_tasks;
+                match jobs::run_positions_snapshot_once(&db, api.clone(), 200, w, pt).await {
                     Ok(inserted) => tracing::info!(inserted, "positions_snapshot done"),
                     Err(e) => tracing::error!(error = %e, "positions_snapshot failed"),
                 }

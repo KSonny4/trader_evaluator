@@ -143,6 +143,10 @@ fn default_parallel_tasks() -> usize {
     8
 }
 
+fn default_ingestion_parallel_tasks() -> usize {
+    4
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ingestion {
     #[serde(default = "default_wallets_per_ingestion_run")]
@@ -154,6 +158,8 @@ pub struct Ingestion {
     pub rate_limit_delay_ms: u64,
     pub max_retries: u32,
     pub backoff_base_ms: u64,
+    #[serde(default = "default_ingestion_parallel_tasks")]
+    pub parallel_tasks: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -947,29 +953,29 @@ size_change_multiplier = 10.0
     fn test_events_config_loads_with_defaults() {
         let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
         let events = config.events;
-        assert!(!events.enabled, "events should be disabled by default");
+        assert!(events.enabled, "events should be enabled in default.toml");
         assert!(
-            !events.log_to_db,
-            "event logging to DB should be disabled by default"
+            events.log_to_db,
+            "event logging to DB should be enabled in default.toml"
         );
         assert_eq!(events.bus_capacity, 1000);
     }
 
     #[test]
-    fn test_events_config_trigger_flags_default_to_false() {
+    fn test_events_config_trigger_flags() {
         let config = Config::from_toml_str(include_str!("../../../config/default.toml")).unwrap();
         let events = config.events;
         assert!(
-            !events.enable_discovery_event_trigger,
-            "discovery event trigger should be disabled by default"
+            events.enable_discovery_event_trigger,
+            "discovery event trigger should be enabled in default.toml"
         );
         assert!(
-            !events.enable_classification_event_trigger,
-            "classification event trigger should be disabled by default"
+            events.enable_classification_event_trigger,
+            "classification event trigger should be enabled in default.toml"
         );
         assert!(
-            !events.enable_fast_path_trigger,
-            "fast path trigger should be disabled by default"
+            events.enable_fast_path_trigger,
+            "fast path trigger should be enabled in default.toml"
         );
         assert_eq!(events.classification_batch_window_secs, 300);
     }

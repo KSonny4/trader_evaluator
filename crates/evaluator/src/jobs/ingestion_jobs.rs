@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use common::db::AsyncDb;
 
@@ -5,12 +7,13 @@ use super::fetcher_traits::*;
 use crate::event_bus::EventBus;
 use crate::events::PipelineEvent;
 
-pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
+pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Send + Sync + 'static>(
     db: &AsyncDb,
-    pager: &P,
+    pager: Arc<P>,
     limit: u32,
     wallets_limit: u32,
-    event_bus: Option<&EventBus>,
+    parallel_tasks: usize,
+    event_bus: Option<Arc<EventBus>>,
 ) -> Result<(u64, u64)> {
     // Backfill first: wallets with 0 trades (so persona can evaluate them), then wallets that
     // already have trades. Within each tier, oldest discovered first so we make progress through
@@ -38,35 +41,70 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
 
     let total = wallets.len();
     if total > 0 {
-        tracing::info!(wallets = total, first = %wallets[0], "trades_ingestion: processing wallets");
+        tracing::info!(
+            wallets = total,
+            parallel_tasks,
+            first = %wallets[0],
+            "trades_ingestion: processing wallets"
+        );
     }
+
+    // Split wallets into N chunks, spawn N concurrent tasks
+    let num_tasks = parallel_tasks.max(1).min(total.max(1));
+    let chunk_size = total.div_ceil(num_tasks.max(1));
+    let mut handles = Vec::new();
+
+    for chunk in wallets.chunks(chunk_size) {
+        let chunk = chunk.to_vec();
+        let db = db.clone();
+        let pager = pager.clone();
+        let event_bus = event_bus.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut pages = 0_u64;
+            let mut inserted = 0_u64;
+            for w in &chunk {
+                match crate::ingestion::ingest_trades_for_wallet(&db, &*pager, w, limit).await {
+                    Ok((p, ins)) => {
+                        pages += p;
+                        inserted += ins;
+                        if let Some(ref bus) = event_bus {
+                            let _ = bus.publish_pipeline(PipelineEvent::TradesIngested {
+                                wallet_address: w.clone(),
+                                trades_count: ins,
+                                ingested_at: chrono::Utc::now(),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            wallet = %w,
+                            error = %e,
+                            "trades ingestion failed for wallet; continuing to next"
+                        );
+                    }
+                }
+            }
+            (pages, inserted)
+        });
+        handles.push(handle);
+    }
+
+    // Collect results from all tasks
     let mut pages = 0_u64;
     let mut inserted = 0_u64;
-    for (i, w) in wallets.iter().enumerate() {
-        match crate::ingestion::ingest_trades_for_wallet(db, pager, w, limit).await {
+    for handle in handles {
+        match handle.await {
             Ok((p, ins)) => {
                 pages += p;
                 inserted += ins;
-                if (i + 1) % 100 == 0 || i == 0 {
-                    tracing::info!(n = i + 1, total, inserted, "trades_ingestion: progress");
-                }
-                if let Some(bus) = event_bus {
-                    let _ = bus.publish_pipeline(PipelineEvent::TradesIngested {
-                        wallet_address: w.clone(),
-                        trades_count: ins,
-                        ingested_at: chrono::Utc::now(),
-                    });
-                }
             }
             Err(e) => {
-                tracing::warn!(
-                    wallet = %w,
-                    error = %e,
-                    "trades ingestion failed for wallet; continuing to next"
-                );
+                tracing::error!(error = %e, "trades_ingestion: spawned task panicked");
             }
         }
     }
+
     metrics::counter!("evaluator_trades_ingested_total").increment(inserted);
 
     // Persist last-run stats for dashboard "async funnel".
@@ -89,11 +127,12 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
     Ok((pages, inserted))
 }
 
-pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
+pub async fn run_activity_ingestion_once<P: ActivityPager + Send + Sync + 'static>(
     db: &AsyncDb,
-    pager: &P,
+    pager: Arc<P>,
     limit: u32,
     wallets_limit: u32,
+    parallel_tasks: usize,
 ) -> Result<u64> {
     // Same as trades: wallets with recent trades first; then no trades or too old (re)download.
     let wallets: Vec<String> = db
@@ -122,77 +161,102 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
         })
         .await?;
 
-    let mut inserted = 0_u64;
-    for w in wallets {
-        let fetch_result = pager.fetch_activity_page(&w, limit, 0).await;
-        let (events, _raw) = match fetch_result {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    wallet = %w,
-                    error = %e,
-                    "activity ingestion failed for wallet; continuing to next"
-                );
-                continue;
+    let total = wallets.len();
+    let num_tasks = parallel_tasks.max(1).min(total.max(1));
+    let chunk_size = total.div_ceil(num_tasks.max(1));
+    let mut handles = Vec::new();
+
+    for chunk in wallets.chunks(chunk_size) {
+        let chunk = chunk.to_vec();
+        let db = db.clone();
+        let pager = pager.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut inserted = 0_u64;
+            for w in chunk {
+                let fetch_result = pager.fetch_activity_page(&w, limit, 0).await;
+                let (events, _raw) = match fetch_result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            wallet = %w,
+                            error = %e,
+                            "activity ingestion failed for wallet; continuing to next"
+                        );
+                        continue;
+                    }
+                };
+
+                let page_inserted = db
+                    .call_named("run_activity_ingestion.insert_page", move |conn| {
+                        let tx = conn.transaction()?;
+
+                        let mut ins = 0_u64;
+                        for e in events {
+                            let proxy_wallet = match e.proxy_wallet.as_deref() {
+                                Some(v) if !v.is_empty() => v.to_string(),
+                                _ => continue,
+                            };
+                            let activity_type = match e.activity_type.as_deref() {
+                                Some(v) if !v.is_empty() => v.to_string(),
+                                _ => continue,
+                            };
+                            let timestamp = e.timestamp.unwrap_or(0);
+                            let raw_json = serde_json::to_string(&e).unwrap_or_default();
+                            let changed = tx.execute(
+                                "
+                                INSERT OR IGNORE INTO activity_raw
+                                    (proxy_wallet, condition_id, activity_type, size, usdc_size, price, side, outcome, outcome_index, timestamp, transaction_hash, raw_json)
+                                VALUES
+                                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                                ",
+                                rusqlite::params![
+                                    proxy_wallet,
+                                    e.condition_id,
+                                    activity_type,
+                                    e.size.and_then(|s| s.parse::<f64>().ok()),
+                                    e.usdc_size.and_then(|s| s.parse::<f64>().ok()),
+                                    e.price.and_then(|s| s.parse::<f64>().ok()),
+                                    e.side,
+                                    e.outcome,
+                                    e.outcome_index,
+                                    timestamp,
+                                    e.transaction_hash,
+                                    raw_json,
+                                ],
+                            )?;
+                            ins += changed as u64;
+                        }
+                        tx.commit()?;
+                        Ok(ins)
+                    })
+                    .await
+                    .unwrap_or(0);
+
+                inserted += page_inserted;
             }
-        };
+            inserted
+        });
+        handles.push(handle);
+    }
 
-        let page_inserted = db
-            .call_named("run_activity_ingestion.insert_page", move |conn| {
-                let tx = conn.transaction()?;
-
-                let mut ins = 0_u64;
-                for e in events {
-                    let proxy_wallet = match e.proxy_wallet.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let activity_type = match e.activity_type.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let timestamp = e.timestamp.unwrap_or(0);
-                    let raw_json = serde_json::to_string(&e).unwrap_or_default();
-                    let changed = tx.execute(
-                        "
-                        INSERT OR IGNORE INTO activity_raw
-                            (proxy_wallet, condition_id, activity_type, size, usdc_size, price, side, outcome, outcome_index, timestamp, transaction_hash, raw_json)
-                        VALUES
-                            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                        ",
-                        rusqlite::params![
-                            proxy_wallet,
-                            e.condition_id,
-                            activity_type,
-                            e.size.and_then(|s| s.parse::<f64>().ok()),
-                            e.usdc_size.and_then(|s| s.parse::<f64>().ok()),
-                            e.price.and_then(|s| s.parse::<f64>().ok()),
-                            e.side,
-                            e.outcome,
-                            e.outcome_index,
-                            timestamp,
-                            e.transaction_hash,
-                            raw_json,
-                        ],
-                    )?;
-                    ins += changed as u64;
-                }
-                tx.commit()?;
-                Ok(ins)
-            })
-            .await?;
-
-        inserted += page_inserted;
+    let mut inserted = 0_u64;
+    for handle in handles {
+        match handle.await {
+            Ok(ins) => inserted += ins,
+            Err(e) => tracing::error!(error = %e, "activity_ingestion: spawned task panicked"),
+        }
     }
 
     Ok(inserted)
 }
 
-pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
+pub async fn run_positions_snapshot_once<P: PositionsPager + Send + Sync + 'static>(
     db: &AsyncDb,
-    pager: &P,
+    pager: Arc<P>,
     limit: u32,
     wallets_limit: u32,
+    parallel_tasks: usize,
 ) -> Result<u64> {
     let wallets: Vec<String> = db
         .call_named("run_positions_snapshot.wallets_select", move |conn| {
@@ -212,68 +276,94 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
         })
         .await?;
 
-    let mut inserted = 0_u64;
-    for w in wallets {
-        let fetch_result = pager.fetch_positions_page(&w, limit, 0).await;
-        let (positions, _raw) = match fetch_result {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    wallet = %w,
-                    error = %e,
-                    "positions snapshot failed for wallet; continuing to next"
-                );
-                continue;
-            }
-        };
+    let total = wallets.len();
+    let num_tasks = parallel_tasks.max(1).min(total.max(1));
+    let chunk_size = total.div_ceil(num_tasks.max(1));
+    let mut handles = Vec::new();
 
-        let page_inserted = db
-            .call_named("run_positions_snapshot.insert_page", move |conn| {
-                let tx = conn.transaction()?;
+    for chunk in wallets.chunks(chunk_size) {
+        let chunk = chunk.to_vec();
+        let db = db.clone();
+        let pager = pager.clone();
 
-                let mut ins = 0_u64;
-                for p in positions {
-                    let proxy_wallet = match p.proxy_wallet.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let condition_id = match p.condition_id.as_deref() {
-                        Some(v) if !v.is_empty() => v.to_string(),
-                        _ => continue,
-                    };
-                    let Some(size) = p.size.as_deref().and_then(|s| s.parse::<f64>().ok()) else {
+        let handle = tokio::spawn(async move {
+            let mut inserted = 0_u64;
+            for w in chunk {
+                let fetch_result = pager.fetch_positions_page(&w, limit, 0).await;
+                let (positions, _raw) = match fetch_result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            wallet = %w,
+                            error = %e,
+                            "positions snapshot failed for wallet; continuing to next"
+                        );
                         continue;
-                    };
-                    let raw_json = serde_json::to_string(&p).unwrap_or_default();
-                    let changed = tx.execute(
-                        "
-                        INSERT INTO positions_snapshots
-                            (proxy_wallet, condition_id, asset, size, avg_price, current_value, cash_pnl, percent_pnl, outcome, outcome_index, raw_json)
-                        VALUES
-                            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                        ",
-                        rusqlite::params![
-                            proxy_wallet,
-                            condition_id,
-                            p.asset,
-                            size,
-                            p.avg_price.and_then(|s| s.parse::<f64>().ok()),
-                            p.current_value.and_then(|s| s.parse::<f64>().ok()),
-                            p.cash_pnl.and_then(|s| s.parse::<f64>().ok()),
-                            p.percent_pnl.and_then(|s| s.parse::<f64>().ok()),
-                            p.outcome,
-                            p.outcome_index,
-                            raw_json,
-                        ],
-                    )?;
-                    ins += changed as u64;
-                }
-                tx.commit()?;
-                Ok(ins)
-            })
-            .await?;
+                    }
+                };
 
-        inserted += page_inserted;
+                let page_inserted = db
+                    .call_named("run_positions_snapshot.insert_page", move |conn| {
+                        let tx = conn.transaction()?;
+
+                        let mut ins = 0_u64;
+                        for p in positions {
+                            let proxy_wallet = match p.proxy_wallet.as_deref() {
+                                Some(v) if !v.is_empty() => v.to_string(),
+                                _ => continue,
+                            };
+                            let condition_id = match p.condition_id.as_deref() {
+                                Some(v) if !v.is_empty() => v.to_string(),
+                                _ => continue,
+                            };
+                            let Some(size) =
+                                p.size.as_deref().and_then(|s| s.parse::<f64>().ok())
+                            else {
+                                continue;
+                            };
+                            let raw_json = serde_json::to_string(&p).unwrap_or_default();
+                            let changed = tx.execute(
+                                "
+                                INSERT INTO positions_snapshots
+                                    (proxy_wallet, condition_id, asset, size, avg_price, current_value, cash_pnl, percent_pnl, outcome, outcome_index, raw_json)
+                                VALUES
+                                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                                ",
+                                rusqlite::params![
+                                    proxy_wallet,
+                                    condition_id,
+                                    p.asset,
+                                    size,
+                                    p.avg_price.and_then(|s| s.parse::<f64>().ok()),
+                                    p.current_value.and_then(|s| s.parse::<f64>().ok()),
+                                    p.cash_pnl.and_then(|s| s.parse::<f64>().ok()),
+                                    p.percent_pnl.and_then(|s| s.parse::<f64>().ok()),
+                                    p.outcome,
+                                    p.outcome_index,
+                                    raw_json,
+                                ],
+                            )?;
+                            ins += changed as u64;
+                        }
+                        tx.commit()?;
+                        Ok(ins)
+                    })
+                    .await
+                    .unwrap_or(0);
+
+                inserted += page_inserted;
+            }
+            inserted
+        });
+        handles.push(handle);
+    }
+
+    let mut inserted = 0_u64;
+    for handle in handles {
+        match handle.await {
+            Ok(ins) => inserted += ins,
+            Err(e) => tracing::error!(error = %e, "positions_snapshot: spawned task panicked"),
+        }
     }
 
     Ok(inserted)
@@ -421,8 +511,8 @@ mod tests {
         .await
         .unwrap();
 
-        let pager = OnePagePager;
-        let (_pages, inserted) = run_trades_ingestion_once(&db, &pager, 100, 500, None)
+        let pager = Arc::new(OnePagePager);
+        let (_pages, inserted) = run_trades_ingestion_once(&db, pager, 100, 500, 4, None)
             .await
             .unwrap();
         assert_eq!(inserted, 1);
@@ -487,11 +577,11 @@ mod tests {
         .await
         .unwrap();
 
-        let bus = EventBus::new(16);
+        let bus = Arc::new(EventBus::new(16));
         let mut rx = bus.subscribe_pipeline();
 
-        let pager = PerWalletPager;
-        let (_pages, inserted) = run_trades_ingestion_once(&db, &pager, 100, 500, Some(&bus))
+        let pager = Arc::new(PerWalletPager);
+        let (_pages, inserted) = run_trades_ingestion_once(&db, pager, 100, 500, 4, Some(bus))
             .await
             .unwrap();
 
@@ -535,11 +625,40 @@ mod tests {
         .await
         .unwrap();
 
-        let pager = OnePagePager;
+        let pager = Arc::new(OnePagePager);
         // Should work fine without event_bus (backward compatible)
-        let (_pages, inserted) = run_trades_ingestion_once(&db, &pager, 100, 500, None)
+        let (_pages, inserted) = run_trades_ingestion_once(&db, pager, 100, 500, 4, None)
             .await
             .unwrap();
         assert_eq!(inserted, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_trades_ingestion_parallel_processes_all_wallets() {
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        // Insert 5 wallets
+        db.call(|conn| {
+            for i in 0..5 {
+                conn.execute(
+                    "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES (?1, 'HOLDER', 1)",
+                    rusqlite::params![format!("0xw{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let pager = Arc::new(PerWalletPager);
+        let (_pages, inserted) = run_trades_ingestion_once(&db, pager, 100, 500, 2, None)
+            .await
+            .unwrap();
+
+        // All 5 wallets should have been processed (2 parallel tasks)
+        assert_eq!(
+            inserted, 5,
+            "all 5 wallets should be processed with parallel_tasks=2"
+        );
     }
 }

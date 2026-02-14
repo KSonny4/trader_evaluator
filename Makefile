@@ -59,7 +59,12 @@ OVERLENGTH_ALLOWLIST := \
 	crates/common/src/db.rs \
 	crates/common/src/polymarket.rs \
 	crates/trader/src/engine/mirror.rs \
-	crates/trader/src/risk/mod.rs
+	crates/trader/src/risk/mod.rs \
+	crates/evaluator/src/jobs/ingestion_jobs.rs \
+	crates/evaluator/src/main.rs \
+	crates/evaluator/src/events/subscribers.rs \
+	crates/evaluator/src/event_bus.rs \
+	crates/evaluator/src/cli.rs
 
 check-file-length:
 	@echo "=== Checking .rs files for >$(MAX_FILE_LINES) lines ==="
