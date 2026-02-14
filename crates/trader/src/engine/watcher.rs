@@ -1,12 +1,14 @@
 use crate::config::TraderConfig;
 use crate::db::TraderDb;
 use crate::engine::detector::TradeDetector;
+use crate::engine::fillability::FillabilityRecorder;
 use crate::engine::mirror;
 use crate::engine::settlement;
 use crate::engine::FollowedWallet;
 use crate::polymarket::TraderPolymarketClient;
 use crate::risk::wallet as risk_wallet;
 use crate::risk::RiskManager;
+use crate::types::Side;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,18 +16,20 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Run the watcher loop for a single wallet.
-/// Polls for new trades, detects new ones, and (in later phases) mirrors them.
+/// Polls for new trades, detects new ones, mirrors them, and records fillability.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_watcher(
     db: Arc<TraderDb>,
     client: Arc<TraderPolymarketClient>,
     config: Arc<TraderConfig>,
     risk: Arc<RiskManager>,
+    fillability: Arc<FillabilityRecorder>,
     wallet: FollowedWallet,
     halted: Arc<AtomicBool>,
     cancel: CancellationToken,
 ) {
     let addr = &wallet.proxy_wallet;
-    let poll_interval = Duration::from_secs(config.trading.poll_interval_secs);
+    let poll_interval = Duration::from_millis(config.trading.poll_interval_ms);
 
     info!(wallet = %addr, mode = %wallet.trading_mode, "watcher started");
 
@@ -86,6 +90,29 @@ pub async fn run_watcher(
 
                             for trade in &new_trades {
                                 log_trade_event(&db, addr, trade).await;
+
+                                // Start fillability recording (non-blocking background task)
+                                if let Some(ref token_id) = trade.asset {
+                                    let condition_id = trade.condition_id.as_deref().unwrap_or("");
+                                    let trade_hash = TraderPolymarketClient::trade_hash(trade);
+                                    let side = trade.side.as_deref()
+                                        .and_then(Side::from_str_loose)
+                                        .unwrap_or(Side::Buy);
+                                    let their_price: f64 = trade.price.as_deref()
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0.5);
+                                    let their_size: f64 = trade.size.as_deref()
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0.0);
+                                    fillability.record_fillability(
+                                        token_id,
+                                        condition_id,
+                                        &trade_hash,
+                                        side,
+                                        their_size,
+                                        their_price,
+                                    ).await;
+                                }
 
                                 let detection_delay_ms = trade
                                     .timestamp

@@ -1,15 +1,18 @@
 use crate::polymarket::{RawTrade, TraderPolymarketClient};
 use std::collections::HashSet;
+use tracing::info;
 
 /// Watermark-based new trade detector.
 /// Tracks which trade hashes we've already seen and filters to only new ones.
 pub struct TradeDetector {
     seen_hashes: HashSet<String>,
     last_timestamp: Option<i64>,
+    warmed_up: bool,
 }
 
 impl TradeDetector {
     pub fn new(last_seen_hash: Option<String>) -> Self {
+        let warmed_up = last_seen_hash.is_some();
         let mut seen = HashSet::new();
         if let Some(hash) = last_seen_hash {
             seen.insert(hash);
@@ -17,12 +20,26 @@ impl TradeDetector {
         Self {
             seen_hashes: seen,
             last_timestamp: None,
+            warmed_up,
         }
     }
 
     /// Filter a batch of trades to only those we haven't seen before.
     /// Returns new trades in chronological order (oldest first).
     pub fn detect_new<'a>(&mut self, trades: &'a [RawTrade]) -> Vec<&'a RawTrade> {
+        if !self.warmed_up {
+            self.warmed_up = true;
+            for trade in trades {
+                let hash = TraderPolymarketClient::trade_hash(trade);
+                self.seen_hashes.insert(hash);
+            }
+            if let Some(last) = trades.iter().max_by_key(|t| t.timestamp.unwrap_or(0)) {
+                self.last_timestamp = last.timestamp;
+            }
+            info!(count = trades.len(), "warm-up: ingested existing trades, will only mirror new ones");
+            return Vec::new();
+        }
+
         let mut new_trades: Vec<&RawTrade> = Vec::new();
 
         for trade in trades {
@@ -92,14 +109,23 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_new_all_fresh() {
+    fn test_detect_new_all_fresh_after_warmup() {
         let mut detector = TradeDetector::new(None);
         let trades = vec![make_trade("t1", 100), make_trade("t2", 200)];
 
+        // First call is warm-up — returns empty
         let new = detector.detect_new(&trades);
-        assert_eq!(new.len(), 2);
-        assert_eq!(new[0].id.as_deref(), Some("t1"));
-        assert_eq!(new[1].id.as_deref(), Some("t2"));
+        assert_eq!(new.len(), 0);
+
+        // Second call with a new trade — only the new one is returned
+        let trades2 = vec![
+            make_trade("t1", 100),
+            make_trade("t2", 200),
+            make_trade("t3", 300),
+        ];
+        let new2 = detector.detect_new(&trades2);
+        assert_eq!(new2.len(), 1);
+        assert_eq!(new2[0].id.as_deref(), Some("t3"));
     }
 
     #[test]
@@ -116,11 +142,12 @@ mod tests {
     fn test_detect_new_no_duplicates_across_calls() {
         let mut detector = TradeDetector::new(None);
 
+        // Warm-up
         let batch1 = vec![make_trade("t1", 100), make_trade("t2", 200)];
         let new1 = detector.detect_new(&batch1);
-        assert_eq!(new1.len(), 2);
+        assert_eq!(new1.len(), 0);
 
-        // Same batch again — nothing new
+        // Same batch again — nothing new (already seen during warm-up)
         let batch2 = vec![make_trade("t1", 100), make_trade("t2", 200)];
         let new2 = detector.detect_new(&batch2);
         assert_eq!(new2.len(), 0);
@@ -139,8 +166,14 @@ mod tests {
     #[test]
     fn test_detect_new_sorted_chronologically() {
         let mut detector = TradeDetector::new(None);
-        // Trades arrive in reverse order
+
+        // Warm-up with initial trades
+        let warmup = vec![make_trade("t0", 50)];
+        detector.detect_new(&warmup);
+
+        // New trades arrive in reverse order
         let trades = vec![
+            make_trade("t0", 50),
             make_trade("t3", 300),
             make_trade("t1", 100),
             make_trade("t2", 200),
@@ -159,22 +192,65 @@ mod tests {
         let mut detector = TradeDetector::new(None);
         assert_eq!(detector.seen_count(), 0);
 
+        // Warm-up ingests hashes
         let trades = vec![make_trade("t1", 100), make_trade("t2", 200)];
         detector.detect_new(&trades);
         assert_eq!(detector.seen_count(), 2);
+
+        // New trade adds to seen count
+        let trades2 = vec![
+            make_trade("t1", 100),
+            make_trade("t2", 200),
+            make_trade("t3", 300),
+        ];
+        detector.detect_new(&trades2);
+        assert_eq!(detector.seen_count(), 3);
     }
 
     #[test]
     fn test_prune() {
-        let mut detector = TradeDetector::new(None);
+        // Start with a watermark so warm-up is skipped
+        let mut detector = TradeDetector::new(Some("seed".to_string()));
         for i in 0..200 {
             let trades = vec![make_trade(&format!("t{i}"), i64::from(i))];
             detector.detect_new(&trades);
         }
-        assert_eq!(detector.seen_count(), 200);
+        // 200 trades + 1 seed hash
+        assert_eq!(detector.seen_count(), 201);
 
-        // Prune with keep=50 — since 200 > 50*2, it clears
+        // Prune with keep=50 — since 201 > 50*2, it clears
         detector.prune(50);
         assert_eq!(detector.seen_count(), 0);
+    }
+
+    #[test]
+    fn test_warmup_skips_first_batch() {
+        let mut detector = TradeDetector::new(None);
+        let trades = vec![make_trade("t1", 100), make_trade("t2", 200)];
+
+        // First call: warm-up, returns empty
+        let new = detector.detect_new(&trades);
+        assert!(new.is_empty());
+
+        // Second call with a new trade: only new trade returned
+        let trades2 = vec![
+            make_trade("t1", 100),
+            make_trade("t2", 200),
+            make_trade("t3", 300),
+        ];
+        let new2 = detector.detect_new(&trades2);
+        assert_eq!(new2.len(), 1);
+        assert_eq!(new2[0].id.as_deref(), Some("t3"));
+    }
+
+    #[test]
+    fn test_warmup_not_needed_with_watermark() {
+        let mut detector = TradeDetector::new(Some("t1".to_string()));
+        let trades = vec![make_trade("t1", 100), make_trade("t2", 200)];
+
+        // First call returns new trades immediately (no warm-up needed)
+        let new = detector.detect_new(&trades);
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].id.as_deref(), Some("t2"));
     }
 }
