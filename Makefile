@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean check-file-length
-.PHONY: todo todo-check todo-test reset-and-run
+.PHONY: todo todo-check todo-test reset-and-run trader-fresh trader-wallet
 
 # === Local enforcement ===
 setup-hooks:
@@ -242,6 +242,31 @@ status:
 	@$(DB_CMD) "SELECT 'wallet scores today:' || COUNT(*) FROM wallet_scores_daily WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'last trade ingested: ' || COALESCE(MAX(ingested_at), 'never') FROM trades_raw"
 	@$(DB_CMD) "SELECT 'DB size:            ' || (page_count * page_size / 1024 / 1024) || ' MB' FROM pragma_page_count(), pragma_page_size()"
+
+# === Trader (standalone microservice) ===
+TRADER_DB ?= data/trader.db
+
+# Fresh start: wipe DB, start trader with debug logs
+trader-fresh:
+	@mkdir -p data
+	@rm -f $(TRADER_DB)
+	@echo "Fresh start — deleted $(TRADER_DB)"
+	RUST_LOG=trader=debug cargo run -p trader
+
+# Fresh start + auto-follow a wallet
+# Usage: make trader-wallet WALLET=<addr> LABEL=<name> BANKROLL=<usd>
+trader-wallet:
+	@if [ -z "$(WALLET)" ]; then echo "Usage: make trader-wallet WALLET=<addr> LABEL=<name> BANKROLL=<usd>"; exit 1; fi
+	@mkdir -p data
+	@rm -f $(TRADER_DB)
+	@echo "Fresh start — deleted $(TRADER_DB)"
+	@RUST_LOG=trader=debug cargo run -p trader &
+	@sleep 3
+	@curl -s -X POST http://localhost:8081/api/wallets \
+		-H "Content-Type: application/json" \
+		-d '{"proxy_wallet":"$(WALLET)","label":"$(or $(LABEL),unnamed)","estimated_bankroll_usd":$(or $(BANKROLL),5000),"trading_mode":"paper"}'
+	@echo "\nTrader running with debug logs. Ctrl+C to stop."
+	@wait
 
 # === Reclassify (after persona logic changes) ===
 # Clears persona state so the next pipeline run re-evaluates all wallets with current code/config.

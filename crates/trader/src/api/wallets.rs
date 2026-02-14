@@ -33,19 +33,29 @@ pub(crate) struct MessageResponse {
     pub message: String,
 }
 
-fn is_valid_eth_address(addr: &str) -> bool {
-    addr.len() == 42 && addr.starts_with("0x") && addr[2..].chars().all(|c| c.is_ascii_hexdigit())
+fn is_valid_wallet_address(addr: &str) -> bool {
+    // Standard Ethereum address: 0x + 40 hex chars
+    let is_eth = addr.len() == 42
+        && addr.starts_with("0x")
+        && addr[2..].chars().all(|c| c.is_ascii_hexdigit());
+    // Polymarket proxy wallet (no prefix): 64 hex chars
+    let is_proxy = addr.len() == 64 && addr.chars().all(|c| c.is_ascii_hexdigit());
+    // Polymarket proxy wallet (with prefix): 0x + 64 hex chars
+    let is_proxy_prefixed = addr.len() == 66
+        && addr.starts_with("0x")
+        && addr[2..].chars().all(|c| c.is_ascii_hexdigit());
+    is_eth || is_proxy || is_proxy_prefixed
 }
 
 pub async fn follow_wallet(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FollowRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<MessageResponse>)> {
-    if !is_valid_eth_address(&req.proxy_wallet) {
+    if !is_valid_wallet_address(&req.proxy_wallet) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(MessageResponse {
-                message: "invalid wallet address: must be 42-char hex string starting with 0x"
+                message: "invalid wallet address: must be 0x+40 hex (ETH), 64 hex (proxy), or 0x+64 hex (proxy with prefix)"
                     .to_string(),
             }),
         ));
@@ -179,4 +189,49 @@ pub async fn resume_wallet(
     Ok(Json(MessageResponse {
         message: format!("resumed {addr}"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_wallet_address_eth() {
+        assert!(is_valid_wallet_address(
+            "0x1234567890abcdef1234567890abcdef12345678"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_wallet_address_proxy_no_prefix() {
+        // 64 hex chars — Polymarket proxy wallet without 0x
+        assert!(is_valid_wallet_address(
+            "d67aeff736bfa5e32b269803f0809e84c07b61060e6eb520be9bc8aae30ed129"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_wallet_address_proxy_with_prefix() {
+        // 0x + 64 hex chars — Polymarket proxy wallet with 0x prefix
+        assert!(is_valid_wallet_address(
+            "0xd67aeff736bfa5e32b269803f0809e84c07b61060e6eb520be9bc8aae30ed129"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_wallet_address_rejects_short() {
+        assert!(!is_valid_wallet_address("0x1234"));
+    }
+
+    #[test]
+    fn test_is_valid_wallet_address_rejects_non_hex() {
+        assert!(!is_valid_wallet_address(
+            "0xZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_wallet_address_rejects_empty() {
+        assert!(!is_valid_wallet_address(""));
+    }
 }

@@ -52,6 +52,8 @@ pub struct TradingConfig {
     pub mirror_delay_secs: u64,
     pub slippage_default_cents: f64,
     pub poll_interval_secs: u64,
+    /// If set, overrides poll_interval_secs with millisecond precision.
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

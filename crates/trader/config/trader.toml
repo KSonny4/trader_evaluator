@@ -23,6 +23,7 @@ default_their_bankroll_usd = 5000.0
 mirror_delay_secs = 0
 slippage_default_cents = 1.0
 poll_interval_secs = 10
+poll_interval_ms = 100
 
 [risk.portfolio]
 max_total_exposure_pct = 15.0
