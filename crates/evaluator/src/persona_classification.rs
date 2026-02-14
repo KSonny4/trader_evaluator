@@ -266,6 +266,9 @@ pub struct Stage1Config {
     pub max_inactive_days: u32,
     /// Proxy wallet addresses to exclude as known bots (Strategy Bible §4 Stage 1).
     pub known_bots: Vec<String>,
+    /// Minimum all-time ROI required (-0.10 = -10% max lifetime loss).
+    /// Wallets with lifetime ROI below this are excluded before persona classification.
+    pub stage1_min_all_time_roi: f64,
 }
 
 /// Returns Some(KnownBot) if proxy_wallet is in the known_bots list, None otherwise.
@@ -902,6 +905,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(
@@ -924,6 +928,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(
@@ -946,6 +951,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(
@@ -968,6 +974,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(result, None);
@@ -985,6 +992,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(result, None);
@@ -1002,6 +1010,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(result, None);
@@ -1019,6 +1028,7 @@ mod tests {
                 min_total_trades: 10,
                 max_inactive_days: 30,
                 known_bots: vec![],
+                stage1_min_all_time_roi: -0.10,
             },
         );
         assert_eq!(result, None);

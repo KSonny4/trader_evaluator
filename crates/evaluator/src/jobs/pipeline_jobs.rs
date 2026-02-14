@@ -10,7 +10,9 @@ use crate::persona_classification::{
     classify_wallet, stage1_filter, stage1_known_bot_check, PersonaConfig, Stage1Config,
 };
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
-use crate::wallet_features::{compute_wallet_features, save_wallet_features, WalletFeatures};
+use crate::wallet_features::{
+    compute_all_time_roi, compute_wallet_features, save_wallet_features, WalletFeatures,
+};
 use crate::wallet_rules_engine::{
     evaluate_discovery, evaluate_live, evaluate_paper, read_state, record_event,
     style_snapshot_from_features, write_state, WalletRuleState,
@@ -1070,9 +1072,10 @@ fn process_wallet_chunk(
     window_days: u32,
     now_epoch: i64,
     precomputed_features: Option<&std::collections::HashMap<String, (u32, WalletFeatures)>>,
-) -> Result<(u64, u64, u64, u64, u64)> {
+) -> Result<(u64, u64, u64, u64, u64, u64)> {
     let mut count = 0_u64;
     let mut stage1_no_trades = 0_u64;
+    let mut stage1_all_time_roi = 0_u64;
     let mut stage1_other = 0_u64;
     let mut stage2_excluded = 0_u64;
     let mut suitable = 0_u64;
@@ -1098,6 +1101,52 @@ fn process_wallet_chunk(
             } else {
                 stage1_other += 1;
             }
+            count += 1;
+            continue;
+        }
+
+        // Stage 1 Gate: All-time ROI check (before expensive feature computation)
+        let all_time_roi = match compute_all_time_roi(conn, proxy_wallet) {
+            Ok(roi) => roi,
+            Err(e) => {
+                tracing::warn!(
+                    proxy_wallet = %proxy_wallet,
+                    error = %e,
+                    "persona: failed to compute all-time ROI"
+                );
+                continue;
+            }
+        };
+
+        if all_time_roi < stage1_config.stage1_min_all_time_roi {
+            let reason_str = format!("INSUFFICIENT_ALL_TIME_ROI({:.2}%)", all_time_roi * 100.0);
+            tracing::info!(
+                proxy_wallet = %proxy_wallet,
+                all_time_roi_pct = format!("{:.2}%", all_time_roi * 100.0),
+                threshold_pct = format!("{:.2}%", stage1_config.stage1_min_all_time_roi * 100.0),
+                "persona: excluded Stage 1"
+            );
+
+            // Record exclusion
+            if let Err(e) = conn.execute(
+                "INSERT INTO wallet_exclusions
+                    (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'))
+                 ON CONFLICT(proxy_wallet, reason) DO UPDATE SET
+                    metric_value = excluded.metric_value,
+                    threshold = excluded.threshold,
+                    excluded_at = datetime('now')",
+                rusqlite::params![
+                    proxy_wallet,
+                    &reason_str,
+                    all_time_roi,
+                    stage1_config.stage1_min_all_time_roi
+                ],
+            ) {
+                tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "Failed to record all-time ROI exclusion");
+            }
+
+            stage1_all_time_roi += 1;
             count += 1;
             continue;
         }
@@ -1157,6 +1206,7 @@ fn process_wallet_chunk(
     Ok((
         count,
         stage1_no_trades,
+        stage1_all_time_roi,
         stage1_other,
         stage2_excluded,
         suitable,
@@ -1181,6 +1231,7 @@ pub async fn run_persona_classification_once(
         min_total_trades: cfg.personas.stage1_min_total_trades,
         max_inactive_days: cfg.personas.stage1_max_inactive_days,
         known_bots: cfg.personas.known_bots.clone(),
+        stage1_min_all_time_roi: cfg.personas.stage1_min_all_time_roi,
     };
 
     // Get total wallet count for progress tracking
@@ -1248,6 +1299,7 @@ pub async fn run_persona_classification_once(
     // Accumulate counters across chunks
     let mut total_processed = 0_u64;
     let mut stage1_no_trades = 0_u64;
+    let mut stage1_all_time_roi = 0_u64;
     let mut stage1_other = 0_u64;
     let mut stage2_excluded = 0_u64;
     let mut suitable = 0_u64;
@@ -1334,12 +1386,19 @@ pub async fn run_persona_classification_once(
             .await?
         };
 
-        let (chunk_processed, chunk_no_trades, chunk_other, chunk_excluded, chunk_suitable) =
-            chunk_result;
+        let (
+            chunk_processed,
+            chunk_no_trades,
+            chunk_all_time_roi,
+            chunk_other,
+            chunk_excluded,
+            chunk_suitable,
+        ) = chunk_result;
 
         // Accumulate counters
         total_processed += chunk_processed;
         stage1_no_trades += chunk_no_trades;
+        stage1_all_time_roi += chunk_all_time_roi;
         stage1_other += chunk_other;
         stage2_excluded += chunk_excluded;
         suitable += chunk_suitable;
@@ -1351,6 +1410,7 @@ pub async fn run_persona_classification_once(
                 "total": total_wallets,
                 "suitable": suitable,
                 "stage1_no_trades": stage1_no_trades,
+                "stage1_all_time_roi": stage1_all_time_roi,
                 "stage1_other": stage1_other,
                 "stage2_excluded": stage2_excluded,
                 "phase": "classifying"
@@ -1362,6 +1422,7 @@ pub async fn run_persona_classification_once(
 
     tracing::info!(
         stage1_no_trades,
+        stage1_all_time_roi,
         stage1_other,
         stage2_excluded,
         suitable,
@@ -1385,6 +1446,7 @@ pub async fn run_persona_classification_once(
             "classified": total_processed,
             "suitable": suitable,
             "stage1_no_trades": stage1_no_trades,
+            "stage1_all_time_roi": stage1_all_time_roi,
             "stage1_other": stage1_other,
             "stage2_excluded": stage2_excluded,
             "completed": true

@@ -462,6 +462,50 @@ pub fn compute_wallet_features(
     })
 }
 
+/// Compute all-time (lifetime) ROI for a wallet across ALL trades (no time window).
+///
+/// Formula: `realized_pnl / (trade_count * avg_position_size)`
+/// - realized_pnl = total_sell_proceeds - total_buy_costs (cashflow PnL)
+/// - trade_count = total number of trades
+/// - avg_position_size = average of (size * price) across all trades
+///
+/// Returns 0.0 if wallet has no trades or if avg_position_size is 0.
+pub fn compute_all_time_roi(conn: &Connection, proxy_wallet: &str) -> Result<f64> {
+    // Get all-time cashflow PnL (sell proceeds - buy costs)
+    let (total_buy_cost, total_sell_proceeds): (f64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN side = 'BUY' THEN size * price ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN side = 'SELL' THEN size * price ELSE 0.0 END), 0.0)
+             FROM trades_raw
+             WHERE proxy_wallet = ?1",
+            rusqlite::params![proxy_wallet],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0.0, 0.0));
+
+    let realized_pnl = total_sell_proceeds - total_buy_cost;
+
+    // Get all-time trade count and avg position size for ROI denominator
+    let (trade_count, avg_position_size): (u32, f64) = conn
+        .query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(AVG(size * price), 0.0)
+             FROM trades_raw
+             WHERE proxy_wallet = ?1",
+            rusqlite::params![proxy_wallet],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0, 0.0));
+
+    if trade_count > 0 && avg_position_size > 0.0 {
+        Ok(realized_pnl / (f64::from(trade_count) * avg_position_size))
+    } else {
+        Ok(0.0)
+    }
+}
+
 pub fn save_wallet_features(
     conn: &Connection,
     features: &WalletFeatures,
@@ -1013,6 +1057,93 @@ mod tests {
         assert_eq!(
             count, 1,
             "should have exactly 1 row due to UNIQUE constraint"
+        );
+    }
+
+    #[test]
+    fn test_compute_all_time_roi_positive() {
+        // Wallet with positive lifetime PnL should have positive ROI
+        // Buy: 100 @ 0.40 = $40, 100 @ 0.50 = $50 (total buy cost: $90)
+        // Sell: 100 @ 0.60 = $60, 100 @ 0.70 = $70 (total sell proceeds: $130)
+        // Cashflow PnL: $130 - $90 = $40
+        // Avg position size: ($40 + $50 + $60 + $70) / 4 = $55
+        // ROI: $40 / (4 * $55) = 40 / 220 = ~0.18 (18%)
+        let db = setup_db_with_trades(&[
+            ("0xwinner", "0xcond1", "BUY", 100.0, 0.40, 1000),
+            ("0xwinner", "0xcond1", "SELL", 100.0, 0.60, 2000),
+            ("0xwinner", "0xcond2", "BUY", 100.0, 0.50, 3000),
+            ("0xwinner", "0xcond2", "SELL", 100.0, 0.70, 4000),
+        ]);
+
+        let roi = compute_all_time_roi(&db.conn, "0xwinner").unwrap();
+
+        assert!(roi > 0.0, "ROI should be positive, got {roi}");
+        assert!(
+            (roi - 0.18).abs() < 0.01,
+            "ROI should be ~0.18, got {roi}"
+        );
+    }
+
+    #[test]
+    fn test_compute_all_time_roi_negative() {
+        // Wallet with catastrophic lifetime loss
+        // Buy: 100 @ 0.80 = $80, 100 @ 0.70 = $70 (total buy cost: $150)
+        // Sell: 100 @ 0.30 = $30, 100 @ 0.20 = $20 (total sell proceeds: $50)
+        // Cashflow PnL: $50 - $150 = -$100
+        // Avg position size: ($80 + $30 + $70 + $20) / 4 = $50
+        // ROI: -$100 / (4 * $50) = -100 / 200 = -0.50 (-50%)
+        let db = setup_db_with_trades(&[
+            ("0xloser", "0xcond1", "BUY", 100.0, 0.80, 1000),
+            ("0xloser", "0xcond1", "SELL", 100.0, 0.30, 2000),
+            ("0xloser", "0xcond2", "BUY", 100.0, 0.70, 3000),
+            ("0xloser", "0xcond2", "SELL", 100.0, 0.20, 4000),
+        ]);
+
+        let roi = compute_all_time_roi(&db.conn, "0xloser").unwrap();
+
+        assert!(roi < 0.0, "ROI should be negative, got {roi}");
+        assert!(
+            (roi - (-0.50)).abs() < 0.01,
+            "ROI should be ~-0.50, got {roi}"
+        );
+    }
+
+    #[test]
+    fn test_compute_all_time_roi_no_trades() {
+        // Wallet with no trades should return 0.0 ROI
+        let db = setup_db_with_trades(&[]);
+
+        db.conn
+            .execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active) VALUES ('0xempty', 'HOLDER', 1)",
+                [],
+            )
+            .unwrap();
+
+        let roi = compute_all_time_roi(&db.conn, "0xempty").unwrap();
+
+        assert_eq!(roi, 0.0, "ROI should be 0.0 for wallet with no trades");
+    }
+
+    #[test]
+    fn test_compute_all_time_roi_only_buys() {
+        // Wallet that only bought (never sold = expired worthless)
+        // Buy: 200 @ 0.50 = $100, 200 @ 0.60 = $120 (total buy cost: $220)
+        // Sell: $0
+        // Cashflow PnL: $0 - $220 = -$220
+        // Avg position size: ($100 + $120) / 2 = $110
+        // ROI: -$220 / (2 * $110) = -220 / 220 = -1.00 (-100%)
+        let db = setup_db_with_trades(&[
+            ("0xholder", "0xcond1", "BUY", 200.0, 0.50, 1000),
+            ("0xholder", "0xcond2", "BUY", 200.0, 0.60, 2000),
+        ]);
+
+        let roi = compute_all_time_roi(&db.conn, "0xholder").unwrap();
+
+        assert!(roi < 0.0, "ROI should be negative (all positions expired worthless)");
+        assert!(
+            (roi - (-1.00)).abs() < 0.01,
+            "ROI should be ~-1.00, got {roi}"
         );
     }
 }

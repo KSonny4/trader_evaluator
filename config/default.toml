@@ -103,6 +103,11 @@ stage1_min_total_trades = 10
 stage1_max_inactive_days = 45
 # Known bot proxy addresses to exclude (e.g. "0x...")
 known_bots = []
+# Stage 1 Gate: All-time ROI threshold
+# Wallets with lifetime ROI below this are excluded before persona classification
+# -0.10 = -10% lifetime loss is max tolerable
+# Set to -1.0 to effectively disable (allow any lifetime loss)
+stage1_min_all_time_roi = -0.10
 
 # Parallelization (Phase 3)
 # Enable parallel feature computation for faster classification

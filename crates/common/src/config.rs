@@ -143,6 +143,10 @@ fn default_parallel_tasks() -> usize {
     8
 }
 
+fn default_stage1_min_all_time_roi() -> f64 {
+    -0.10 // -10% max lifetime loss
+}
+
 fn default_ingestion_parallel_tasks() -> usize {
     4
 }
@@ -219,6 +223,10 @@ pub struct Personas {
     /// Proxy wallet addresses to exclude as known bots (Strategy Bible §4 Stage 1). E.g. ["0x..."].
     #[serde(default)]
     pub known_bots: Vec<String>,
+    /// Stage 1 gate: Minimum all-time ROI required (-0.10 = -10% max lifetime loss).
+    /// Wallets with lifetime ROI below this are excluded before persona classification.
+    #[serde(default = "default_stage1_min_all_time_roi")]
+    pub stage1_min_all_time_roi: f64,
     /// Enable parallel classification (default: true)
     #[serde(default = "default_parallel_enabled")]
     pub parallel_enabled: bool,
