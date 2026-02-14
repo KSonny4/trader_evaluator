@@ -170,6 +170,7 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 | Wallet age | `stage1_min_wallet_age_days` | 45 | Age = days since oldest trade in `trades_raw` (not discovery time). New wallets = insufficient data or sniper risk |
 | Minimum trades | `stage1_min_total_trades` | 10 | Can't classify with fewer |
 | Basic activity | `stage1_max_inactive_days` | 45 | Dead wallets waste resources |
+| All-time ROI | `stage1_min_all_time_roi` | -0.10 (-10%) | Wallets with catastrophic lifetime losses are unfollowable even with recent hot streaks. Cashflow PnL = total sell proceeds - total buy costs (ALL trades). A wallet that destroyed $200K lifetime but had a good month is still down $200K. |
 | Not a known bot | Check against `known_bots` list | — | Automated accounts are unfollowable |
 
 ### Stage 2: Deep Analysis (async, scheduled background job)
