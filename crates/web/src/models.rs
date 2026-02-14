@@ -390,6 +390,11 @@ pub struct WalletFeaturesSnapshot {
     pub mid_fill_display: String,
     pub extreme_price_display: String,
     pub active_positions: i64,
+    // NEW FIELDS FOR REALIZED/UNREALIZED PNL BREAKDOWN
+    pub cashflow_pnl: f64,
+    pub fifo_realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub open_positions_count: i64,
 }
 
 /// Latest 30-day WScore + component scores for the wallet scorecard.

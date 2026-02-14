@@ -697,7 +697,7 @@ pub fn classify_wallet(
     };
 
     let roi = if features.trade_count > 0 && features.avg_position_size > 0.0 {
-        features.realized_pnl / (f64::from(features.trade_count) * features.avg_position_size)
+        features.cashflow_pnl / (f64::from(features.trade_count) * features.avg_position_size)
     } else {
         0.0
     };
@@ -1246,7 +1246,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         }
     }
 
@@ -1355,7 +1358,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         }
     }
 
@@ -1455,7 +1461,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         }
     }
 
@@ -1714,7 +1723,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1766,7 +1778,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 5.0,
+            cashflow_pnl: 5.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1821,7 +1836,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: -50.0,
+            cashflow_pnl: -50.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         let mut config = PersonaConfig::default_for_test();
@@ -1876,7 +1894,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1917,7 +1938,10 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1971,7 +1995,10 @@ mod tests {
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.9,
             profitable_markets: 4,
-            realized_pnl: 100.0,
+            cashflow_pnl: 100.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         let config = PersonaConfig::default_for_test();

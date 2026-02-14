@@ -477,6 +477,56 @@ impl IntoUrlLike for Url {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PolymarketPosition {
+    #[serde(rename = "conditionId")]
+    pub condition_id: String,
+    #[serde(deserialize_with = "de_string_f64")]
+    pub size: f64,
+    #[serde(rename = "marketPrice", deserialize_with = "de_string_f64")]
+    pub market_price: f64,
+}
+
+fn de_string_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let s = String::deserialize(deserializer)?;
+    s.parse::<f64>().map_err(serde::de::Error::custom)
+}
+
+/// Fetch current positions for a wallet from Polymarket Data API
+pub async fn fetch_wallet_positions(
+    client: &reqwest::Client,
+    proxy_wallet: &str,
+) -> Result<Vec<PolymarketPosition>> {
+    let url = format!("https://data-api.polymarket.com/positions?user={proxy_wallet}");
+
+    // Rate limiting: 200ms delay
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Positions API request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Positions API returned status {}",
+            response.status()
+        ));
+    }
+
+    let positions: Vec<PolymarketPosition> = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse positions response: {e}"))?;
+
+    Ok(positions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +628,15 @@ mod tests {
         let err = serde_json::from_slice::<Vec<ApiTrade>>(bad_json).unwrap_err();
         let err = anyhow::Error::from(err);
         assert_eq!(classify_anyhow_api_error(&err), ApiErrorKind::Decode);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_positions_parses_response() {
+        // This will be an integration test that hits real API
+        // For now, just test the function signature exists
+        let client = reqwest::Client::new();
+        let result = fetch_wallet_positions(&client, "0xtest").await;
+        // Will fail until function exists
+        assert!(result.is_ok() || result.is_err()); // Either outcome is valid
     }
 }

@@ -562,6 +562,7 @@ dependencies = [
  "common",
  "metrics",
  "metrics-exporter-prometheus",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

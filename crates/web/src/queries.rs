@@ -1479,7 +1479,9 @@ fn wallet_features_latest(
                    COALESCE(buy_sell_balance, 0), COALESCE(burstiness_top_1h_ratio, 0),
                    COALESCE(top_domain, ''), COALESCE(top_domain_ratio, 0),
                    COALESCE(mid_fill_ratio, 0), COALESCE(extreme_price_ratio, 0),
-                   COALESCE(active_positions, 0), COALESCE(avg_position_size, 0)
+                   COALESCE(active_positions, 0), COALESCE(avg_position_size, 0),
+                   COALESCE(cashflow_pnl, 0), COALESCE(fifo_realized_pnl, 0),
+                   COALESCE(unrealized_pnl, 0), COALESCE(open_positions_count, 0)
             FROM wallet_features_daily
             WHERE proxy_wallet = ?1 AND window_days = 30
             ORDER BY feature_date DESC
@@ -1509,6 +1511,10 @@ fn wallet_features_latest(
                     r.get::<_, f64>(18)?,
                     r.get::<_, i64>(19)?,
                     r.get::<_, f64>(20)?,
+                    r.get::<_, f64>(21)?,
+                    r.get::<_, f64>(22)?,
+                    r.get::<_, f64>(23)?,
+                    r.get::<_, i64>(24)?,
                 ))
             },
         )
@@ -1536,6 +1542,10 @@ fn wallet_features_latest(
         extreme_price_ratio,
         active_positions,
         avg_position_size,
+        cashflow_pnl,
+        fifo_realized_pnl,
+        unrealized_pnl,
+        open_positions_count,
     )) = row
     else {
         return Ok(None);
@@ -1601,6 +1611,10 @@ fn wallet_features_latest(
         mid_fill_display: format!("{:.0}%", mid_fill_ratio * 100.0),
         extreme_price_display: format!("{:.0}%", extreme_price_ratio * 100.0),
         active_positions,
+        cashflow_pnl,
+        fifo_realized_pnl,
+        unrealized_pnl,
+        open_positions_count,
     }))
 }
 

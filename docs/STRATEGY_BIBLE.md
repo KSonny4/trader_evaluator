@@ -171,7 +171,7 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 | Wallet age | `stage1_min_wallet_age_days` | 45 | Age = days since oldest trade in `trades_raw` (not discovery time). New wallets = insufficient data or sniper risk |
 | Minimum trades | `stage1_min_total_trades` | 10 | Can't classify with fewer |
 | Basic activity | `stage1_max_inactive_days` | 45 | Dead wallets waste resources |
-| All-time ROI | `stage1_min_all_time_roi` | 0.00 (0%) | Wallets with lifetime losses are unfollowable. Tightened from -10% to exclude marginal losers. Cashflow PnL = total sell proceeds - total buy costs (ALL trades). A wallet with negative lifetime ROI has no proven edge. |
+| All-time ROI | `stage1_min_all_time_roi` | 0.00 (0%) | Wallets with negative **FIFO-paired realized PnL** (closed positions only) are unfollowable. Unrealized gains don't count — only proven profits from closed positions demonstrate true edge. Formula: sum of (sell_price - buy_price) * size for all FIFO-matched pairs. A wallet with negative lifetime realized PnL has no proven edge. |
 | Not a known bot | Check against `known_bots` list | — | Automated accounts are unfollowable |
 
 ### Stage 1.5: Recent Profitability Check (inline, after Stage 1)
@@ -180,10 +180,29 @@ Catches wallets whose strategies have stopped working recently, even if lifetime
 
 | Filter | Config Key | Default | Why |
 |--------|-----------|---------|-----|
-| Recent profitability | `stage1_require_recent_profit` | true | Exclude wallets losing money in last 30 days (strategy may have deteriorated) |
-| Profitability window | `stage1_recent_profit_window_days` | 30 | Rolling window for recent performance check. Cashflow PnL in window must be > $0. |
+| Recent profitability | `stage1_require_recent_profit` | true | Exclude wallets with negative **realized PnL** in last 30 days. Uses FIFO-paired closed positions, not cashflow or unrealized gains. Strategy deterioration must show in realized losses. |
+| Profitability window | `stage1_recent_profit_window_days` | 30 | Rolling window for recent performance check. FIFO realized PnL in window must be ≥ $0. |
 
-**Example:** A wallet with +10% lifetime ROI but -$100 in last 30 days is excluded by Stage 1.5. The edge may have disappeared due to market regime change, strategy saturation, or loss of information advantage.
+**Example:** A wallet with +10% lifetime ROI but -$5 in realized losses in last 30 days is excluded by Stage 1.5. The edge may have disappeared due to market regime change, strategy saturation, or loss of information advantage. Unrealized gains (+$100 paper profit) don't save the wallet — classification is based on proven realized performance.
+
+### PnL Metrics Glossary
+
+The system tracks multiple PnL metrics for different purposes. **Classification gates (Stage 1/1.5) use FIFO realized PnL only.**
+
+| Metric | Formula | What it Measures | Used For |
+|--------|---------|------------------|----------|
+| **Cashflow PnL** | Total sell proceeds - Total buy costs | All capital flow (includes unrealized positions still open) | Analytics, capital deployed tracking, cashflow analysis |
+| **FIFO Realized PnL** | Sum of (sell_price - buy_price) * size for FIFO-matched closed positions | Proven profits/losses from positions that have been fully closed | **Stage 1/1.5 gates**, classification decisions, ROI calculations |
+| **Unrealized PnL** | (current_price - cost_basis) * size for open positions | Paper gains/losses on positions not yet closed (mark-to-market) | Dashboard display, risk monitoring, total value calculation |
+| **Total PnL** | FIFO Realized + Unrealized | Complete current value (realized gains + mark-to-market of open positions) | Dashboard summary, portfolio valuation |
+
+**Why gates use realized PnL only:** A wallet with -$95.92 in realized losses but +$1,097 in unrealized gains has proven they **lose money when they close positions**. Unrealized gains are paper profits that may never materialize. Classification decisions must be based on proven, closed performance.
+
+**Example:**
+- Wallet closes 10 positions: loses -$100 (realized)
+- Wallet has 5 open positions: showing +$500 unrealized gain
+- Cashflow PnL: +$400 (would PASS old gates ❌)
+- Realized PnL: -$100 (correctly EXCLUDED by new gates ✅)
 
 ### Stage 2: Deep Analysis (async, scheduled background job)
 
