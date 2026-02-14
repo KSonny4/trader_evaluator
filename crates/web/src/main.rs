@@ -461,6 +461,19 @@ struct RankingsTemplate {
     rankings: Vec<RankingRow>,
 }
 
+#[derive(Template)]
+#[template(path = "partials/jobs_status.html")]
+struct JobsStatusTemplate {
+    jobs: Vec<models::JobStatusRow>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/persona_breakdown.html")]
+struct PersonaBreakdownTemplate {
+    personas: Vec<models::PersonaBreakdownRow>,
+    ingestion: models::IngestionStats,
+}
+
 // --- Handlers ---
 
 async fn index() -> impl IntoResponse {
@@ -775,6 +788,41 @@ async fn rankings_partial(State(state): State<Arc<AppState>>) -> impl IntoRespon
     .await
     {
         Ok(rankings) => Html(RankingsTemplate { rankings }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn jobs_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match with_db(state.clone(), queries::all_job_statuses).await {
+        Ok(jobs) => Html(JobsStatusTemplate { jobs }.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("DB unavailable: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn persona_breakdown_partial(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match with_db(state.clone(), move |conn| {
+        let personas = queries::persona_breakdown_counts(conn)?;
+        let ingestion = queries::ingestion_stats(conn)?;
+        Ok((personas, ingestion))
+    })
+    .await
+    {
+        Ok((personas, ingestion)) => Html(
+            PersonaBreakdownTemplate {
+                personas,
+                ingestion,
+            }
+            .to_string(),
+        )
+        .into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("DB unavailable: {e}"),
@@ -1337,6 +1385,11 @@ pub fn create_router_with_state(state: Arc<AppState>) -> Router {
             get(paper_traded_wallets_partial),
         )
         .route("/partials/rankings", get(rankings_partial))
+        .route("/partials/jobs", get(jobs_partial))
+        .route(
+            "/partials/persona_breakdown",
+            get(persona_breakdown_partial),
+        )
         // Recommended wallets API (for trader microservice to poll)
         .route("/api/recommended-wallets", get(recommended_wallets_api))
         // Trader dashboard pages
@@ -2610,6 +2663,8 @@ mod tests {
             "/partials/personas_summary",
             "/partials/paper_traded_wallets",
             "/partials/rankings",
+            "/partials/jobs",
+            "/partials/persona_breakdown",
         ];
         for route in routes {
             let app = create_test_app();

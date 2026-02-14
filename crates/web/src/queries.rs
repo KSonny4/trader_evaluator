@@ -99,6 +99,31 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
     })
 }
 
+pub fn all_job_statuses(conn: &Connection) -> Result<Vec<JobStatusRow>> {
+    timed_db_op("web.all_job_statuses", || {
+        let mut stmt = conn.prepare(
+            "SELECT job_name, status, last_run_at, metadata, duration_ms, last_error, updated_at
+             FROM job_status
+             ORDER BY job_name",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(JobStatusRow {
+                    job_name: row.get(0)?,
+                    status: row.get(1)?,
+                    last_run_at: row.get(2)?,
+                    next_run_at: None,
+                    last_error: row.get(5)?,
+                    duration_ms: row.get(4)?,
+                    metadata: row.get(3)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
 pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
     let wallets_discovered: i64 =
         conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
@@ -296,6 +321,53 @@ pub fn suitable_personas_counts(conn: &Connection) -> Result<(i64, i64)> {
     let suitable: i64 = conn.query_row("SELECT COUNT(*) FROM wallet_personas", [], |r| r.get(0))?;
     let evaluated = personas_evaluated_count(conn)?;
     Ok((suitable, evaluated))
+}
+
+/// Per-persona breakdown: count of wallets per persona type (latest classification only).
+pub fn persona_breakdown_counts(conn: &Connection) -> Result<Vec<PersonaBreakdownRow>> {
+    timed_db_op("web.persona_breakdown_counts", || {
+        let mut stmt = conn.prepare(
+            "
+            SELECT p.persona, COUNT(*) as count
+            FROM wallet_personas p
+            INNER JOIN (
+                SELECT proxy_wallet, MAX(classified_at) AS max_at
+                FROM wallet_personas GROUP BY proxy_wallet
+            ) latest ON latest.proxy_wallet = p.proxy_wallet AND latest.max_at = p.classified_at
+            GROUP BY p.persona
+            ORDER BY count DESC
+            ",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PersonaBreakdownRow {
+                    persona: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+/// Ingestion stats: active wallets and wallets with at least 1 trade.
+pub fn ingestion_stats(conn: &Connection) -> Result<IngestionStats> {
+    timed_db_op("web.ingestion_stats", || {
+        let active_wallets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM wallets WHERE is_active = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        let wallets_with_trades: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT proxy_wallet) FROM trades_raw",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(IngestionStats {
+            active_wallets,
+            wallets_with_trades,
+        })
+    })
 }
 
 pub fn suitable_personas_wallets(
