@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
             event_bus.as_deref()
         ),
         jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
-        jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref()),
+        jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref(), None),
         jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()),
     );
 
@@ -512,7 +512,7 @@ async fn main() -> Result<()> {
             while persona_classification_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "persona_classification");
                 let _g = span.enter();
-                match jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref())
+                match jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref(), None)
                     .await
                 {
                     Ok(classified) => {

@@ -11,7 +11,9 @@ pub enum Command {
         address: String,
     },
     Rankings,
-    Classify,
+    Classify {
+        limit: Option<usize>,
+    },
     PickForPaper,
     ReplayEvents {
         from: String,
@@ -45,12 +47,34 @@ where
             Ok(Command::Wallet { address })
         }
         "rankings" => Ok(Command::Rankings),
-        "classify" => Ok(Command::Classify),
+        "classify" => parse_classify_args(args),
         "pick-for-paper" => Ok(Command::PickForPaper),
         "replay-events" => parse_replay_events_args(args),
         "retry-failed-events" => parse_retry_failed_events_args(args),
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+fn parse_classify_args<I>(args: I) -> std::result::Result<Command, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut limit: Option<usize> = None;
+
+    for arg in args {
+        if let Some(val) = arg.strip_prefix("--limit=") {
+            limit = Some(val.parse::<usize>().map_err(|_e| {
+                format!("invalid --limit value: {val}\nusage: evaluator classify [--limit=N]")
+            })?);
+        } else {
+            return Err(format!(
+                "unknown flag for classify: {arg}\n\
+                 usage: evaluator classify [--limit=N]"
+            ));
+        }
+    }
+
+    Ok(Command::Classify { limit })
 }
 
 fn parse_replay_events_args<I>(args: I) -> std::result::Result<Command, String>
@@ -118,7 +142,7 @@ pub fn run_command(db: &Database, cmd: Command) -> Result<()> {
         Command::Wallets => show_wallets(db),
         Command::Wallet { address } => show_wallet(db, &address),
         Command::Rankings => show_rankings(db),
-        Command::Classify => run_classify(db),
+        Command::Classify { limit } => run_classify(db, limit),
         Command::PickForPaper => show_pick_for_paper(db),
         Command::ReplayEvents {
             from,
@@ -344,7 +368,7 @@ fn show_pick_for_paper(db: &Database) -> Result<()> {
     Ok(())
 }
 
-fn run_classify(_db: &Database) -> Result<()> {
+fn run_classify(_db: &Database, limit: Option<usize>) -> Result<()> {
     let config = common::config::Config::load()?;
     let db_path = config.database.path.clone();
 
@@ -355,8 +379,9 @@ fn run_classify(_db: &Database) -> Result<()> {
         rt.block_on(async {
             let async_db = AsyncDb::open(&db_path_inner).await?;
             let classified =
-                crate::jobs::run_persona_classification_once(&async_db, &config, None).await?;
-            println!("Classified {classified} wallets (followable or excluded)");
+                crate::jobs::run_persona_classification_once(&async_db, &config, None, limit).await?;
+            let limit_msg = limit.map(|l| format!(" (limited to {l})")).unwrap_or_default();
+            println!("Classified {classified} wallets{limit_msg} (followable or excluded)");
             Ok::<_, anyhow::Error>(())
         })
     });
