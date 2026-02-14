@@ -269,7 +269,7 @@ pub async fn run_wallet_scoring_once(db: &AsyncDb, cfg: &Config) -> Result<u64> 
                             CAST((julianday('now') - julianday(discovered_at)) AS INTEGER) AS age_days
                      FROM wallets
                      WHERE is_active = 1
-                     ORDER BY discovered_at ASC
+                     ORDER BY discovered_at DESC
                      LIMIT 500",
                 )?
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?

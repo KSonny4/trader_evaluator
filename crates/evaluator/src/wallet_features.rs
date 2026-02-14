@@ -1077,11 +1077,10 @@ mod tests {
 
         let roi = compute_all_time_roi(&db.conn, "0xwinner").unwrap();
 
-        assert!(roi > 0.0, "ROI should be positive, got {}", roi);
+        assert!(roi > 0.0, "ROI should be positive, got {roi}");
         assert!(
             (roi - 0.18).abs() < 0.01,
-            "ROI should be ~0.18, got {}",
-            roi
+            "ROI should be ~0.18, got {roi}"
         );
     }
 
@@ -1102,11 +1101,10 @@ mod tests {
 
         let roi = compute_all_time_roi(&db.conn, "0xloser").unwrap();
 
-        assert!(roi < 0.0, "ROI should be negative, got {}", roi);
+        assert!(roi < 0.0, "ROI should be negative, got {roi}");
         assert!(
             (roi - (-0.50)).abs() < 0.01,
-            "ROI should be ~-0.50, got {}",
-            roi
+            "ROI should be ~-0.50, got {roi}"
         );
     }
 
@@ -1145,8 +1143,7 @@ mod tests {
         assert!(roi < 0.0, "ROI should be negative (all positions expired worthless)");
         assert!(
             (roi - (-1.00)).abs() < 0.01,
-            "ROI should be ~-1.00, got {}",
-            roi
+            "ROI should be ~-1.00, got {roi}"
         );
     }
 }
