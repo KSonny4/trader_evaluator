@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: build test build-linux deploy check status check-tables skills-sync setup-hooks coverage worktree worktree-clean check-file-length
-.PHONY: todo todo-check todo-test reset-and-run trader-fresh trader-wallet
+.PHONY: todo todo-check todo-test reset-and-run
 
 # === Local enforcement ===
 setup-hooks:
@@ -58,8 +58,6 @@ OVERLENGTH_ALLOWLIST := \
 	crates/evaluator/src/wallet_features.rs \
 	crates/common/src/db.rs \
 	crates/common/src/polymarket.rs \
-	crates/trader/src/engine/mirror.rs \
-	crates/trader/src/risk/mod.rs \
 	crates/evaluator/src/jobs/ingestion_jobs.rs \
 	crates/evaluator/src/main.rs \
 	crates/evaluator/src/events/subscribers.rs \
@@ -174,14 +172,7 @@ check-phase-3: check-phase-2
 
 check-phase-4: check-phase-3
 	@echo "=== Phase 4: Paper Trading ==="
-	@$(DB_CMD) "SELECT COUNT(*) FROM paper_trades" | \
-		awk '{if ($$1 == 0) {print "FAIL: no paper trades"; exit 1} else print "OK: " $$1 " paper trades"}'
-	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_events') THEN (SELECT COUNT(*) FROM paper_events) ELSE -1 END" | \
-		awk '{if ($$1 == -1) print "SKIP: paper_events table not yet created"; else print "OK: " $$1 " paper events (gate checks, skips, breakers)"}'
-	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='follower_slippage') THEN (SELECT COUNT(*) FROM follower_slippage) ELSE -1 END" | \
-		awk '{if ($$1 == -1) print "SKIP: follower_slippage table not yet created"; else print "OK: " $$1 " slippage measurements"}'
-	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_snapshots') THEN (SELECT COUNT(*) FROM book_snapshots) ELSE -1 END" | \
-		awk '{if ($$1 == -1) print "SKIP: book_snapshots table not yet created"; else print "OK: " $$1 " book snapshots"}'
+	@echo "Paper trading moved to separate repository: https://github.com/KSonny4/polymarket-trader"
 	@echo "Phase 4: PASSED"
 
 check-phase-5: check-phase-4
@@ -235,38 +226,13 @@ status:
 	@$(DB_CMD) "SELECT 'position snapshots: ' || COUNT(*) FROM positions_snapshots"
 	@$(DB_CMD) "SELECT 'holder snapshots:   ' || COUNT(*) FROM holders_snapshots"
 	@$(DB_CMD) "SELECT 'raw API responses:  ' || COUNT(*) FROM raw_api_responses"
-	@$(DB_CMD) "SELECT 'paper trades:       ' || COUNT(*) FROM paper_trades"
-	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_events') THEN 'paper events:       ' || (SELECT COUNT(*) FROM paper_events) ELSE 'paper events:       table not created' END"
-	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_snapshots') THEN 'book snapshots:     ' || (SELECT COUNT(*) FROM book_snapshots) ELSE 'book snapshots:     table not created' END"
-	@$(DB_CMD) "SELECT CASE WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='follower_slippage') THEN 'follower slippage:  ' || (SELECT COUNT(*) FROM follower_slippage) ELSE 'follower slippage:  table not created' END"
 	@$(DB_CMD) "SELECT 'wallet scores today:' || COUNT(*) FROM wallet_scores_daily WHERE score_date = date('now')"
 	@$(DB_CMD) "SELECT 'last trade ingested: ' || COALESCE(MAX(ingested_at), 'never') FROM trades_raw"
 	@$(DB_CMD) "SELECT 'DB size:            ' || (page_count * page_size / 1024 / 1024) || ' MB' FROM pragma_page_count(), pragma_page_size()"
 
 # === Trader (standalone microservice) ===
-TRADER_DB ?= data/trader.db
-
-# Fresh start: wipe DB, start trader with debug logs
-trader-fresh:
-	@mkdir -p data
-	@rm -f $(TRADER_DB)
-	@echo "Fresh start — deleted $(TRADER_DB)"
-	RUST_LOG=trader=debug cargo run -p trader
-
-# Fresh start + auto-follow a wallet
-# Usage: make trader-wallet WALLET=<addr> LABEL=<name> BANKROLL=<usd>
-trader-wallet:
-	@if [ -z "$(WALLET)" ]; then echo "Usage: make trader-wallet WALLET=<addr> LABEL=<name> BANKROLL=<usd>"; exit 1; fi
-	@mkdir -p data
-	@rm -f $(TRADER_DB)
-	@echo "Fresh start — deleted $(TRADER_DB)"
-	@RUST_LOG=trader=debug cargo run -p trader &
-	@sleep 3
-	@curl -s -X POST http://localhost:8081/api/wallets \
-		-H "Content-Type: application/json" \
-		-d '{"proxy_wallet":"$(WALLET)","label":"$(or $(LABEL),unnamed)","estimated_bankroll_usd":$(or $(BANKROLL),5000),"trading_mode":"paper"}'
-	@echo "\nTrader running with debug logs. Ctrl+C to stop."
-	@wait
+# Trader crate has been moved to a separate repository.
+# See: https://github.com/KSonny4/polymarket-trader
 
 # === Reclassify (after persona logic changes) ===
 # Clears persona state so the next pipeline run re-evaluates all wallets with current code/config.
