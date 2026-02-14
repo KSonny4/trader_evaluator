@@ -73,6 +73,7 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         price: f64,
         timestamp: i64,
     }
+
     let rows: Vec<Trade> = conn
         .prepare(
             "SELECT condition_id, side, size, price, timestamp
@@ -95,6 +96,8 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
     let mut losses = 0u32;
     let mut hold_seconds: Vec<f64> = Vec::new();
     let mut closed_pnls: Vec<(i64, f64)> = Vec::new();
+    let mut total_fifo_realized_pnl = 0.0;
+    let mut open_positions_vec: Vec<OpenPosition> = Vec::new();
 
     let mut by_market: std::collections::HashMap<String, MarketBuysSells> =
         std::collections::HashMap::new();
@@ -110,28 +113,98 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
     }
 
     let mut profitable_markets = 0u32;
-    for (_cid, (buys, sells)) in by_market {
-        let n = buys.len().min(sells.len());
+    for (cid, (buys, sells)) in by_market {
         let mut market_pnl = 0.0f64;
-        for i in 0..n {
-            let (buy_size, buy_price, buy_ts) = buys[i];
-            let (sell_size, sell_price, sell_ts) = sells[i];
-            let size = buy_size.min(sell_size);
-            if size <= 0.0 {
-                continue;
+
+        // FIFO pairing: consume buys with sells, tracking remaining quantities
+        let mut buy_idx = 0;
+        let mut sell_idx = 0;
+        let mut remaining_buy_qty = 0.0;
+        let mut remaining_sell_qty = 0.0;
+
+        // Track remaining buys with their sizes and prices
+        let mut unmatched_buys: Vec<(f64, f64, i64)> = Vec::new();
+
+        while buy_idx < buys.len() || sell_idx < sells.len() {
+            // Get next buy quantity (either from previous remainder or new buy)
+            if remaining_buy_qty == 0.0 && buy_idx < buys.len() {
+                remaining_buy_qty = buys[buy_idx].0;
             }
-            let pnl = (sell_price - buy_price) * size;
-            market_pnl += pnl;
-            if pnl > 0.0 {
-                wins += 1;
+
+            // Get next sell quantity (either from previous remainder or new sell)
+            if remaining_sell_qty == 0.0 && sell_idx < sells.len() {
+                remaining_sell_qty = sells[sell_idx].0;
+            }
+
+            // If we have both buy and sell, match them
+            if remaining_buy_qty > 0.0 && remaining_sell_qty > 0.0 {
+                let (_, buy_price, buy_ts) = buys[buy_idx];
+                let (_, sell_price, sell_ts) = sells[sell_idx];
+                let matched_size = remaining_buy_qty.min(remaining_sell_qty);
+
+                let pnl = (sell_price - buy_price) * matched_size;
+                market_pnl += pnl;
+                total_fifo_realized_pnl += pnl;
+
+                if pnl > 0.0 {
+                    wins += 1;
+                } else {
+                    losses += 1;
+                }
+                hold_seconds.push((sell_ts - buy_ts) as f64);
+                closed_pnls.push((sell_ts, pnl));
+
+                remaining_buy_qty -= matched_size;
+                remaining_sell_qty -= matched_size;
+
+                // Move to next buy if current is fully consumed
+                if remaining_buy_qty == 0.0 {
+                    buy_idx += 1;
+                }
+
+                // Move to next sell if current is fully consumed
+                if remaining_sell_qty == 0.0 {
+                    sell_idx += 1;
+                }
+            } else if remaining_buy_qty > 0.0 {
+                // Unmatched buy (no more sells)
+                let (_, buy_price, buy_ts) = buys[buy_idx];
+                unmatched_buys.push((remaining_buy_qty, buy_price, buy_ts));
+                remaining_buy_qty = 0.0;
+                buy_idx += 1;
             } else {
-                losses += 1;
+                // No more buys but still have sells - just move on
+                break;
             }
-            hold_seconds.push((sell_ts - buy_ts) as f64);
-            closed_pnls.push((sell_ts, pnl));
         }
+
+        // Add any remaining unprocessed buys
+        while buy_idx < buys.len() {
+            unmatched_buys.push(buys[buy_idx]);
+            buy_idx += 1;
+        }
+
         if market_pnl > 0.0 {
             profitable_markets += 1;
+        }
+
+        // NEW: Track open positions (unmatched buys)
+        if !unmatched_buys.is_empty() {
+            let total_size: f64 = unmatched_buys.iter().map(|(size, _, _)| size).sum();
+            let total_cost: f64 = unmatched_buys.iter().map(|(size, price, _)| size * price).sum();
+            let weighted_cost_basis = if total_size > 0.0 {
+                total_cost / total_size
+            } else {
+                0.0
+            };
+            let oldest_timestamp = unmatched_buys.iter().map(|(_, _, ts)| ts).min().copied().unwrap_or(0);
+
+            open_positions_vec.push(OpenPosition {
+                condition_id: cid.clone(),
+                total_size,
+                weighted_cost_basis,
+                oldest_buy_timestamp: oldest_timestamp,
+            });
         }
     }
 
@@ -141,6 +214,8 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         hold_seconds,
         closed_pnls,
         profitable_markets,
+        total_fifo_realized_pnl,
+        open_positions: open_positions_vec,
     })
 }
 
@@ -1341,7 +1416,7 @@ mod tests {
         let open = &stats.open_positions[0];
         assert_eq!(open.condition_id, "mkt1");
         assert!((open.total_size - 70.0).abs() < 0.01);
-        assert!((open.weighted_cost_basis - 0.457).abs() < 0.01);
+        assert!((open.weighted_cost_basis - 0.4714).abs() < 0.01);
     }
 
     #[test]
