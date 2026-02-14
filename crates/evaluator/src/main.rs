@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
         tokio::sync::mpsc::channel::<()>(8);
     let (wal_checkpoint_tx, mut wal_checkpoint_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (flow_metrics_tx, mut flow_metrics_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let (sqlite_stats_tx, mut sqlite_stats_rx) = tokio::sync::mpsc::channel::<()>(8);
 
     let discovery_continuous = cfg
         .wallet_discovery
@@ -263,6 +264,12 @@ async fn main() -> Result<()> {
             name: "flow_metrics".to_string(),
             interval: std::time::Duration::from_secs(60), // every minute for Grafana flow panels
             tick: flow_metrics_tx,
+            run_immediately: true,
+        },
+        scheduler::JobSpec {
+            name: "sqlite_stats".to_string(),
+            interval: std::time::Duration::from_secs(60), // every minute for Grafana DB panels
+            tick: sqlite_stats_tx,
             run_immediately: true,
         },
     ]);
@@ -541,6 +548,20 @@ async fn main() -> Result<()> {
                 let _g = span.enter();
                 if let Err(e) = jobs::run_flow_metrics_once(&db).await {
                     tracing::error!(error = %e, "flow_metrics failed");
+                }
+            }
+        }
+    });
+
+    tokio::spawn({
+        let db = db.clone();
+        let db_path = cfg.database.path.clone();
+        async move {
+            while sqlite_stats_rx.recv().await.is_some() {
+                let span = tracing::info_span!("job_run", job = "sqlite_stats");
+                let _g = span.enter();
+                if let Err(e) = jobs::run_sqlite_stats_once(&db, &db_path).await {
+                    tracing::error!(error = %e, "sqlite_stats failed");
                 }
             }
         }
