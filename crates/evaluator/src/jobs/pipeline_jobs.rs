@@ -1221,6 +1221,7 @@ pub async fn run_persona_classification_once(
     db: &AsyncDb,
     cfg: &Config,
     event_bus: Option<&EventBus>,
+    max_wallets: Option<usize>,
 ) -> Result<u64> {
     let tracker = JobTracker::start(db, "persona_classification").await?;
     let now_epoch = chrono::Utc::now().timestamp();
@@ -1308,6 +1309,18 @@ pub async fn run_persona_classification_once(
     let mut offset = 0_i64;
 
     loop {
+        // Check if we've hit the limit
+        if let Some(max) = max_wallets {
+            if total_processed >= max as u64 {
+                tracing::info!(
+                    processed = total_processed,
+                    limit = max,
+                    "persona_classification: hit limit, stopping early"
+                );
+                break;
+            }
+        }
+
         // Fetch wallet chunk
         let wallets: Vec<(String, u32, u32, u32)> = db
             .call_named("persona_classification.fetch_chunk", move |conn| {
@@ -2629,7 +2642,7 @@ mod tests {
         .unwrap();
 
         // Run classification - should skip because wallets lack sufficient history
-        let classified = run_persona_classification_once(&db, &cfg, None)
+        let classified = run_persona_classification_once(&db, &cfg, None, None)
             .await
             .unwrap();
 
@@ -2694,7 +2707,7 @@ mod tests {
         }
 
         // Run classification
-        let _classified = run_persona_classification_once(&db, &cfg, None)
+        let _classified = run_persona_classification_once(&db, &cfg, None, None)
             .await
             .unwrap();
 
@@ -3131,7 +3144,7 @@ mod tests {
 
         // Run with parallel disabled
         cfg.personas.parallel_enabled = false;
-        let serial_count = run_persona_classification_once(&db, &cfg, None)
+        let serial_count = run_persona_classification_once(&db, &cfg, None, None)
             .await
             .unwrap();
 
@@ -3159,7 +3172,7 @@ mod tests {
 
         // Run with parallel enabled
         cfg.personas.parallel_enabled = true;
-        let parallel_count = run_persona_classification_once(&db, &cfg, None)
+        let parallel_count = run_persona_classification_once(&db, &cfg, None, None)
             .await
             .unwrap();
 
@@ -3481,7 +3494,7 @@ mod tests {
         let bus = EventBus::new(16);
         let mut rx = bus.subscribe_pipeline();
 
-        let classified = run_persona_classification_once(&db, &cfg, Some(&bus))
+        let classified = run_persona_classification_once(&db, &cfg, Some(&bus), None)
             .await
             .unwrap();
 
@@ -3508,7 +3521,7 @@ mod tests {
         let db = AsyncDb::open(":memory:").await.unwrap();
 
         // No wallets - just verify it runs without event_bus (backward compat)
-        let classified = run_persona_classification_once(&db, &cfg, None)
+        let classified = run_persona_classification_once(&db, &cfg, None, None)
             .await
             .unwrap();
         assert_eq!(classified, 0);
