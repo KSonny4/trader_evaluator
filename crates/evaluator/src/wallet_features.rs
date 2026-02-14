@@ -1310,4 +1310,61 @@ mod tests {
             "ROI should be ~-1.00, got {roi}"
         );
     }
+
+    #[test]
+    fn test_paired_stats_sums_realized_pnl() {
+        let db = setup_db_with_trades(&[
+            ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000),
+            ("0xtest", "mkt1", "SELL", 80.0, 0.60, 2000),  // +16.00 realized
+            ("0xtest", "mkt2", "BUY", 50.0, 0.50, 3000),
+            ("0xtest", "mkt2", "SELL", 50.0, 0.55, 4000),  // +2.50 realized
+        ]);
+
+        let stats = paired_trade_stats(&db.conn, "0xtest", 0).unwrap();
+
+        // Total realized: 16.00 + 2.50 = 18.50
+        assert!((stats.total_fifo_realized_pnl - 18.50).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_paired_stats_tracks_open_positions() {
+        let db = setup_db_with_trades(&[
+            ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000),  // Cost: $40
+            ("0xtest", "mkt1", "BUY", 50.0, 0.50, 1500),   // Cost: $25
+            ("0xtest", "mkt1", "SELL", 80.0, 0.60, 2000),  // Matches first 80 from first buy
+            // Remaining: 20 @ $0.40 + 50 @ $0.50 = 70 shares, cost basis ~$0.457
+        ]);
+
+        let stats = paired_trade_stats(&db.conn, "0xtest", 0).unwrap();
+
+        assert_eq!(stats.open_positions.len(), 1);
+        let open = &stats.open_positions[0];
+        assert_eq!(open.condition_id, "mkt1");
+        assert!((open.total_size - 70.0).abs() < 0.01);
+        assert!((open.weighted_cost_basis - 0.457).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_paired_stats_multiple_markets_mixed() {
+        let db = setup_db_with_trades(&[
+            // Market 1: fully closed
+            ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000),
+            ("0xtest", "mkt1", "SELL", 100.0, 0.50, 2000),  // +10.00 realized
+
+            // Market 2: open position
+            ("0xtest", "mkt2", "BUY", 50.0, 0.60, 3000),    // Open: 50 @ $0.60
+
+            // Market 3: partial close
+            ("0xtest", "mkt3", "BUY", 100.0, 0.30, 4000),
+            ("0xtest", "mkt3", "SELL", 60.0, 0.40, 5000),   // +6.00 realized, 40 open
+        ]);
+
+        let stats = paired_trade_stats(&db.conn, "0xtest", 0).unwrap();
+
+        // Realized: 10.00 + 6.00 = 16.00
+        assert!((stats.total_fifo_realized_pnl - 16.00).abs() < 0.01);
+
+        // Open positions: mkt2 (50 shares) + mkt3 (40 shares) = 2 markets
+        assert_eq!(stats.open_positions.len(), 2);
+    }
 }
