@@ -29,6 +29,9 @@ pub struct WalletFeatures {
     pub top_domain_ratio: f64,
     /// Number of markets where total FIFO-paired PnL > 0.
     pub profitable_markets: u32,
+    /// Cashflow PnL: total sell proceeds minus total buy costs.
+    /// Captures ALL capital deployed (not just FIFO-paired round-trips).
+    pub realized_pnl: f64,
 }
 
 /// Paired round-trip stats: wins, losses, and hold durations (seconds) for each closed position.
@@ -229,6 +232,22 @@ pub fn compute_wallet_features(
         .unwrap_or(0.0);
 
     let total_pnl: f64 = paired.closed_pnls.iter().map(|(_, pnl)| pnl).sum();
+
+    // Cashflow PnL: total sell proceeds minus total buy costs.
+    // Captures ALL capital deployed (not just FIFO-paired round-trips),
+    // so positions that expired worthless (no SELL) correctly show as losses.
+    let (total_buy_cost, total_sell_proceeds): (f64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN side = 'BUY' THEN size * price ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN side = 'SELL' THEN size * price ELSE 0.0 END), 0.0)
+             FROM trades_raw
+             WHERE proxy_wallet = ?1 AND timestamp >= ?2",
+            rusqlite::params![proxy_wallet, cutoff],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0.0, 0.0));
+    let realized_pnl: f64 = total_sell_proceeds - total_buy_cost;
 
     let weeks = f64::from(window_days) / 7.0;
     let trades_per_week = if weeks > 0.0 {
@@ -439,6 +458,7 @@ pub fn compute_wallet_features(
         top_domain,
         top_domain_ratio,
         profitable_markets: paired.profitable_markets,
+        realized_pnl,
     })
 }
 
@@ -453,8 +473,9 @@ pub fn save_wallet_features(
           total_pnl, avg_position_size, unique_markets, avg_hold_time_hours, max_drawdown_pct,
           trades_per_week, trades_per_day, sharpe_ratio, active_positions, concentration_ratio,
           avg_trade_size_usdc, size_cv, buy_sell_balance, mid_fill_ratio, extreme_price_ratio,
-          burstiness_top_1h_ratio, top_domain, top_domain_ratio, profitable_markets)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+          burstiness_top_1h_ratio, top_domain, top_domain_ratio, profitable_markets,
+          realized_pnl)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         rusqlite::params![
             features.proxy_wallet,
             feature_date,
@@ -481,6 +502,7 @@ pub fn save_wallet_features(
             features.top_domain,
             features.top_domain_ratio,
             features.profitable_markets,
+            features.realized_pnl,
         ],
     )?;
     Ok(())
@@ -647,6 +669,7 @@ mod tests {
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.8,
             profitable_markets: 4,
+            realized_pnl: 150.0,
         };
 
         save_wallet_features(&db.conn, &features, "2026-02-08").unwrap();
@@ -778,6 +801,35 @@ mod tests {
         let f = compute_wallet_features(&db.conn, "0xabc", 30, now).unwrap();
         assert!(f.burstiness_top_1h_ratio >= 0.5);
         assert!(f.trades_per_day > 0.1);
+    }
+
+    #[test]
+    fn test_realized_pnl_is_cashflow_not_fifo() {
+        // realized_pnl = total sell proceeds - total buy costs (cashflow PnL).
+        // This captures ALL capital deployed, not just FIFO-paired round-trips.
+        //
+        // Wallet buys in 2 markets but only sells in 1:
+        //   Market A: buy 100 @ 0.40 ($40), sell 100 @ 0.60 ($60)
+        //   Market B: buy 200 @ 0.50 ($100), no sell (expired worthless)
+        //
+        // Cashflow PnL = $60 - ($40 + $100) = -$80
+        // FIFO-paired PnL would be +$20 (only sees market A)
+        let now = 1_700_000_000i64;
+        let day = 86_400i64;
+        let db = setup_db_with_trades(&[
+            ("0xmixed", "0xmkt_a", "BUY", 100.0, 0.40, now - 10 * day),
+            ("0xmixed", "0xmkt_a", "SELL", 100.0, 0.60, now - 9 * day),
+            ("0xmixed", "0xmkt_b", "BUY", 200.0, 0.50, now - 8 * day),
+        ]);
+
+        let f = compute_wallet_features(&db.conn, "0xmixed", 30, now).unwrap();
+
+        // Cashflow: $60 - ($40 + $100) = -$80
+        assert!(
+            (f.realized_pnl - (-80.0)).abs() < 1.0,
+            "realized_pnl should be cashflow ~-80.0, got {}",
+            f.realized_pnl
+        );
     }
 
     #[tokio::test]

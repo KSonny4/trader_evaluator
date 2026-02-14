@@ -690,7 +690,7 @@ pub fn classify_wallet(
     };
 
     let roi = if features.trade_count > 0 && features.avg_position_size > 0.0 {
-        features.total_pnl / (f64::from(features.trade_count) * features.avg_position_size)
+        features.realized_pnl / (f64::from(features.trade_count) * features.avg_position_size)
     } else {
         0.0
     };
@@ -1218,6 +1218,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 100.0,
         }
     }
 
@@ -1326,6 +1327,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 100.0,
         }
     }
 
@@ -1425,6 +1427,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 100.0,
         }
     }
 
@@ -1683,6 +1686,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 100.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1734,6 +1738,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 5.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1788,6 +1793,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: -50.0,
         };
 
         let mut config = PersonaConfig::default_for_test();
@@ -1842,6 +1848,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 100.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1882,6 +1889,7 @@ mod tests {
             top_domain: None,
             top_domain_ratio: 0.0,
             profitable_markets: 3,
+            realized_pnl: 100.0,
         };
 
         let config = PersonaConfig::default_for_test();
@@ -1935,6 +1943,7 @@ mod tests {
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.9,
             profitable_markets: 4,
+            realized_pnl: 100.0,
         };
 
         let config = PersonaConfig::default_for_test();

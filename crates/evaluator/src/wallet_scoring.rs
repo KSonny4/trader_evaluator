@@ -399,6 +399,7 @@ mod tests {
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.7,
             profitable_markets: 7,
+            realized_pnl: 100.0,
         };
         let input = score_input_from_features(&features, 120, false);
         assert!((input.hit_rate - 0.6).abs() < 0.01);

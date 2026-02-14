@@ -358,6 +358,7 @@ mod tests {
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.7,
             profitable_markets: 12,
+            realized_pnl: 100.0,
         }
     }
 
