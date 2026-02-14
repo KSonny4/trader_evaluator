@@ -3587,9 +3587,10 @@ mod tests {
     /// Integration test: wallet with negative realized PnL but positive unrealized gets excluded
     #[tokio::test]
     async fn test_classification_uses_realized_pnl_not_unrealized() {
-        let mut cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
-        cfg.personas.stage1_min_all_time_roi = 0.0;  // 0% threshold - any negative realized excludes
-        cfg.personas.stage1_min_wallet_age_days = 7;  // Lower threshold for test
+        let mut cfg =
+            Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.personas.stage1_min_all_time_roi = 0.0; // 0% threshold - any negative realized excludes
+        cfg.personas.stage1_min_wallet_age_days = 7; // Lower threshold for test
 
         let db = AsyncDb::open(":memory:").await.unwrap();
 
@@ -3675,8 +3676,11 @@ mod tests {
         let reason = exclusion_reason.unwrap();
         assert!(
             reason.contains("ALL_TIME_ROI") || reason.contains("REALIZED"),
-            "Exclusion should be for negative realized PnL, got: {}", reason
+            "Exclusion should be for negative realized PnL, got: {reason}"
         );
-        assert_eq!(suitable_count, 0, "No wallets should be suitable (wallet has negative realized PnL)");
+        assert_eq!(
+            suitable_count, 0,
+            "No wallets should be suitable (wallet has negative realized PnL)"
+        );
     }
 }

@@ -9,7 +9,7 @@ pub struct WalletFeatures {
     pub trade_count: u32,
     pub win_count: u32,
     pub loss_count: u32,
-    pub total_pnl: f64,  // CHANGED: Now = fifo_realized_pnl + unrealized_pnl
+    pub total_pnl: f64, // CHANGED: Now = fifo_realized_pnl + unrealized_pnl
     pub avg_position_size: f64,
     pub unique_markets: u32,
     pub avg_hold_time_hours: f64,
@@ -34,7 +34,7 @@ pub struct WalletFeatures {
     // RENAMED (breaking change)
     /// Cashflow PnL: total sell proceeds minus total buy costs.
     /// Captures ALL capital deployed (includes unrealized positions).
-    pub cashflow_pnl: f64,  // Was: realized_pnl
+    pub cashflow_pnl: f64, // Was: realized_pnl
 
     // NEW FIELDS
     /// FIFO-paired realized PnL: sum of all closed positions
@@ -49,8 +49,9 @@ pub struct WalletFeatures {
 #[derive(Debug, Clone)]
 struct OpenPosition {
     condition_id: String,
-    total_size: f64,           // Sum of unmatched buy sizes
-    weighted_cost_basis: f64,  // Weighted average buy price
+    total_size: f64,          // Sum of unmatched buy sizes
+    weighted_cost_basis: f64, // Weighted average buy price
+    #[allow(dead_code)] // Reserved for future use (position age tracking)
     oldest_buy_timestamp: i64,
 }
 
@@ -202,13 +203,21 @@ fn paired_trade_stats(conn: &Connection, proxy_wallet: &str, cutoff: i64) -> Res
         // NEW: Track open positions (unmatched buys)
         if !unmatched_buys.is_empty() {
             let total_size: f64 = unmatched_buys.iter().map(|(size, _, _)| size).sum();
-            let total_cost: f64 = unmatched_buys.iter().map(|(size, price, _)| size * price).sum();
+            let total_cost: f64 = unmatched_buys
+                .iter()
+                .map(|(size, price, _)| size * price)
+                .sum();
             let weighted_cost_basis = if total_size > 0.0 {
                 total_cost / total_size
             } else {
                 0.0
             };
-            let oldest_timestamp = unmatched_buys.iter().map(|(_, _, ts)| ts).min().copied().unwrap_or(0);
+            let oldest_timestamp = unmatched_buys
+                .iter()
+                .map(|(_, _, ts)| ts)
+                .min()
+                .copied()
+                .unwrap_or(0);
 
             open_positions_vec.push(OpenPosition {
                 condition_id: cid.clone(),
@@ -299,6 +308,7 @@ fn drawdown_and_sharpe_from_daily_pnl(closed_pnls: &[(i64, f64)]) -> Result<(f64
 }
 
 /// Compute unrealized PnL for open positions using current market prices
+#[allow(dead_code)] // Reserved for future integration with compute_wallet_features_with_unrealized
 fn compute_unrealized_pnl(
     open_positions: &[OpenPosition],
     current_positions: &[PolymarketPosition],
@@ -382,7 +392,7 @@ pub fn compute_wallet_features(
     let open_positions_count = paired.open_positions.len() as u32;
 
     // NEW: Unrealized PnL will be computed separately with API (set 0.0 for now)
-    let unrealized_pnl = 0.0;  // Populated in separate function with API call
+    let unrealized_pnl = 0.0; // Populated in separate function with API call
 
     // NEW: Total PnL = realized + unrealized
     let total_pnl = fifo_realized_pnl + unrealized_pnl;
@@ -577,7 +587,7 @@ pub fn compute_wallet_features(
         trade_count,
         win_count,
         loss_count,
-        total_pnl,  // Changed from old total_pnl calculation
+        total_pnl, // Changed from old total_pnl calculation
         avg_position_size,
         unique_markets,
         avg_hold_time_hours,
@@ -777,6 +787,7 @@ pub async fn compute_features_for_wallet(
 }
 
 /// Compute wallet features with unrealized PnL from Polymarket API
+#[allow(dead_code)] // Reserved for future use in live wallet feature computation
 pub async fn compute_wallet_features_with_unrealized(
     db: &common::db::AsyncDb,
     proxy_wallet: &str,
@@ -809,7 +820,8 @@ pub async fn compute_wallet_features_with_unrealized(
         let client = reqwest::Client::new();
         match common::polymarket::fetch_wallet_positions(&client, proxy_wallet).await {
             Ok(current_positions) => {
-                let (unrealized, _count) = compute_unrealized_pnl(&open_positions, &current_positions);
+                let (unrealized, _count) =
+                    compute_unrealized_pnl(&open_positions, &current_positions);
                 features.unrealized_pnl = unrealized;
                 features.total_pnl = features.fifo_realized_pnl + unrealized;
             }
@@ -825,7 +837,6 @@ pub async fn compute_wallet_features_with_unrealized(
     }
 
     // Save features with unrealized PnL
-    let wallet_clone3 = proxy_wallet.to_string();
     let features_clone = features.clone();
     let today_clone = today.clone();
     db.call_named("save_features", move |conn| {
@@ -1389,7 +1400,10 @@ mod tests {
         let db = setup_db_with_trades(&[("0xbuyer", "0xcond1", "BUY", 200.0, 0.50, now - 5 * day)]);
 
         let pnl = compute_recent_pnl(&db.conn, "0xbuyer", 30, now).unwrap();
-        assert_eq!(pnl, 0.0, "recent PnL should be 0.0 (no closed positions), got {pnl}");
+        assert_eq!(
+            pnl, 0.0,
+            "recent PnL should be 0.0 (no closed positions), got {pnl}"
+        );
     }
 
     #[test]
@@ -1400,19 +1414,22 @@ mod tests {
         let db = setup_db_with_trades(&[
             // Recent closed position: loss
             ("0xrecent", "mkt1", "BUY", 100.0, 0.55, days_30_ago + 1000),
-            ("0xrecent", "mkt1", "SELL", 100.0, 0.50, days_30_ago + 2000),  // -$5 realized
+            ("0xrecent", "mkt1", "SELL", 100.0, 0.50, days_30_ago + 2000), // -$5 realized
             // Recent open position with cost (unrealized gain not counted)
-            ("0xrecent", "mkt2", "BUY", 1000.0, 0.40, days_30_ago + 3000),  // $400 cost
+            ("0xrecent", "mkt2", "BUY", 1000.0, 0.40, days_30_ago + 3000), // $400 cost
             // If current price is $0.50: +$100 unrealized (not counted)
             // Old trade (outside 30-day window - should not count)
             ("0xrecent", "mkt3", "BUY", 100.0, 0.30, days_30_ago - 10000),
-            ("0xrecent", "mkt3", "SELL", 100.0, 0.50, days_30_ago - 5000),  // +$20 realized (old)
+            ("0xrecent", "mkt3", "SELL", 100.0, 0.50, days_30_ago - 5000), // +$20 realized (old)
         ]);
 
         let recent_pnl = compute_recent_pnl(&db.conn, "0xrecent", 30, now).unwrap();
 
         // Should only count recent realized: -$5 (not the old +$20 or unrealized +$100)
-        assert!((recent_pnl - (-5.0)).abs() < 0.01, "Expected -5.0, got {recent_pnl}");
+        assert!(
+            (recent_pnl - (-5.0)).abs() < 0.01,
+            "Expected -5.0, got {recent_pnl}"
+        );
     }
 
     #[test]
@@ -1432,7 +1449,10 @@ mod tests {
         let roi = compute_all_time_roi(&db.conn, "0xwinner").unwrap();
 
         assert!(roi > 0.0, "ROI should be positive, got {roi}");
-        assert!((roi - 0.444).abs() < 0.01, "ROI should be ~0.444, got {roi}");
+        assert!(
+            (roi - 0.444).abs() < 0.01,
+            "ROI should be ~0.444, got {roi}"
+        );
     }
 
     #[test]
@@ -1504,29 +1524,32 @@ mod tests {
         let db = setup_db_with_trades(&[
             // Closed position: loss
             ("0xloser", "mkt1", "BUY", 100.0, 0.60, 1000),
-            ("0xloser", "mkt1", "SELL", 100.0, 0.50, 2000),  // -$10 realized
+            ("0xloser", "mkt1", "SELL", 100.0, 0.50, 2000), // -$10 realized
             // Open position with cost (would have paper gain if price is now higher)
-            ("0xloser", "mkt2", "BUY", 1000.0, 0.40, 3000),  // $400 cost
-            // Cashflow PnL = (50 + 0) - (60 + 400) = -410 (negative)
-            // But if price goes to $0.50: unrealized would be +$100
-            // Total would be -10 + 100 = +90
-            // Realized PnL = -10 (only closed position counts)
+            ("0xloser", "mkt2", "BUY", 1000.0, 0.40, 3000), // $400 cost
+                                                            // Cashflow PnL = (50 + 0) - (60 + 400) = -410 (negative)
+                                                            // But if price goes to $0.50: unrealized would be +$100
+                                                            // Total would be -10 + 100 = +90
+                                                            // Realized PnL = -10 (only closed position counts)
         ]);
 
         let roi = compute_all_time_roi(&db.conn, "0xloser").unwrap();
 
         // ROI based on realized PnL only: -10 / 460 = -0.0217 (-2.17%)
         // Should be negative (exclude this wallet)
-        assert!(roi < 0.0, "ROI should be negative based on realized loss, got {roi}");
+        assert!(
+            roi < 0.0,
+            "ROI should be negative based on realized loss, got {roi}"
+        );
     }
 
     #[test]
     fn test_paired_stats_sums_realized_pnl() {
         let db = setup_db_with_trades(&[
             ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000),
-            ("0xtest", "mkt1", "SELL", 80.0, 0.60, 2000),  // +16.00 realized
+            ("0xtest", "mkt1", "SELL", 80.0, 0.60, 2000), // +16.00 realized
             ("0xtest", "mkt2", "BUY", 50.0, 0.50, 3000),
-            ("0xtest", "mkt2", "SELL", 50.0, 0.55, 4000),  // +2.50 realized
+            ("0xtest", "mkt2", "SELL", 50.0, 0.55, 4000), // +2.50 realized
         ]);
 
         let stats = paired_trade_stats(&db.conn, "0xtest", 0).unwrap();
@@ -1538,10 +1561,10 @@ mod tests {
     #[test]
     fn test_paired_stats_tracks_open_positions() {
         let db = setup_db_with_trades(&[
-            ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000),  // Cost: $40
-            ("0xtest", "mkt1", "BUY", 50.0, 0.50, 1500),   // Cost: $25
-            ("0xtest", "mkt1", "SELL", 80.0, 0.60, 2000),  // Matches first 80 from first buy
-            // Remaining: 20 @ $0.40 + 50 @ $0.50 = 70 shares, cost basis ~$0.457
+            ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000), // Cost: $40
+            ("0xtest", "mkt1", "BUY", 50.0, 0.50, 1500),  // Cost: $25
+            ("0xtest", "mkt1", "SELL", 80.0, 0.60, 2000), // Matches first 80 from first buy
+                                                          // Remaining: 20 @ $0.40 + 50 @ $0.50 = 70 shares, cost basis ~$0.457
         ]);
 
         let stats = paired_trade_stats(&db.conn, "0xtest", 0).unwrap();
@@ -1558,14 +1581,12 @@ mod tests {
         let db = setup_db_with_trades(&[
             // Market 1: fully closed
             ("0xtest", "mkt1", "BUY", 100.0, 0.40, 1000),
-            ("0xtest", "mkt1", "SELL", 100.0, 0.50, 2000),  // +10.00 realized
-
+            ("0xtest", "mkt1", "SELL", 100.0, 0.50, 2000), // +10.00 realized
             // Market 2: open position
-            ("0xtest", "mkt2", "BUY", 50.0, 0.60, 3000),    // Open: 50 @ $0.60
-
+            ("0xtest", "mkt2", "BUY", 50.0, 0.60, 3000), // Open: 50 @ $0.60
             // Market 3: partial close
             ("0xtest", "mkt3", "BUY", 100.0, 0.30, 4000),
-            ("0xtest", "mkt3", "SELL", 60.0, 0.40, 5000),   // +6.00 realized, 40 open
+            ("0xtest", "mkt3", "SELL", 60.0, 0.40, 5000), // +6.00 realized, 40 open
         ]);
 
         let stats = paired_trade_stats(&db.conn, "0xtest", 0).unwrap();
@@ -1579,22 +1600,18 @@ mod tests {
 
     #[test]
     fn test_compute_unrealized_pnl_positive_gains() {
-        let open_positions = vec![
-            OpenPosition {
-                condition_id: "mkt1".to_string(),
-                total_size: 100.0,
-                weighted_cost_basis: 0.40,
-                oldest_buy_timestamp: 1000,
-            },
-        ];
+        let open_positions = vec![OpenPosition {
+            condition_id: "mkt1".to_string(),
+            total_size: 100.0,
+            weighted_cost_basis: 0.40,
+            oldest_buy_timestamp: 1000,
+        }];
 
-        let current_positions = vec![
-            PolymarketPosition {
-                condition_id: "mkt1".to_string(),
-                size: 100.0,
-                market_price: 0.55,  // Up from $0.40 cost basis
-            },
-        ];
+        let current_positions = vec![PolymarketPosition {
+            condition_id: "mkt1".to_string(),
+            size: 100.0,
+            market_price: 0.55, // Up from $0.40 cost basis
+        }];
 
         let (unrealized, count) = compute_unrealized_pnl(&open_positions, &current_positions);
 
@@ -1605,22 +1622,18 @@ mod tests {
 
     #[test]
     fn test_compute_unrealized_pnl_negative_losses() {
-        let open_positions = vec![
-            OpenPosition {
-                condition_id: "mkt1".to_string(),
-                total_size: 100.0,
-                weighted_cost_basis: 0.60,
-                oldest_buy_timestamp: 1000,
-            },
-        ];
+        let open_positions = vec![OpenPosition {
+            condition_id: "mkt1".to_string(),
+            total_size: 100.0,
+            weighted_cost_basis: 0.60,
+            oldest_buy_timestamp: 1000,
+        }];
 
-        let current_positions = vec![
-            PolymarketPosition {
-                condition_id: "mkt1".to_string(),
-                size: 100.0,
-                market_price: 0.45,  // Down from $0.60 cost basis
-            },
-        ];
+        let current_positions = vec![PolymarketPosition {
+            condition_id: "mkt1".to_string(),
+            size: 100.0,
+            market_price: 0.45, // Down from $0.60 cost basis
+        }];
 
         let (unrealized, count) = compute_unrealized_pnl(&open_positions, &current_positions);
 
@@ -1631,14 +1644,12 @@ mod tests {
 
     #[test]
     fn test_compute_unrealized_pnl_missing_current_position() {
-        let open_positions = vec![
-            OpenPosition {
-                condition_id: "mkt1".to_string(),
-                total_size: 100.0,
-                weighted_cost_basis: 0.40,
-                oldest_buy_timestamp: 1000,
-            },
-        ];
+        let open_positions = vec![OpenPosition {
+            condition_id: "mkt1".to_string(),
+            total_size: 100.0,
+            weighted_cost_basis: 0.40,
+            oldest_buy_timestamp: 1000,
+        }];
 
         let current_positions = vec![]; // Position closed since last sync
 

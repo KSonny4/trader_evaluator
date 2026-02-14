@@ -501,10 +501,7 @@ pub async fn fetch_wallet_positions(
     client: &reqwest::Client,
     proxy_wallet: &str,
 ) -> Result<Vec<PolymarketPosition>> {
-    let url = format!(
-        "https://data-api.polymarket.com/positions?user={}",
-        proxy_wallet
-    );
+    let url = format!("https://data-api.polymarket.com/positions?user={proxy_wallet}");
 
     // Rate limiting: 200ms delay
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -513,7 +510,7 @@ pub async fn fetch_wallet_positions(
         .get(&url)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Positions API request failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Positions API request failed: {e}"))?;
 
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(
@@ -525,7 +522,7 @@ pub async fn fetch_wallet_positions(
     let positions: Vec<PolymarketPosition> = response
         .json()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse positions response: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse positions response: {e}"))?;
 
     Ok(positions)
 }
