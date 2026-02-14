@@ -73,47 +73,9 @@ async fn main() -> Result<()> {
         tracing::info!("event logging subscriber started");
     }
 
-    // ── Bootstrap: Run all jobs concurrently for immediate startup ──
-    tracing::info!("bootstrap: running all jobs in parallel");
-
-    let (scoring_res, wallet_res, leaderboard_res, classification_res, rules_res) = tokio::join!(
-        jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref(), event_bus.as_deref()),
-        jobs::run_wallet_discovery_once(
-            &db,
-            api.as_ref(),
-            api.as_ref(),
-            cfg.as_ref(),
-            event_bus.as_deref()
-        ),
-        jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
-        jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref(), None),
-        jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()),
-    );
-
-    match scoring_res {
-        Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
-    }
-    match wallet_res {
-        Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
-    }
-    match leaderboard_res {
-        Ok(n) => tracing::info!(inserted = n, "bootstrap: leaderboard_discovery done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
-    }
-    match classification_res {
-        Ok(classified) => tracing::info!(classified, "bootstrap: persona_classification done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: persona_classification failed"),
-    }
-    match rules_res {
-        Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
-        Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
-    }
-
-    tracing::info!("bootstrap done — starting scheduler (ingestion runs immediately)");
-
-    // ── Periodic scheduler ──
+    // ── Periodic scheduler: Create channels and start scheduler BEFORE bootstrap ──
+    // This ensures jobs like wallet_scoring run immediately on existing data
+    // instead of waiting 10+ minutes for bootstrap to complete.
     let (event_scoring_tx, mut event_scoring_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (wallet_discovery_tx, mut wallet_discovery_rx) = tokio::sync::mpsc::channel::<()>(8);
     let (trades_ingestion_tx, mut trades_ingestion_rx) = tokio::sync::mpsc::channel::<()>(8);
@@ -285,6 +247,47 @@ async fn main() -> Result<()> {
     }
 
     let _scheduler_handles = scheduler::start(scheduler_jobs);
+    tracing::info!("scheduler started (runs immediately on existing data)");
+
+    // ── Bootstrap: Run all jobs concurrently for immediate startup ──
+    tracing::info!("bootstrap: running all jobs in parallel");
+
+    let (scoring_res, wallet_res, leaderboard_res, classification_res, rules_res) = tokio::join!(
+        jobs::run_event_scoring_once(&db, api.as_ref(), cfg.as_ref(), event_bus.as_deref()),
+        jobs::run_wallet_discovery_once(
+            &db,
+            api.as_ref(),
+            api.as_ref(),
+            cfg.as_ref(),
+            event_bus.as_deref()
+        ),
+        jobs::run_leaderboard_discovery_once(&db, api.as_ref(), cfg.as_ref()),
+        jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref(), None),
+        jobs::run_wallet_rules_once(&db, cfg.as_ref(), event_bus.as_deref()),
+    );
+
+    match scoring_res {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: event_scoring done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: event_scoring failed"),
+    }
+    match wallet_res {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: wallet_discovery done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: wallet_discovery failed"),
+    }
+    match leaderboard_res {
+        Ok(n) => tracing::info!(inserted = n, "bootstrap: leaderboard_discovery done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: leaderboard_discovery failed"),
+    }
+    match classification_res {
+        Ok(classified) => tracing::info!(classified, "bootstrap: persona_classification done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: persona_classification failed"),
+    }
+    match rules_res {
+        Ok(changed) => tracing::info!(changed, "bootstrap: wallet_rules done"),
+        Err(e) => tracing::error!(error = %e, "bootstrap: wallet_rules failed"),
+    }
+
+    tracing::info!("bootstrap done — worker loops receiving scheduler ticks");
 
     tokio::spawn({
         let api = api.clone();
