@@ -800,6 +800,66 @@ pub async fn compute_features_for_wallet(
     .map_err(|e| anyhow::anyhow!("on-demand feature computation failed: {e}"))
 }
 
+/// Compute wallet features with unrealized PnL from Polymarket API
+pub async fn compute_wallet_features_with_unrealized(
+    db: &common::db::AsyncDb,
+    proxy_wallet: &str,
+    window_days: u32,
+) -> Result<WalletFeatures> {
+    let now_epoch = chrono::Utc::now().timestamp();
+    let today = chrono::Utc::now().date_naive().to_string();
+
+    // Compute base features (includes fifo_realized_pnl and open positions)
+    let wallet_clone = proxy_wallet.to_string();
+    let mut features = db
+        .call_named("compute_features", move |conn| {
+            compute_wallet_features(conn, &wallet_clone, window_days, now_epoch)
+        })
+        .await?;
+
+    // If we have open positions, fetch current prices and compute unrealized
+    if features.open_positions_count > 0 {
+        // Get open positions from paired_stats again (we need the data)
+        let cutoff = now_epoch - i64::from(window_days) * 86400;
+        let wallet_clone2 = proxy_wallet.to_string();
+        let open_positions = db
+            .call_named("get_open_positions", move |conn| {
+                let stats = paired_trade_stats(conn, &wallet_clone2, cutoff)?;
+                Ok(stats.open_positions)
+            })
+            .await?;
+
+        // Fetch current positions from Polymarket API
+        let client = reqwest::Client::new();
+        match common::polymarket::fetch_wallet_positions(&client, proxy_wallet).await {
+            Ok(current_positions) => {
+                let (unrealized, _count) = compute_unrealized_pnl(&open_positions, &current_positions);
+                features.unrealized_pnl = unrealized;
+                features.total_pnl = features.fifo_realized_pnl + unrealized;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    proxy_wallet = %proxy_wallet,
+                    error = %e,
+                    "Failed to fetch current positions - unrealized PnL will be 0.0"
+                );
+                // Keep unrealized_pnl = 0.0 (already set in compute_wallet_features)
+            }
+        }
+    }
+
+    // Save features with unrealized PnL
+    let wallet_clone3 = proxy_wallet.to_string();
+    let features_clone = features.clone();
+    let today_clone = today.clone();
+    db.call_named("save_features", move |conn| {
+        save_wallet_features(conn, &features_clone, &today_clone)
+    })
+    .await?;
+
+    Ok(features)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
