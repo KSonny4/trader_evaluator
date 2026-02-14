@@ -132,6 +132,22 @@ impl JobStatusRow {
                     return format!("{inserted} wallets inserted ({total} markets)");
                 }
             }
+            "trades_ingestion" | "activity_ingestion" | "positions_snapshot" => {
+                if let (Some(wallets), Some(inserted)) = (
+                    json.get("wallets").and_then(serde_json::Value::as_i64),
+                    json.get("inserted").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{wallets} wallets ({inserted} inserted)");
+                }
+            }
+            "holders_snapshot" => {
+                if let (Some(markets), Some(inserted)) = (
+                    json.get("markets").and_then(serde_json::Value::as_i64),
+                    json.get("inserted").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{markets} markets ({inserted} inserted)");
+                }
+            }
             "persona_classification" => {
                 // In-progress: {"processed": 5000, "total": 21239, "suitable": 1200, "phase": "classifying"}
                 if let (Some(processed), Some(total), Some(suitable)) = (
@@ -812,5 +828,50 @@ mod tests {
             updated_at: None,
         };
         assert_eq!(job.progress_display(), "");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_trades_ingestion() {
+        let job = JobStatusRow {
+            job_name: "trades_ingestion".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"wallets":50,"inserted":15234}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "50 wallets (15234 inserted)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_activity_ingestion() {
+        let job = JobStatusRow {
+            job_name: "activity_ingestion".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"wallets":30,"inserted":500}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "30 wallets (500 inserted)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_holders_snapshot() {
+        let job = JobStatusRow {
+            job_name: "holders_snapshot".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"markets":20,"inserted":400}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "20 markets (400 inserted)");
     }
 }

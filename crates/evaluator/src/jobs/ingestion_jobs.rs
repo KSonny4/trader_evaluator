@@ -2,6 +2,7 @@ use anyhow::Result;
 use common::db::AsyncDb;
 
 use super::fetcher_traits::*;
+use super::tracker::JobTracker;
 use crate::event_bus::EventBus;
 use crate::events::PipelineEvent;
 
@@ -12,6 +13,8 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
     wallets_limit: u32,
     event_bus: Option<&EventBus>,
 ) -> Result<(u64, u64)> {
+    let tracker = JobTracker::start(db, "trades_ingestion").await?;
+
     // Backfill first: wallets with 0 trades (so persona can evaluate them), then wallets that
     // already have trades. Within each tier, oldest discovered first so we make progress through
     // the backlog and don't starve older wallets. Persona runs on a schedule and reads trades_raw;
@@ -86,6 +89,13 @@ pub async fn run_trades_ingestion_once<P: crate::ingestion::TradesPager + Sync>(
         })
         .await;
 
+    let _ = tracker
+        .success(Some(serde_json::json!({
+            "wallets": total,
+            "inserted": inserted,
+        })))
+        .await;
+
     Ok((pages, inserted))
 }
 
@@ -95,6 +105,8 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
     limit: u32,
     wallets_limit: u32,
 ) -> Result<u64> {
+    let tracker = JobTracker::start(db, "activity_ingestion").await?;
+
     // Same as trades: wallets with recent trades first; then no trades or too old (re)download.
     let wallets: Vec<String> = db
         .call_named("run_activity_ingestion.wallets_select", move |conn| {
@@ -122,6 +134,7 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
         })
         .await?;
 
+    let wallet_count = wallets.len();
     let mut inserted = 0_u64;
     for w in wallets {
         let fetch_result = pager.fetch_activity_page(&w, limit, 0).await;
@@ -185,6 +198,13 @@ pub async fn run_activity_ingestion_once<P: ActivityPager + Sync>(
         inserted += page_inserted;
     }
 
+    let _ = tracker
+        .success(Some(serde_json::json!({
+            "wallets": wallet_count,
+            "inserted": inserted,
+        })))
+        .await;
+
     Ok(inserted)
 }
 
@@ -194,6 +214,8 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
     limit: u32,
     wallets_limit: u32,
 ) -> Result<u64> {
+    let tracker = JobTracker::start(db, "positions_snapshot").await?;
+
     let wallets: Vec<String> = db
         .call_named("run_positions_snapshot.wallets_select", move |conn| {
             let mut stmt = conn.prepare(
@@ -212,6 +234,7 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
         })
         .await?;
 
+    let wallet_count = wallets.len();
     let mut inserted = 0_u64;
     for w in wallets {
         let fetch_result = pager.fetch_positions_page(&w, limit, 0).await;
@@ -276,6 +299,13 @@ pub async fn run_positions_snapshot_once<P: PositionsPager + Sync>(
         inserted += page_inserted;
     }
 
+    let _ = tracker
+        .success(Some(serde_json::json!({
+            "wallets": wallet_count,
+            "inserted": inserted,
+        })))
+        .await;
+
     Ok(inserted)
 }
 
@@ -284,6 +314,8 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
     holders: &H,
     per_market: u32,
 ) -> Result<u64> {
+    let tracker = JobTracker::start(db, "holders_snapshot").await?;
+
     let markets: Vec<String> = db
         .call_named("run_holders_snapshot.markets_select", |conn| {
             let mut stmt = conn.prepare(
@@ -302,6 +334,7 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
         })
         .await?;
 
+    let market_count = markets.len();
     let mut inserted = 0_u64;
     for condition_id in markets {
         let fetch_result = holders.fetch_holders(&condition_id, per_market).await;
@@ -358,6 +391,13 @@ pub async fn run_holders_snapshot_once<H: HoldersFetcher + Sync>(
 
         inserted += page_inserted;
     }
+
+    let _ = tracker
+        .success(Some(serde_json::json!({
+            "markets": market_count,
+            "inserted": inserted,
+        })))
+        .await;
 
     Ok(inserted)
 }

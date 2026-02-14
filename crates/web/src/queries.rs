@@ -99,6 +99,31 @@ pub fn funnel_counts(conn: &Connection) -> Result<FunnelCounts> {
     })
 }
 
+pub fn all_job_statuses(conn: &Connection) -> Result<Vec<JobStatusRow>> {
+    timed_db_op("web.all_job_statuses", || {
+        let mut stmt = conn.prepare(
+            "SELECT job_name, status, last_run_at, metadata, duration_ms, last_error, updated_at
+             FROM job_status
+             ORDER BY job_name",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(JobStatusRow {
+                    job_name: row.get(0)?,
+                    status: row.get(1)?,
+                    last_run_at: row.get(2)?,
+                    next_run_at: None,
+                    last_error: row.get(5)?,
+                    duration_ms: row.get(4)?,
+                    metadata: row.get(3)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
 pub fn persona_funnel_counts(conn: &Connection) -> Result<PersonaFunnelCounts> {
     let wallets_discovered: i64 =
         conn.query_row("SELECT COUNT(*) FROM wallets", [], |r| r.get(0))?;
