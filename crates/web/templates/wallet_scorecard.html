@@ -116,6 +116,42 @@
     </div>
     {% when None %}{% endmatch %}
 
+    <!-- Performance Breakdown -->
+    {% match journey.features %}
+    {% when Some with (f) %}
+    <div class="bg-gray-900 rounded-lg p-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-3">Performance Breakdown <span class="font-normal text-gray-600">(30d window)</span></h3>
+        <div class="space-y-2">
+            <div class="flex justify-between items-center py-1">
+                <span class="text-xs text-gray-400">Realized PnL (closed positions):</span>
+                <span class="text-sm {% if f.fifo_realized_pnl >= 0.0 %}text-green-400{% else %}text-red-400{% endif %}">
+                    {% if f.fifo_realized_pnl >= 0.0 %}+{% endif %}${{ "{:.2}"|format(f.fifo_realized_pnl) }}
+                    {% if f.fifo_realized_pnl >= 0.0 %}✅{% else %}❌{% endif %}
+                </span>
+            </div>
+            <div class="flex justify-between items-center py-1">
+                <span class="text-xs text-gray-400">Unrealized PnL (open positions):</span>
+                <span class="text-sm {% if f.unrealized_pnl >= 0.0 %}text-green-400{% else %}text-red-400{% endif %}">
+                    {% if f.unrealized_pnl >= 0.0 %}+{% endif %}${{ "{:.2}"|format(f.unrealized_pnl) }}
+                    📈
+                </span>
+            </div>
+            <div class="flex justify-between items-center py-1 border-t border-gray-700 pt-2">
+                <span class="text-xs font-semibold text-gray-300">Total PnL:</span>
+                <span class="text-sm font-semibold {{ f.pnl_color }}">{{ f.pnl_display }}</span>
+            </div>
+            <div class="flex justify-between items-center py-1 text-xs text-gray-500">
+                <span>Open Positions:</span>
+                <span>{{ f.open_positions_count }} markets</span>
+            </div>
+            <div class="flex justify-between items-center py-1 text-xs text-gray-500">
+                <span>Closed Trades:</span>
+                <span>{{ f.win_count }} + {{ f.loss_count }} = {% let total_closed = f.win_count + f.loss_count %}{{ total_closed }} round-trips</span>
+            </div>
+        </div>
+    </div>
+    {% when None %}{% endmatch %}
+
     <!-- On-Chain Features -->
     {% match journey.features %}
     {% when Some with (f) %}
