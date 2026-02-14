@@ -34,6 +34,15 @@ pub struct WalletFeatures {
     pub realized_pnl: f64,
 }
 
+/// Represents an open position (unmatched buys) in a single market
+#[derive(Debug, Clone)]
+struct OpenPosition {
+    condition_id: String,
+    total_size: f64,           // Sum of unmatched buy sizes
+    weighted_cost_basis: f64,  // Weighted average buy price
+    oldest_buy_timestamp: i64,
+}
+
 /// Paired round-trip stats: wins, losses, and hold durations (seconds) for each closed position.
 struct PairedStats {
     wins: u32,
@@ -43,6 +52,12 @@ struct PairedStats {
     closed_pnls: Vec<(i64, f64)>,
     /// Number of markets where total paired PnL > 0
     profitable_markets: u32,
+
+    // NEW FIELDS
+    /// Sum of all FIFO-paired realized PnL (closed positions only)
+    total_fifo_realized_pnl: f64,
+    /// Open positions (unmatched buys) per market
+    open_positions: Vec<OpenPosition>,
 }
 
 /// Pair BUY and SELL trades within each condition_id (FIFO). Compute win/loss from actual PnL,
