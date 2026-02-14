@@ -9,7 +9,7 @@ pub struct WalletFeatures {
     pub trade_count: u32,
     pub win_count: u32,
     pub loss_count: u32,
-    pub total_pnl: f64,
+    pub total_pnl: f64,  // CHANGED: Now = fifo_realized_pnl + unrealized_pnl
     pub avg_position_size: f64,
     pub unique_markets: u32,
     pub avg_hold_time_hours: f64,
@@ -30,9 +30,19 @@ pub struct WalletFeatures {
     pub top_domain_ratio: f64,
     /// Number of markets where total FIFO-paired PnL > 0.
     pub profitable_markets: u32,
+
+    // RENAMED (breaking change)
     /// Cashflow PnL: total sell proceeds minus total buy costs.
-    /// Captures ALL capital deployed (not just FIFO-paired round-trips).
-    pub realized_pnl: f64,
+    /// Captures ALL capital deployed (includes unrealized positions).
+    pub cashflow_pnl: f64,  // Was: realized_pnl
+
+    // NEW FIELDS
+    /// FIFO-paired realized PnL: sum of all closed positions
+    pub fifo_realized_pnl: f64,
+    /// Unrealized PnL: open positions valued at current market price (from Polymarket API)
+    pub unrealized_pnl: f64,
+    /// Number of markets with open positions (unmatched buys)
+    pub open_positions_count: u32,
 }
 
 /// Represents an open position (unmatched buys) in a single market
@@ -352,11 +362,7 @@ pub fn compute_wallet_features(
         )
         .unwrap_or(0.0);
 
-    let total_pnl: f64 = paired.closed_pnls.iter().map(|(_, pnl)| pnl).sum();
-
-    // Cashflow PnL: total sell proceeds minus total buy costs.
-    // Captures ALL capital deployed (not just FIFO-paired round-trips),
-    // so positions that expired worthless (no SELL) correctly show as losses.
+    // Compute cashflow PnL (old "realized_pnl" logic)
     let (total_buy_cost, total_sell_proceeds): (f64, f64) = conn
         .query_row(
             "SELECT
@@ -368,7 +374,18 @@ pub fn compute_wallet_features(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap_or((0.0, 0.0));
-    let realized_pnl: f64 = total_sell_proceeds - total_buy_cost;
+
+    let cashflow_pnl = total_sell_proceeds - total_buy_cost;
+
+    // NEW: Get fifo_realized_pnl and open positions from paired_stats
+    let fifo_realized_pnl = paired.total_fifo_realized_pnl;
+    let open_positions_count = paired.open_positions.len() as u32;
+
+    // NEW: Unrealized PnL will be computed separately with API (set 0.0 for now)
+    let unrealized_pnl = 0.0;  // Populated in separate function with API call
+
+    // NEW: Total PnL = realized + unrealized
+    let total_pnl = fifo_realized_pnl + unrealized_pnl;
 
     let weeks = f64::from(window_days) / 7.0;
     let trades_per_week = if weeks > 0.0 {
@@ -560,7 +577,7 @@ pub fn compute_wallet_features(
         trade_count,
         win_count,
         loss_count,
-        total_pnl,
+        total_pnl,  // Changed from old total_pnl calculation
         avg_position_size,
         unique_markets,
         avg_hold_time_hours,
@@ -579,7 +596,12 @@ pub fn compute_wallet_features(
         top_domain,
         top_domain_ratio,
         profitable_markets: paired.profitable_markets,
-        realized_pnl,
+
+        // NEW AND RENAMED FIELDS
+        cashflow_pnl,
+        fifo_realized_pnl,
+        unrealized_pnl,
+        open_positions_count,
     })
 }
 
@@ -668,8 +690,8 @@ pub fn save_wallet_features(
           trades_per_week, trades_per_day, sharpe_ratio, active_positions, concentration_ratio,
           avg_trade_size_usdc, size_cv, buy_sell_balance, mid_fill_ratio, extreme_price_ratio,
           burstiness_top_1h_ratio, top_domain, top_domain_ratio, profitable_markets,
-          realized_pnl)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+          realized_pnl, cashflow_pnl, fifo_realized_pnl, unrealized_pnl, open_positions_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
         rusqlite::params![
             features.proxy_wallet,
             feature_date,
@@ -696,7 +718,11 @@ pub fn save_wallet_features(
             features.top_domain,
             features.top_domain_ratio,
             features.profitable_markets,
-            features.realized_pnl,
+            features.cashflow_pnl,  // realized_pnl (old column, keep for compat)
+            features.cashflow_pnl,
+            features.fifo_realized_pnl,
+            features.unrealized_pnl,
+            features.open_positions_count,
         ],
     )?;
     Ok(())
@@ -863,7 +889,10 @@ mod tests {
             top_domain: Some("sports".to_string()),
             top_domain_ratio: 0.8,
             profitable_markets: 4,
-            realized_pnl: 150.0,
+            cashflow_pnl: 150.0,
+            fifo_realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            open_positions_count: 0,
         };
 
         save_wallet_features(&db.conn, &features, "2026-02-08").unwrap();
@@ -1020,9 +1049,9 @@ mod tests {
 
         // Cashflow: $60 - ($40 + $100) = -$80
         assert!(
-            (f.realized_pnl - (-80.0)).abs() < 1.0,
-            "realized_pnl should be cashflow ~-80.0, got {}",
-            f.realized_pnl
+            (f.cashflow_pnl - (-80.0)).abs() < 1.0,
+            "cashflow_pnl should be ~-80.0, got {}",
+            f.cashflow_pnl
         );
     }
 
