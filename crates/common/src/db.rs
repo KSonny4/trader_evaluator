@@ -45,6 +45,7 @@ impl AsyncDb {
                     migrate_markets_is_crypto_15m(conn)?;
                     migrate_wallet_features_domain_columns(conn)?;
                     migrate_wallet_features_ag_columns(conn)?;
+                    migrate_wallet_features_pnl_columns(conn)?;
                     // For normal runtime operations we still want a longer busy_timeout.
                     conn.busy_timeout(std::time::Duration::from_secs(30))?;
                     Ok(())
@@ -203,6 +204,7 @@ impl Database {
         migrate_markets_is_crypto_15m(&self.conn).map_err(anyhow::Error::from)?;
         migrate_wallet_features_domain_columns(&self.conn).map_err(anyhow::Error::from)?;
         migrate_wallet_features_ag_columns(&self.conn).map_err(anyhow::Error::from)?;
+        migrate_wallet_features_pnl_columns(&self.conn).map_err(anyhow::Error::from)?;
         Ok(())
     }
 }
@@ -305,6 +307,43 @@ fn migrate_wallet_features_domain_columns(
         )?;
         conn.execute("ALTER TABLE wallet_features_daily RENAME COLUMN top_category_ratio TO top_domain_ratio", [])?;
     }
+    Ok(())
+}
+
+/// Add realized/unrealized PnL tracking columns to wallet_features_daily.
+fn migrate_wallet_features_pnl_columns(
+    conn: &Connection,
+) -> std::result::Result<(), rusqlite::Error> {
+    let required: [(&str, &str); 5] = [
+        ("cashflow_pnl", "REAL NOT NULL DEFAULT 0.0"),
+        ("fifo_realized_pnl", "REAL NOT NULL DEFAULT 0.0"),
+        ("unrealized_pnl", "REAL NOT NULL DEFAULT 0.0"),
+        ("total_pnl", "REAL NOT NULL DEFAULT 0.0"),
+        ("open_positions_count", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+
+    for (name, ty) in required {
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('wallet_features_daily') WHERE name=?1",
+            rusqlite::params![name],
+            |row| row.get(0),
+        )?;
+        if has == 0 {
+            conn.execute(
+                &format!("ALTER TABLE wallet_features_daily ADD COLUMN {name} {ty}"),
+                [],
+            )?;
+        }
+    }
+
+    // Migrate existing data: copy old realized_pnl to cashflow_pnl
+    conn.execute(
+        "UPDATE wallet_features_daily
+         SET cashflow_pnl = realized_pnl
+         WHERE cashflow_pnl = 0.0 AND realized_pnl != 0.0",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -905,5 +944,63 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn test_wallet_features_daily_has_pnl_columns() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        let cols: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('wallet_features_daily') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        for col in [
+            "cashflow_pnl",
+            "fifo_realized_pnl",
+            "unrealized_pnl",
+            "total_pnl",
+            "open_positions_count",
+        ] {
+            assert!(
+                cols.contains(&col.to_string()),
+                "missing column {col}; got {cols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pnl_migration_copies_realized_to_cashflow() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Insert test data with old realized_pnl value
+        db.conn
+            .execute(
+                "INSERT INTO wallet_features_daily (proxy_wallet, feature_date, window_days, realized_pnl)
+                 VALUES ('0xtest', '2026-02-14', 30, 123.45)",
+                [],
+            )
+            .unwrap();
+
+        // Run the migration again (should be idempotent and copy data)
+        migrate_wallet_features_pnl_columns(&db.conn).unwrap();
+
+        // Verify cashflow_pnl was populated from realized_pnl
+        let cashflow_pnl: f64 = db
+            .conn
+            .query_row(
+                "SELECT cashflow_pnl FROM wallet_features_daily WHERE proxy_wallet = '0xtest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!((cashflow_pnl - 123.45).abs() < 0.01);
     }
 }
