@@ -1,5 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 pub struct Database {
     pub conn: Connection,
@@ -13,6 +15,7 @@ pub struct Database {
 #[derive(Clone)]
 pub struct AsyncDb {
     conn: tokio_rusqlite::Connection,
+    pending_ops: Arc<AtomicU64>,
 }
 
 impl AsyncDb {
@@ -85,7 +88,10 @@ impl AsyncDb {
             }
         }
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            pending_ops: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     /// Run a closure on the background SQLite thread and return the result.
@@ -114,35 +120,66 @@ impl AsyncDb {
 
     /// Like [`Self::call`], but records Prometheus metrics for DB latency and errors.
     ///
-    /// This measures the full wall-clock time of the operation, including queueing
-    /// on the dedicated SQLite thread and execution of all SQL in the closure.
+    /// Records three histograms:
+    /// - `evaluator_db_queue_wait_ms` — time waiting for the background thread
+    /// - `evaluator_db_exec_ms` — time executing the closure (actual SQLite work)
+    /// - `evaluator_db_query_latency_ms` — total wall-clock time (backwards-compatible)
+    ///
+    /// Also maintains `evaluator_db_queue_depth` gauge and emits a warning for
+    /// operations exceeding 500ms.
     pub async fn call_named<F, R>(&self, op: &'static str, function: F) -> Result<R>
     where
         F: FnOnce(&mut rusqlite::Connection) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let start = std::time::Instant::now();
-        let res = self.call(function).await;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        let pending = self.pending_ops.clone();
+        let depth = pending.fetch_add(1, Ordering::Relaxed) + 1;
+        metrics::gauge!("evaluator_db_queue_depth").set(depth as f64);
 
-        match &res {
-            Ok(_) => {
-                metrics::histogram!(
-                    "evaluator_db_query_latency_ms",
-                    "op" => op,
-                    "status" => "ok"
-                )
-                .record(ms);
-            }
-            Err(_) => {
-                metrics::histogram!(
-                    "evaluator_db_query_latency_ms",
-                    "op" => op,
-                    "status" => "err"
-                )
-                .record(ms);
-                metrics::counter!("evaluator_db_query_errors_total", "op" => op).increment(1);
-            }
+        let start = std::time::Instant::now();
+        // Use an Arc<AtomicU64> to capture the closure-start timestamp from the
+        // background thread (nanos since `start`).
+        let exec_start_nanos = Arc::new(AtomicU64::new(0));
+        let exec_start_nanos2 = exec_start_nanos.clone();
+
+        let res = self
+            .call(move |conn| {
+                exec_start_nanos2.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                function(conn)
+            })
+            .await;
+
+        let total = start.elapsed();
+        let queue_nanos = exec_start_nanos.load(Ordering::Relaxed);
+        let queue_wait = std::time::Duration::from_nanos(queue_nanos);
+        let exec_time = total.saturating_sub(queue_wait);
+
+        let new_depth = pending.fetch_sub(1, Ordering::Relaxed) - 1;
+        metrics::gauge!("evaluator_db_queue_depth").set(new_depth as f64);
+
+        let total_ms = total.as_secs_f64() * 1000.0;
+        let queue_ms = queue_wait.as_secs_f64() * 1000.0;
+        let exec_ms = exec_time.as_secs_f64() * 1000.0;
+
+        let status = if res.is_ok() { "ok" } else { "err" };
+
+        metrics::histogram!("evaluator_db_query_latency_ms", "op" => op, "status" => status)
+            .record(total_ms);
+        metrics::histogram!("evaluator_db_queue_wait_ms", "op" => op).record(queue_ms);
+        metrics::histogram!("evaluator_db_exec_ms", "op" => op).record(exec_ms);
+
+        if res.is_err() {
+            metrics::counter!("evaluator_db_query_errors_total", "op" => op).increment(1);
+        }
+
+        if total_ms > 500.0 {
+            tracing::warn!(
+                op,
+                total_ms = format!("{total_ms:.1}"),
+                queue_ms = format!("{queue_ms:.1}"),
+                exec_ms = format!("{exec_ms:.1}"),
+                "slow DB operation"
+            );
         }
 
         res
@@ -212,7 +249,7 @@ fn migrate_markets_is_crypto_15m(conn: &Connection) -> std::result::Result<(), r
 fn migrate_wallet_features_ag_columns(
     conn: &Connection,
 ) -> std::result::Result<(), rusqlite::Error> {
-    let required: [(&str, &str); 13] = [
+    let required: [(&str, &str); 16] = [
         ("trades_per_day", "REAL NOT NULL DEFAULT 0.0"),
         ("avg_trade_size_usdc", "REAL NOT NULL DEFAULT 0.0"),
         ("size_cv", "REAL NOT NULL DEFAULT 0.0"),
@@ -226,6 +263,9 @@ fn migrate_wallet_features_ag_columns(
         ("sharpe_ratio", "REAL NOT NULL DEFAULT 0.0"),
         ("concentration_ratio", "REAL NOT NULL DEFAULT 0.0"),
         ("active_positions", "INTEGER NOT NULL DEFAULT 0"),
+        ("resolved_wins", "INTEGER NOT NULL DEFAULT 0"),
+        ("resolved_losses", "INTEGER NOT NULL DEFAULT 0"),
+        ("realized_pnl", "REAL NOT NULL DEFAULT 0.0"),
     ];
     for (name, ty) in required {
         let has: i64 = conn.query_row(

@@ -19,11 +19,44 @@ pub fn describe() {
     );
     describe_histogram!(
         "evaluator_db_query_latency_ms",
-        "SQLite DB operation latency in milliseconds."
+        "SQLite DB operation total latency in milliseconds (queue wait + execution)."
+    );
+    describe_histogram!(
+        "evaluator_db_queue_wait_ms",
+        "Time waiting for the SQLite background thread in milliseconds."
+    );
+    describe_histogram!(
+        "evaluator_db_exec_ms",
+        "Actual SQLite execution time in milliseconds (excludes queue wait)."
+    );
+    describe_gauge!(
+        "evaluator_db_queue_depth",
+        "Number of operations queued for the SQLite background thread."
     );
     describe_counter!(
         "evaluator_db_query_errors_total",
         "SQLite DB operation errors."
+    );
+    // SQLite file/page stats (collected periodically)
+    describe_gauge!(
+        "evaluator_db_file_size_bytes",
+        "SQLite database file size in bytes."
+    );
+    describe_gauge!(
+        "evaluator_db_wal_size_bytes",
+        "SQLite WAL file size in bytes (0 if not present)."
+    );
+    describe_gauge!(
+        "evaluator_db_page_count",
+        "Total pages in the SQLite database."
+    );
+    describe_gauge!(
+        "evaluator_db_page_size_bytes",
+        "SQLite page size in bytes."
+    );
+    describe_gauge!(
+        "evaluator_db_freelist_count",
+        "Number of free (wasted) pages in the SQLite database."
     );
     describe_counter!(
         "evaluator_markets_scored_total",
