@@ -11,9 +11,71 @@ use crate::risk::RiskManager;
 use crate::types::Side;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Aggregates poll-loop stats and emits a single debug summary periodically.
+/// Errors and important events (new trades, mirrors) still log immediately.
+struct PollStats {
+    polls: u64,
+    skipped_halted: u64,
+    skipped_paused: u64,
+    fetches_ok: u64,
+    fetch_errors: u64,
+    new_trades: u64,
+    mirrors_executed: u64,
+    mirrors_skipped: u64,
+    last_flush: Instant,
+    flush_interval: Duration,
+}
+
+impl PollStats {
+    fn new(flush_interval: Duration) -> Self {
+        Self {
+            polls: 0,
+            skipped_halted: 0,
+            skipped_paused: 0,
+            fetches_ok: 0,
+            fetch_errors: 0,
+            new_trades: 0,
+            mirrors_executed: 0,
+            mirrors_skipped: 0,
+            last_flush: Instant::now(),
+            flush_interval,
+        }
+    }
+
+    fn should_flush(&self) -> bool {
+        self.last_flush.elapsed() >= self.flush_interval
+    }
+
+    fn flush(&mut self, wallet: &str) {
+        if self.polls > 0 {
+            debug!(
+                wallet = wallet,
+                polls = self.polls,
+                fetches_ok = self.fetches_ok,
+                fetch_errors = self.fetch_errors,
+                new_trades = self.new_trades,
+                mirrors_executed = self.mirrors_executed,
+                mirrors_skipped = self.mirrors_skipped,
+                skipped_halted = self.skipped_halted,
+                skipped_paused = self.skipped_paused,
+                "poll summary"
+            );
+        }
+        self.polls = 0;
+        self.skipped_halted = 0;
+        self.skipped_paused = 0;
+        self.fetches_ok = 0;
+        self.fetch_errors = 0;
+        self.new_trades = 0;
+        self.mirrors_executed = 0;
+        self.mirrors_skipped = 0;
+        self.last_flush = Instant::now();
+    }
+}
 
 /// Run the watcher loop for a single wallet.
 /// Polls for new trades, detects new ones, mirrors them, and records fillability.
@@ -29,25 +91,34 @@ pub async fn run_watcher(
     cancel: CancellationToken,
 ) {
     let addr = &wallet.proxy_wallet;
-    let poll_interval = Duration::from_millis(config.trading.poll_interval_ms);
+    let poll_interval = config
+        .trading
+        .poll_interval_ms
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(config.trading.poll_interval_secs));
 
     info!(wallet = %addr, mode = %wallet.trading_mode, "watcher started");
 
     let mut detector = TradeDetector::new(wallet.last_trade_seen_hash.clone());
     let mut interval = tokio::time::interval(poll_interval);
+    let mut stats = PollStats::new(Duration::from_secs(60));
     // Don't fire immediately — let the system stabilize first
     interval.tick().await;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                stats.flush(addr);
                 info!(wallet = %addr, "watcher cancelled");
                 break;
             }
             _ = interval.tick() => {
+                stats.polls += 1;
+
                 // Check if globally halted
                 if halted.load(Ordering::SeqCst) {
-                    debug!(wallet = %addr, "skipping poll — trading halted");
+                    stats.skipped_halted += 1;
+                    if stats.should_flush() { stats.flush(addr); }
                     continue;
                 }
 
@@ -55,10 +126,12 @@ pub async fn run_watcher(
                 let status = load_wallet_status(&db, addr).await;
                 match status.as_deref() {
                     Some("paused") => {
-                        debug!(wallet = %addr, "skipping poll — wallet paused");
+                        stats.skipped_paused += 1;
+                        if stats.should_flush() { stats.flush(addr); }
                         continue;
                     }
                     Some("killed") | Some("removed") => {
+                        stats.flush(addr);
                         info!(wallet = %addr, status = status.as_deref().unwrap_or(""), "wallet no longer active, stopping watcher");
                         break;
                     }
@@ -68,8 +141,10 @@ pub async fn run_watcher(
                 // Poll for trades
                 match client.fetch_trades(addr, 200, 0).await {
                     Ok(trades) => {
+                        stats.fetches_ok += 1;
                         let new_trades = detector.detect_new(&trades);
                         if !new_trades.is_empty() {
+                            stats.new_trades += new_trades.len() as u64;
                             info!(wallet = %addr, new_count = new_trades.len(), "detected new trades");
 
                             // Update watermark in DB
@@ -135,17 +210,14 @@ pub async fn run_watcher(
                                 {
                                     Ok(result) => {
                                         if result.executed {
+                                            stats.mirrors_executed += 1;
                                             info!(
                                                 wallet = %addr,
                                                 trade_id = result.trade_id.unwrap_or(0),
                                                 "mirror trade executed"
                                             );
                                         } else {
-                                            debug!(
-                                                wallet = %addr,
-                                                reason = result.reason.as_deref().unwrap_or("unknown"),
-                                                "mirror trade skipped"
-                                            );
+                                            stats.mirrors_skipped += 1;
                                         }
                                     }
                                     Err(e) => {
@@ -160,6 +232,7 @@ pub async fn run_watcher(
                         }
                     }
                     Err(e) => {
+                        stats.fetch_errors += 1;
                         warn!(wallet = %addr, error = %e, "failed to fetch trades");
                     }
                 }
@@ -169,6 +242,9 @@ pub async fn run_watcher(
 
                 // Periodically prune detector to prevent memory leak
                 detector.prune(10_000);
+
+                // Flush aggregated stats periodically
+                if stats.should_flush() { stats.flush(addr); }
             }
         }
     }

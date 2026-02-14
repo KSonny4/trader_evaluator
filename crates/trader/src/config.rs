@@ -52,8 +52,9 @@ pub struct TradingConfig {
     #[allow(dead_code)]
     pub mirror_delay_secs: u64,
     pub slippage_default_cents: f64,
-    // TODO: We might want 100ms delay for ALL Data API calls, or use a proxy to avoid rate limiting
-    pub poll_interval_ms: u64,
+    pub poll_interval_secs: u64,
+    /// If set, overrides poll_interval_secs with millisecond precision.
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
