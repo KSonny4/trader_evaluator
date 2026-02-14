@@ -1,4 +1,5 @@
 use anyhow::Result;
+use common::polymarket::PolymarketPosition;
 use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone)]
@@ -285,6 +286,36 @@ fn drawdown_and_sharpe_from_daily_pnl(closed_pnls: &[(i64, f64)]) -> Result<(f64
     };
 
     Ok((max_drawdown_pct, sharpe_ratio))
+}
+
+/// Compute unrealized PnL for open positions using current market prices
+fn compute_unrealized_pnl(
+    open_positions: &[OpenPosition],
+    current_positions: &[PolymarketPosition],
+) -> (f64, u32) {
+    let mut unrealized_pnl = 0.0;
+    let mut matched_count = 0;
+
+    for open_pos in open_positions {
+        // Find matching current position
+        if let Some(current) = current_positions
+            .iter()
+            .find(|p| p.condition_id == open_pos.condition_id)
+        {
+            // Unrealized PnL = (current_price - cost_basis) * size
+            let pnl = (current.market_price - open_pos.weighted_cost_basis) * open_pos.total_size;
+            unrealized_pnl += pnl;
+            matched_count += 1;
+        } else {
+            // Position closed since our last trade sync, or data mismatch
+            tracing::warn!(
+                condition_id = %open_pos.condition_id,
+                "Open position not found in current positions API - may have been closed"
+            );
+        }
+    }
+
+    (unrealized_pnl, matched_count)
 }
 
 pub fn compute_wallet_features(
@@ -1441,5 +1472,77 @@ mod tests {
 
         // Open positions: mkt2 (50 shares) + mkt3 (40 shares) = 2 markets
         assert_eq!(stats.open_positions.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_unrealized_pnl_positive_gains() {
+        let open_positions = vec![
+            OpenPosition {
+                condition_id: "mkt1".to_string(),
+                total_size: 100.0,
+                weighted_cost_basis: 0.40,
+                oldest_buy_timestamp: 1000,
+            },
+        ];
+
+        let current_positions = vec![
+            PolymarketPosition {
+                condition_id: "mkt1".to_string(),
+                size: 100.0,
+                market_price: 0.55,  // Up from $0.40 cost basis
+            },
+        ];
+
+        let (unrealized, count) = compute_unrealized_pnl(&open_positions, &current_positions);
+
+        // Unrealized: 100 * ($0.55 - $0.40) = +$15.00
+        assert!((unrealized - 15.0).abs() < 0.01);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_compute_unrealized_pnl_negative_losses() {
+        let open_positions = vec![
+            OpenPosition {
+                condition_id: "mkt1".to_string(),
+                total_size: 100.0,
+                weighted_cost_basis: 0.60,
+                oldest_buy_timestamp: 1000,
+            },
+        ];
+
+        let current_positions = vec![
+            PolymarketPosition {
+                condition_id: "mkt1".to_string(),
+                size: 100.0,
+                market_price: 0.45,  // Down from $0.60 cost basis
+            },
+        ];
+
+        let (unrealized, count) = compute_unrealized_pnl(&open_positions, &current_positions);
+
+        // Unrealized: 100 * ($0.45 - $0.60) = -$15.00
+        assert!((unrealized - (-15.0)).abs() < 0.01);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_compute_unrealized_pnl_missing_current_position() {
+        let open_positions = vec![
+            OpenPosition {
+                condition_id: "mkt1".to_string(),
+                total_size: 100.0,
+                weighted_cost_basis: 0.40,
+                oldest_buy_timestamp: 1000,
+            },
+        ];
+
+        let current_positions = vec![]; // Position closed since last sync
+
+        let (unrealized, count) = compute_unrealized_pnl(&open_positions, &current_positions);
+
+        // Should skip missing positions
+        assert_eq!(unrealized, 0.0);
+        assert_eq!(count, 0);
     }
 }
