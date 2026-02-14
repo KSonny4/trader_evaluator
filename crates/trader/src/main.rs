@@ -67,7 +67,12 @@ async fn main() -> Result<()> {
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
     info!(addr = %bind_addr, "starting trader HTTP server");
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("shutting down trader");
+        })
+        .await?;
 
     Ok(())
 }

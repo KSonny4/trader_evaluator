@@ -568,7 +568,14 @@ async fn main() -> Result<()> {
     });
 
     tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down");
+    tracing::info!("shutting down (force exit in 5s)");
+
+    // Give spawned tasks a moment to finish, then force exit.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tracing::warn!("force exit after timeout");
+        std::process::exit(0);
+    });
 
     Ok(())
 }
