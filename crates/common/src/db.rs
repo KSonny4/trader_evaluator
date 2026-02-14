@@ -311,6 +311,11 @@ fn migrate_wallet_features_domain_columns(
 }
 
 /// Add realized/unrealized PnL tracking columns to wallet_features_daily.
+///
+/// Adds 5 new columns: cashflow_pnl, fifo_realized_pnl, unrealized_pnl, total_pnl, open_positions_count.
+///
+/// For existing databases with the old realized_pnl column, copies realized_pnl → cashflow_pnl
+/// (Strategy Bible: cashflow = deposits - withdrawals + sum(PnL) is the primary PnL metric).
 fn migrate_wallet_features_pnl_columns(
     conn: &Connection,
 ) -> std::result::Result<(), rusqlite::Error> {
@@ -336,11 +341,12 @@ fn migrate_wallet_features_pnl_columns(
         }
     }
 
-    // Migrate existing data: copy old realized_pnl to cashflow_pnl
+    // Migrate existing data: copy old realized_pnl to cashflow_pnl.
+    // Uses IS NOT NULL to handle NULL values correctly and catches legitimate 0.0 values.
     conn.execute(
         "UPDATE wallet_features_daily
          SET cashflow_pnl = realized_pnl
-         WHERE cashflow_pnl = 0.0 AND realized_pnl != 0.0",
+         WHERE cashflow_pnl = 0.0 AND realized_pnl IS NOT NULL",
         [],
     )?;
 
@@ -1002,5 +1008,109 @@ mod tests {
             .unwrap();
 
         assert!((cashflow_pnl - 123.45).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_pnl_migration_idempotent() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Insert test data with old realized_pnl value
+        db.conn
+            .execute(
+                "INSERT INTO wallet_features_daily (proxy_wallet, feature_date, window_days, realized_pnl)
+                 VALUES ('0xtest', '2026-02-14', 30, 456.78)",
+                [],
+            )
+            .unwrap();
+
+        // Run the migration once
+        migrate_wallet_features_pnl_columns(&db.conn).unwrap();
+
+        let cashflow_pnl_first: f64 = db
+            .conn
+            .query_row(
+                "SELECT cashflow_pnl FROM wallet_features_daily WHERE proxy_wallet = '0xtest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Run the migration again
+        migrate_wallet_features_pnl_columns(&db.conn).unwrap();
+
+        let cashflow_pnl_second: f64 = db
+            .conn
+            .query_row(
+                "SELECT cashflow_pnl FROM wallet_features_daily WHERE proxy_wallet = '0xtest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Verify the value didn't change (idempotent)
+        assert!((cashflow_pnl_first - 456.78).abs() < 0.01);
+        assert!((cashflow_pnl_second - 456.78).abs() < 0.01);
+        assert!((cashflow_pnl_first - cashflow_pnl_second).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_pnl_migration_handles_zero_values() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Insert test data where realized_pnl = 0.0 (legitimate zero)
+        db.conn
+            .execute(
+                "INSERT INTO wallet_features_daily (proxy_wallet, feature_date, window_days, realized_pnl)
+                 VALUES ('0xzero', '2026-02-14', 30, 0.0)",
+                [],
+            )
+            .unwrap();
+
+        // Run the migration
+        migrate_wallet_features_pnl_columns(&db.conn).unwrap();
+
+        // Verify cashflow_pnl was populated (0.0 is a valid value)
+        let cashflow_pnl: f64 = db
+            .conn
+            .query_row(
+                "SELECT cashflow_pnl FROM wallet_features_daily WHERE proxy_wallet = '0xzero'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!((cashflow_pnl - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_pnl_migration_handles_negative_values() {
+        let db = Database::open(":memory:").unwrap();
+        db.run_migrations().unwrap();
+
+        // Insert test data with negative realized_pnl (losses)
+        db.conn
+            .execute(
+                "INSERT INTO wallet_features_daily (proxy_wallet, feature_date, window_days, realized_pnl)
+                 VALUES ('0xneg', '2026-02-14', 30, -50.25)",
+                [],
+            )
+            .unwrap();
+
+        // Run the migration
+        migrate_wallet_features_pnl_columns(&db.conn).unwrap();
+
+        // Verify cashflow_pnl was populated with the negative value
+        let cashflow_pnl: f64 = db
+            .conn
+            .query_row(
+                "SELECT cashflow_pnl FROM wallet_features_daily WHERE proxy_wallet = '0xneg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!((cashflow_pnl - (-50.25)).abs() < 0.01);
     }
 }
