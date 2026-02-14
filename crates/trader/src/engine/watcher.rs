@@ -29,7 +29,7 @@ pub async fn run_watcher(
     cancel: CancellationToken,
 ) {
     let addr = &wallet.proxy_wallet;
-    let poll_interval = Duration::from_secs(config.trading.poll_interval_secs);
+    let poll_interval = Duration::from_millis(config.trading.poll_interval_ms);
 
     info!(wallet = %addr, mode = %wallet.trading_mode, "watcher started");
 

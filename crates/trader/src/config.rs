@@ -52,7 +52,8 @@ pub struct TradingConfig {
     #[allow(dead_code)]
     pub mirror_delay_secs: u64,
     pub slippage_default_cents: f64,
-    pub poll_interval_secs: u64,
+    // TODO: We might want 100ms delay for ALL Data API calls, or use a proxy to avoid rate limiting
+    pub poll_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -199,7 +200,7 @@ use_proportional_sizing = true
 default_their_bankroll_usd = 5000.0
 mirror_delay_secs = 0
 slippage_default_cents = 1.0
-poll_interval_secs = 10
+poll_interval_ms = 100
 
 [risk.portfolio]
 max_total_exposure_pct = 15.0
