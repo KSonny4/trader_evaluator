@@ -358,8 +358,11 @@ pub fn ingestion_stats(conn: &Connection) -> Result<IngestionStats> {
             [],
             |r| r.get(0),
         )?;
+        // Use EXISTS against the indexed proxy_wallet column instead of
+        // COUNT(DISTINCT proxy_wallet) FROM trades_raw, which requires a full index scan
+        // and times out on large tables (>5s on production).
         let wallets_with_trades: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT proxy_wallet) FROM trades_raw",
+            "SELECT COUNT(*) FROM wallets w WHERE EXISTS (SELECT 1 FROM trades_raw t WHERE t.proxy_wallet = w.proxy_wallet LIMIT 1)",
             [],
             |r| r.get(0),
         )?;
