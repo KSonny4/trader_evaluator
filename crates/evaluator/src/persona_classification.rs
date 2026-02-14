@@ -269,6 +269,10 @@ pub struct Stage1Config {
     /// Minimum all-time ROI required (-0.10 = -10% max lifetime loss).
     /// Wallets with lifetime ROI below this are excluded before persona classification.
     pub stage1_min_all_time_roi: f64,
+    /// Stage 1.5: require positive recent PnL (catches wallets whose strategy stopped working).
+    pub stage1_require_recent_profit: bool,
+    /// Window (days) for the Stage 1.5 recent profitability check.
+    pub stage1_recent_profit_window_days: u32,
 }
 
 /// Returns Some(KnownBot) if proxy_wallet is in the known_bots list, None otherwise.
@@ -906,6 +910,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(
@@ -929,6 +935,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(
@@ -952,6 +960,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(
@@ -975,6 +985,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(result, None);
@@ -993,6 +1005,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(result, None);
@@ -1011,6 +1025,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(result, None);
@@ -1029,6 +1045,8 @@ mod tests {
                 max_inactive_days: 30,
                 known_bots: vec![],
                 stage1_min_all_time_roi: -0.10,
+                stage1_require_recent_profit: false,
+                stage1_recent_profit_window_days: 30,
             },
         );
         assert_eq!(result, None);

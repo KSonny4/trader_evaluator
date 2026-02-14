@@ -50,10 +50,7 @@ pub fn describe() {
         "evaluator_db_page_count",
         "Total pages in the SQLite database."
     );
-    describe_gauge!(
-        "evaluator_db_page_size_bytes",
-        "SQLite page size in bytes."
-    );
+    describe_gauge!("evaluator_db_page_size_bytes", "SQLite page size in bytes.");
     describe_gauge!(
         "evaluator_db_freelist_count",
         "Number of free (wasted) pages in the SQLite database."

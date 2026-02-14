@@ -379,8 +379,11 @@ fn run_classify(_db: &Database, limit: Option<usize>) -> Result<()> {
         rt.block_on(async {
             let async_db = AsyncDb::open(&db_path_inner).await?;
             let classified =
-                crate::jobs::run_persona_classification_once(&async_db, &config, None, limit).await?;
-            let limit_msg = limit.map(|l| format!(" (limited to {l})")).unwrap_or_default();
+                crate::jobs::run_persona_classification_once(&async_db, &config, None, limit)
+                    .await?;
+            let limit_msg = limit
+                .map(|l| format!(" (limited to {l})"))
+                .unwrap_or_default();
             println!("Classified {classified} wallets{limit_msg} (followable or excluded)");
             Ok::<_, anyhow::Error>(())
         })

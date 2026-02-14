@@ -55,7 +55,8 @@
 All Polymarket wallets (~1M+)
     ↓ [Event Selection: top-50 EScore events]
 Wallets active on those events (~500+)
-    ↓ [Stage 1: Fast automated filters — runs inline during discovery]
+    ↓ [Stage 1: Fast automated filters (age, trades, activity, lifetime ROI)]
+    ↓ [Stage 1.5: Recent profitability check (30-day PnL > 0)]
 Candidate wallets (~50-100)
     ↓ [Stage 2: Deep analysis — runs async as background job]
 Classified wallets with persona (~20-50)
@@ -170,8 +171,19 @@ Fail any single filter → immediately excluded with recorded reason in `wallet_
 | Wallet age | `stage1_min_wallet_age_days` | 45 | Age = days since oldest trade in `trades_raw` (not discovery time). New wallets = insufficient data or sniper risk |
 | Minimum trades | `stage1_min_total_trades` | 10 | Can't classify with fewer |
 | Basic activity | `stage1_max_inactive_days` | 45 | Dead wallets waste resources |
-| All-time ROI | `stage1_min_all_time_roi` | -0.10 (-10%) | Wallets with catastrophic lifetime losses are unfollowable even with recent hot streaks. Cashflow PnL = total sell proceeds - total buy costs (ALL trades). A wallet that destroyed $200K lifetime but had a good month is still down $200K. |
+| All-time ROI | `stage1_min_all_time_roi` | 0.00 (0%) | Wallets with lifetime losses are unfollowable. Tightened from -10% to exclude marginal losers. Cashflow PnL = total sell proceeds - total buy costs (ALL trades). A wallet with negative lifetime ROI has no proven edge. |
 | Not a known bot | Check against `known_bots` list | — | Automated accounts are unfollowable |
+
+### Stage 1.5: Recent Profitability Check (inline, after Stage 1)
+
+Catches wallets whose strategies have stopped working recently, even if lifetime ROI is positive.
+
+| Filter | Config Key | Default | Why |
+|--------|-----------|---------|-----|
+| Recent profitability | `stage1_require_recent_profit` | true | Exclude wallets losing money in last 30 days (strategy may have deteriorated) |
+| Profitability window | `stage1_recent_profit_window_days` | 30 | Rolling window for recent performance check. Cashflow PnL in window must be > $0. |
+
+**Example:** A wallet with +10% lifetime ROI but -$100 in last 30 days is excluded by Stage 1.5. The edge may have disappeared due to market regime change, strategy saturation, or loss of information advantage.
 
 ### Stage 2: Deep Analysis (async, scheduled background job)
 

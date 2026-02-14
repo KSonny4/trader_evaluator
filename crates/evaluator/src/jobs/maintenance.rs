@@ -54,13 +54,9 @@ pub async fn run_wal_checkpoint_once(db: &AsyncDb) -> Result<(i64, i64)> {
 /// the filesystem.
 pub async fn run_sqlite_stats_once(db: &AsyncDb, db_path: &str) -> Result<()> {
     // File sizes from the filesystem (cheap, no DB lock needed).
-    let db_file_size = std::fs::metadata(db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_file_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     let wal_path = format!("{db_path}-wal");
-    let wal_file_size = std::fs::metadata(&wal_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let wal_file_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
 
     metrics::gauge!("evaluator_db_file_size_bytes").set(db_file_size as f64);
     metrics::gauge!("evaluator_db_wal_size_bytes").set(wal_file_size as f64);

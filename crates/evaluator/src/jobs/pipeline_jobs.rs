@@ -11,7 +11,8 @@ use crate::persona_classification::{
 };
 use crate::wallet_discovery::{discover_wallets_for_market, HolderWallet, TradeWallet};
 use crate::wallet_features::{
-    compute_all_time_roi, compute_wallet_features, save_wallet_features, WalletFeatures,
+    compute_all_time_roi, compute_recent_pnl, compute_wallet_features, save_wallet_features,
+    WalletFeatures,
 };
 use crate::wallet_rules_engine::{
     evaluate_discovery, evaluate_live, evaluate_paper, read_state, record_event,
@@ -1062,8 +1063,8 @@ async fn compute_features_parallel(
     all_results
 }
 
-/// Process a chunk of wallets (Stage 1 + Stage 2)
-/// Returns (processed_count, stage1_no_trades, stage1_other, stage2_excluded, suitable)
+/// Process a chunk of wallets (Stage 1 + Stage 1.5 + Stage 2)
+/// Returns (processed_count, stage1_no_trades, stage1_all_time_roi, stage1_recent_loss, stage1_other, stage2_excluded, suitable)
 fn process_wallet_chunk(
     conn: &rusqlite::Connection,
     wallets: &[(String, u32, u32, u32)],
@@ -1072,10 +1073,11 @@ fn process_wallet_chunk(
     window_days: u32,
     now_epoch: i64,
     precomputed_features: Option<&std::collections::HashMap<String, (u32, WalletFeatures)>>,
-) -> Result<(u64, u64, u64, u64, u64, u64)> {
+) -> Result<(u64, u64, u64, u64, u64, u64, u64)> {
     let mut count = 0_u64;
     let mut stage1_no_trades = 0_u64;
     let mut stage1_all_time_roi = 0_u64;
+    let mut stage1_recent_loss = 0_u64;
     let mut stage1_other = 0_u64;
     let mut stage2_excluded = 0_u64;
     let mut suitable = 0_u64;
@@ -1151,6 +1153,53 @@ fn process_wallet_chunk(
             continue;
         }
 
+        // Stage 1.5 Gate: Recent profitability check
+        if stage1_config.stage1_require_recent_profit {
+            let recent_pnl = match compute_recent_pnl(
+                conn,
+                proxy_wallet,
+                stage1_config.stage1_recent_profit_window_days,
+                now_epoch,
+            ) {
+                Ok(pnl) => pnl,
+                Err(e) => {
+                    tracing::warn!(
+                        proxy_wallet = %proxy_wallet,
+                        error = %e,
+                        "persona: failed to compute recent PnL"
+                    );
+                    continue;
+                }
+            };
+
+            if recent_pnl < 0.0 {
+                let reason_str = format!("STAGE1_RECENT_LOSS({recent_pnl:.2})");
+                tracing::info!(
+                    proxy_wallet = %proxy_wallet,
+                    recent_pnl = format!("{:.2}", recent_pnl),
+                    window_days = stage1_config.stage1_recent_profit_window_days,
+                    "persona: excluded Stage 1.5 — recent loss"
+                );
+
+                if let Err(e) = conn.execute(
+                    "INSERT INTO wallet_exclusions
+                        (proxy_wallet, reason, metric_value, threshold, excluded_at)
+                     VALUES (?1, ?2, ?3, ?4, datetime('now'))
+                     ON CONFLICT(proxy_wallet, reason) DO UPDATE SET
+                        metric_value = excluded.metric_value,
+                        threshold = excluded.threshold,
+                        excluded_at = datetime('now')",
+                    rusqlite::params![proxy_wallet, &reason_str, recent_pnl, 0.0_f64],
+                ) {
+                    tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "Failed to record recent loss exclusion");
+                }
+
+                stage1_recent_loss += 1;
+                count += 1;
+                continue;
+            }
+        }
+
         // Stage 1 passed - clear old exclusions
         if let Err(e) = crate::persona_classification::clear_stage1_exclusion(conn, proxy_wallet) {
             tracing::warn!(proxy_wallet = %proxy_wallet, error = %e, "Failed to clear Stage 1 exclusion");
@@ -1207,6 +1256,7 @@ fn process_wallet_chunk(
         count,
         stage1_no_trades,
         stage1_all_time_roi,
+        stage1_recent_loss,
         stage1_other,
         stage2_excluded,
         suitable,
@@ -1233,6 +1283,8 @@ pub async fn run_persona_classification_once(
         max_inactive_days: cfg.personas.stage1_max_inactive_days,
         known_bots: cfg.personas.known_bots.clone(),
         stage1_min_all_time_roi: cfg.personas.stage1_min_all_time_roi,
+        stage1_require_recent_profit: cfg.personas.stage1_require_recent_profit,
+        stage1_recent_profit_window_days: cfg.personas.stage1_recent_profit_window_days,
     };
 
     // Get total wallet count for progress tracking
@@ -1301,6 +1353,7 @@ pub async fn run_persona_classification_once(
     let mut total_processed = 0_u64;
     let mut stage1_no_trades = 0_u64;
     let mut stage1_all_time_roi = 0_u64;
+    let mut stage1_recent_loss = 0_u64;
     let mut stage1_other = 0_u64;
     let mut stage2_excluded = 0_u64;
     let mut suitable = 0_u64;
@@ -1403,6 +1456,7 @@ pub async fn run_persona_classification_once(
             chunk_processed,
             chunk_no_trades,
             chunk_all_time_roi,
+            chunk_recent_loss,
             chunk_other,
             chunk_excluded,
             chunk_suitable,
@@ -1412,6 +1466,7 @@ pub async fn run_persona_classification_once(
         total_processed += chunk_processed;
         stage1_no_trades += chunk_no_trades;
         stage1_all_time_roi += chunk_all_time_roi;
+        stage1_recent_loss += chunk_recent_loss;
         stage1_other += chunk_other;
         stage2_excluded += chunk_excluded;
         suitable += chunk_suitable;
@@ -1424,6 +1479,7 @@ pub async fn run_persona_classification_once(
                 "suitable": suitable,
                 "stage1_no_trades": stage1_no_trades,
                 "stage1_all_time_roi": stage1_all_time_roi,
+                "stage1_recent_loss": stage1_recent_loss,
                 "stage1_other": stage1_other,
                 "stage2_excluded": stage2_excluded,
                 "phase": "classifying"
@@ -1436,6 +1492,7 @@ pub async fn run_persona_classification_once(
     tracing::info!(
         stage1_no_trades,
         stage1_all_time_roi,
+        stage1_recent_loss,
         stage1_other,
         stage2_excluded,
         suitable,
