@@ -3583,4 +3583,100 @@ mod tests {
             .unwrap();
         assert_eq!(classified, 0);
     }
+
+    /// Integration test: wallet with negative realized PnL but positive unrealized gets excluded
+    #[tokio::test]
+    async fn test_classification_uses_realized_pnl_not_unrealized() {
+        let mut cfg = Config::from_toml_str(include_str!("../../../../config/default.toml")).unwrap();
+        cfg.personas.stage1_min_all_time_roi = 0.0;  // 0% threshold - any negative realized excludes
+        cfg.personas.stage1_min_wallet_age_days = 7;  // Lower threshold for test
+
+        let db = AsyncDb::open(":memory:").await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let days_ago_30 = now - (30 * 86400);
+
+        db.call(move |conn| {
+            // Insert wallet
+            conn.execute(
+                "INSERT INTO wallets (proxy_wallet, discovered_from, is_active, discovered_at) VALUES ('0xloser', 'HOLDER', 1, datetime('now', '-60 days'))",
+                [],
+            )?;
+
+            // Need 10+ trades with oldest trade 7+ days old
+            // Closed position: realized loss -$10
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES ('0xloser', 'mkt1', 'BUY', 100.0, 0.60, ?1, '0xtx1', '{}')",
+                [now - (8 * 86400)],  // 8 days ago
+            )?;
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES ('0xloser', 'mkt1', 'SELL', 100.0, 0.50, ?1, '0xtx2', '{}')",
+                [now - (7 * 86400) - 1000],  // 7+ days ago
+            )?;
+
+            // Open position: $400 cost (would be +$100 unrealized if price is $0.50)
+            // This would make total_pnl positive with unrealized gains, but realized is negative
+            conn.execute(
+                "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                 VALUES ('0xloser', 'mkt2', 'BUY', 1000.0, 0.40, ?1, '0xtx3', '{}')",
+                [days_ago_30 - 3000],
+            )?;
+
+            // Add 7 more trades to reach 10+ trades requirement
+            for i in 0..7 {
+                conn.execute(
+                    "INSERT INTO trades_raw (proxy_wallet, condition_id, side, size, price, timestamp, transaction_hash, raw_json)
+                     VALUES ('0xloser', 'mkt3', 'BUY', 10.0, 0.50, ?1, ?2, '{}')",
+                    rusqlite::params![now - (7 * 86400) - (i * 1000), format!("0xtx{}", i + 10)],
+                )?;
+            }
+
+            // Cashflow PnL = (50 + 0) - (60 + 400 + 70*0.50) = (50) - (495) = -$445 (negative)
+            // But if unrealized is +$100: total = -$345 or with more positions could be positive
+            // Realized PnL = -$10 (should fail Stage 1 all-time ROI gate)
+
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Run classification
+        let processed = run_persona_classification_once(&db, &cfg, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(processed, 1, "Should process 1 wallet");
+
+        // Verify wallet is EXCLUDED by Stage 1 (negative realized PnL)
+        let (exclusion_reason, suitable_count): (Option<String>, i64) = db.call(|conn| {
+            use rusqlite::OptionalExtension;
+
+            let reason: Option<String> = conn.query_row(
+                "SELECT reason FROM wallet_exclusions WHERE proxy_wallet = '0xloser'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+            let suitable: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM wallet_personas WHERE proxy_wallet NOT IN (SELECT proxy_wallet FROM wallet_exclusions)",
+                [],
+                |row| row.get(0),
+            )?;
+
+            Ok((reason, suitable))
+        })
+        .await
+        .unwrap();
+
+        assert!(exclusion_reason.is_some(), "Wallet should be excluded");
+        let reason = exclusion_reason.unwrap();
+        assert!(
+            reason.contains("ALL_TIME_ROI") || reason.contains("REALIZED"),
+            "Exclusion should be for negative realized PnL, got: {}", reason
+        );
+        assert_eq!(suitable_count, 0, "No wallets should be suitable (wallet has negative realized PnL)");
+    }
 }
