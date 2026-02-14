@@ -512,8 +512,13 @@ async fn main() -> Result<()> {
             while persona_classification_rx.recv().await.is_some() {
                 let span = tracing::info_span!("job_run", job = "persona_classification");
                 let _g = span.enter();
-                match jobs::run_persona_classification_once(&db, cfg.as_ref(), event_bus.as_deref(), None)
-                    .await
+                match jobs::run_persona_classification_once(
+                    &db,
+                    cfg.as_ref(),
+                    event_bus.as_deref(),
+                    None,
+                )
+                .await
                 {
                     Ok(classified) => {
                         tracing::info!(classified, "persona_classification done");

@@ -147,6 +147,14 @@ fn default_stage1_min_all_time_roi() -> f64 {
     -0.10 // -10% max lifetime loss
 }
 
+fn default_stage1_require_recent_profit() -> bool {
+    true
+}
+
+fn default_stage1_recent_profit_window_days() -> u32 {
+    30
+}
+
 fn default_ingestion_parallel_tasks() -> usize {
     4
 }
@@ -227,6 +235,13 @@ pub struct Personas {
     /// Wallets with lifetime ROI below this are excluded before persona classification.
     #[serde(default = "default_stage1_min_all_time_roi")]
     pub stage1_min_all_time_roi: f64,
+    /// Stage 1.5 gate: Require positive 30-day PnL.
+    /// Catches wallets whose strategies stopped working recently even if lifetime ROI is positive.
+    #[serde(default = "default_stage1_require_recent_profit")]
+    pub stage1_require_recent_profit: bool,
+    /// Window (days) for the Stage 1.5 recent profitability check.
+    #[serde(default = "default_stage1_recent_profit_window_days")]
+    pub stage1_recent_profit_window_days: u32,
     /// Enable parallel classification (default: true)
     #[serde(default = "default_parallel_enabled")]
     pub parallel_enabled: bool,

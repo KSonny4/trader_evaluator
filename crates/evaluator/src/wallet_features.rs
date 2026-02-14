@@ -506,6 +506,35 @@ pub fn compute_all_time_roi(conn: &Connection, proxy_wallet: &str) -> Result<f64
     }
 }
 
+/// Compute recent (last N days) cashflow PnL for a wallet.
+///
+/// Formula: `total_sell_proceeds - total_buy_costs` within the time window.
+/// This is the same cashflow PnL used in `realized_pnl` but restricted to recent trades.
+///
+/// Returns 0.0 if wallet has no trades in the window.
+pub fn compute_recent_pnl(
+    conn: &Connection,
+    proxy_wallet: &str,
+    window_days: u32,
+    now_epoch: i64,
+) -> Result<f64> {
+    let cutoff = now_epoch - i64::from(window_days) * 86400;
+
+    let (total_buy_cost, total_sell_proceeds): (f64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN side = 'BUY' THEN size * price ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN side = 'SELL' THEN size * price ELSE 0.0 END), 0.0)
+             FROM trades_raw
+             WHERE proxy_wallet = ?1 AND timestamp >= ?2",
+            rusqlite::params![proxy_wallet, cutoff],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0.0, 0.0));
+
+    Ok(total_sell_proceeds - total_buy_cost)
+}
+
 pub fn save_wallet_features(
     conn: &Connection,
     features: &WalletFeatures,
@@ -1061,6 +1090,126 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_recent_pnl_positive() {
+        // Wallet with profitable recent trades (last 30 days)
+        // Buy: 100 @ 0.40 = $40, Sell: 100 @ 0.60 = $60
+        // Buy: 100 @ 0.50 = $50, Sell: 100 @ 0.70 = $70
+        // Cashflow PnL = ($60 + $70) - ($40 + $50) = $130 - $90 = $40
+        let now = 1_700_000_000i64;
+        let day = 86_400i64;
+        let db = setup_db_with_trades(&[
+            (
+                "0xrecent_win",
+                "0xcond1",
+                "BUY",
+                100.0,
+                0.40,
+                now - 10 * day,
+            ),
+            (
+                "0xrecent_win",
+                "0xcond1",
+                "SELL",
+                100.0,
+                0.60,
+                now - 9 * day,
+            ),
+            ("0xrecent_win", "0xcond2", "BUY", 100.0, 0.50, now - 5 * day),
+            (
+                "0xrecent_win",
+                "0xcond2",
+                "SELL",
+                100.0,
+                0.70,
+                now - 4 * day,
+            ),
+        ]);
+
+        let pnl = compute_recent_pnl(&db.conn, "0xrecent_win", 30, now).unwrap();
+        assert!(
+            (pnl - 40.0).abs() < 0.01,
+            "recent PnL should be ~40.0, got {pnl}"
+        );
+    }
+
+    #[test]
+    fn test_compute_recent_pnl_negative() {
+        // Wallet with losing recent trades
+        // Buy: 100 @ 0.80 = $80, Sell: 100 @ 0.30 = $30
+        // Cashflow PnL = $30 - $80 = -$50
+        let now = 1_700_000_000i64;
+        let day = 86_400i64;
+        let db = setup_db_with_trades(&[
+            (
+                "0xrecent_loss",
+                "0xcond1",
+                "BUY",
+                100.0,
+                0.80,
+                now - 10 * day,
+            ),
+            (
+                "0xrecent_loss",
+                "0xcond1",
+                "SELL",
+                100.0,
+                0.30,
+                now - 9 * day,
+            ),
+        ]);
+
+        let pnl = compute_recent_pnl(&db.conn, "0xrecent_loss", 30, now).unwrap();
+        assert!(
+            (pnl - (-50.0)).abs() < 0.01,
+            "recent PnL should be ~-50.0, got {pnl}"
+        );
+    }
+
+    #[test]
+    fn test_compute_recent_pnl_no_trades() {
+        // Wallet with no trades in the recent window
+        let db = setup_db_with_trades(&[]);
+
+        let pnl = compute_recent_pnl(&db.conn, "0xempty", 30, 1_700_000_000).unwrap();
+        assert_eq!(
+            pnl, 0.0,
+            "recent PnL should be 0.0 for wallet with no trades"
+        );
+    }
+
+    #[test]
+    fn test_compute_recent_pnl_only_old_trades() {
+        // Wallet with trades outside the 30-day window (should not count)
+        let now = 1_700_000_000i64;
+        let day = 86_400i64;
+        let db = setup_db_with_trades(&[
+            ("0xold", "0xcond1", "BUY", 100.0, 0.40, now - 60 * day),
+            ("0xold", "0xcond1", "SELL", 100.0, 0.60, now - 59 * day),
+        ]);
+
+        let pnl = compute_recent_pnl(&db.conn, "0xold", 30, now).unwrap();
+        assert_eq!(
+            pnl, 0.0,
+            "recent PnL should be 0.0 for trades outside window"
+        );
+    }
+
+    #[test]
+    fn test_compute_recent_pnl_only_buys_no_sells() {
+        // Wallet that only bought recently (positions still open or expired worthless)
+        // Cashflow PnL = $0 - $100 = -$100
+        let now = 1_700_000_000i64;
+        let day = 86_400i64;
+        let db = setup_db_with_trades(&[("0xbuyer", "0xcond1", "BUY", 200.0, 0.50, now - 5 * day)]);
+
+        let pnl = compute_recent_pnl(&db.conn, "0xbuyer", 30, now).unwrap();
+        assert!(
+            (pnl - (-100.0)).abs() < 0.01,
+            "recent PnL should be ~-100.0, got {pnl}"
+        );
+    }
+
+    #[test]
     fn test_compute_all_time_roi_positive() {
         // Wallet with positive lifetime PnL should have positive ROI
         // Buy: 100 @ 0.40 = $40, 100 @ 0.50 = $50 (total buy cost: $90)
@@ -1078,10 +1227,7 @@ mod tests {
         let roi = compute_all_time_roi(&db.conn, "0xwinner").unwrap();
 
         assert!(roi > 0.0, "ROI should be positive, got {roi}");
-        assert!(
-            (roi - 0.18).abs() < 0.01,
-            "ROI should be ~0.18, got {roi}"
-        );
+        assert!((roi - 0.18).abs() < 0.01, "ROI should be ~0.18, got {roi}");
     }
 
     #[test]
@@ -1140,7 +1286,10 @@ mod tests {
 
         let roi = compute_all_time_roi(&db.conn, "0xholder").unwrap();
 
-        assert!(roi < 0.0, "ROI should be negative (all positions expired worthless)");
+        assert!(
+            roi < 0.0,
+            "ROI should be negative (all positions expired worthless)"
+        );
         assert!(
             (roi - (-1.00)).abs() < 0.01,
             "ROI should be ~-1.00, got {roi}"
