@@ -16,7 +16,6 @@ pub struct RawTrade {
     pub proxy_wallet: Option<String>,
     #[serde(rename = "conditionId", alias = "condition_id")]
     pub condition_id: Option<String>,
-    #[allow(dead_code)] // Present in API response
     pub asset: Option<String>,
     #[serde(deserialize_with = "de_opt_string_any", default)]
     pub size: Option<String>,

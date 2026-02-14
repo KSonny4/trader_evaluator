@@ -37,5 +37,11 @@ weekly_loss_pct = 5.0
 max_drawdown_pct = 15.0
 min_copy_fidelity_pct = 80.0
 
+[fillability]
+enabled = true
+window_secs = 120
+clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+max_concurrent_recordings = 20
+
 [observability]
 prometheus_port = 9095

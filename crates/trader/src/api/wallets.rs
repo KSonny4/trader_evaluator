@@ -33,19 +33,25 @@ pub(crate) struct MessageResponse {
     pub message: String,
 }
 
-fn is_valid_eth_address(addr: &str) -> bool {
-    addr.len() == 42 && addr.starts_with("0x") && addr[2..].chars().all(|c| c.is_ascii_hexdigit())
+fn is_valid_wallet_address(addr: &str) -> bool {
+    // Standard Ethereum address: 0x + 40 hex chars
+    let is_eth = addr.len() == 42
+        && addr.starts_with("0x")
+        && addr[2..].chars().all(|c| c.is_ascii_hexdigit());
+    // Polymarket proxy wallet: 64 hex chars (no 0x prefix)
+    let is_proxy = addr.len() == 64 && addr.chars().all(|c| c.is_ascii_hexdigit());
+    is_eth || is_proxy
 }
 
 pub async fn follow_wallet(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FollowRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<MessageResponse>)> {
-    if !is_valid_eth_address(&req.proxy_wallet) {
+    if !is_valid_wallet_address(&req.proxy_wallet) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(MessageResponse {
-                message: "invalid wallet address: must be 42-char hex string starting with 0x"
+                message: "invalid wallet address: must be 0x + 40 hex chars or 64 hex chars"
                     .to_string(),
             }),
         ));
