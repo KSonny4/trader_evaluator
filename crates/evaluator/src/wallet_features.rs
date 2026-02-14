@@ -637,10 +637,8 @@ pub fn compute_all_time_roi(conn: &Connection, proxy_wallet: &str) -> Result<f64
     Ok(realized_pnl / total_buy_cost)
 }
 
-/// Compute recent (last N days) cashflow PnL for a wallet.
-///
-/// Formula: `total_sell_proceeds - total_buy_costs` within the time window.
-/// This is the same cashflow PnL used in `realized_pnl` but restricted to recent trades.
+/// Compute recent FIFO-paired realized PnL over last N days.
+/// Uses closed positions only, not unrealized gains.
 ///
 /// Returns 0.0 if wallet has no trades in the window.
 pub fn compute_recent_pnl(
@@ -649,21 +647,11 @@ pub fn compute_recent_pnl(
     window_days: u32,
     now_epoch: i64,
 ) -> Result<f64> {
-    let cutoff = now_epoch - i64::from(window_days) * 86400;
+    let cutoff = now_epoch - (i64::from(window_days) * 86400);
 
-    let (total_buy_cost, total_sell_proceeds): (f64, f64) = conn
-        .query_row(
-            "SELECT
-                COALESCE(SUM(CASE WHEN side = 'BUY' THEN size * price ELSE 0.0 END), 0.0),
-                COALESCE(SUM(CASE WHEN side = 'SELL' THEN size * price ELSE 0.0 END), 0.0)
-             FROM trades_raw
-             WHERE proxy_wallet = ?1 AND timestamp >= ?2",
-            rusqlite::params![proxy_wallet, cutoff],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap_or((0.0, 0.0));
-
-    Ok(total_sell_proceeds - total_buy_cost)
+    // Use FIFO-paired realized PnL in window
+    let paired_stats = paired_trade_stats(conn, proxy_wallet, cutoff)?;
+    Ok(paired_stats.total_fifo_realized_pnl)
 }
 
 pub fn save_wallet_features(
@@ -1394,17 +1382,37 @@ mod tests {
 
     #[test]
     fn test_compute_recent_pnl_only_buys_no_sells() {
-        // Wallet that only bought recently (positions still open or expired worthless)
-        // Cashflow PnL = $0 - $100 = -$100
+        // Wallet that only bought recently (positions still open)
+        // FIFO Realized PnL = $0 (no closed positions)
         let now = 1_700_000_000i64;
         let day = 86_400i64;
         let db = setup_db_with_trades(&[("0xbuyer", "0xcond1", "BUY", 200.0, 0.50, now - 5 * day)]);
 
         let pnl = compute_recent_pnl(&db.conn, "0xbuyer", 30, now).unwrap();
-        assert!(
-            (pnl - (-100.0)).abs() < 0.01,
-            "recent PnL should be ~-100.0, got {pnl}"
-        );
+        assert_eq!(pnl, 0.0, "recent PnL should be 0.0 (no closed positions), got {pnl}");
+    }
+
+    #[test]
+    fn test_compute_recent_pnl_uses_realized_not_cashflow() {
+        let now = 1_700_000_000i64;
+        let days_30_ago = now - (30 * 86400);
+
+        let db = setup_db_with_trades(&[
+            // Recent closed position: loss
+            ("0xrecent", "mkt1", "BUY", 100.0, 0.55, days_30_ago + 1000),
+            ("0xrecent", "mkt1", "SELL", 100.0, 0.50, days_30_ago + 2000),  // -$5 realized
+            // Recent open position with cost (unrealized gain not counted)
+            ("0xrecent", "mkt2", "BUY", 1000.0, 0.40, days_30_ago + 3000),  // $400 cost
+            // If current price is $0.50: +$100 unrealized (not counted)
+            // Old trade (outside 30-day window - should not count)
+            ("0xrecent", "mkt3", "BUY", 100.0, 0.30, days_30_ago - 10000),
+            ("0xrecent", "mkt3", "SELL", 100.0, 0.50, days_30_ago - 5000),  // +$20 realized (old)
+        ]);
+
+        let recent_pnl = compute_recent_pnl(&db.conn, "0xrecent", 30, now).unwrap();
+
+        // Should only count recent realized: -$5 (not the old +$20 or unrealized +$100)
+        assert!((recent_pnl - (-5.0)).abs() < 0.01, "Expected -5.0, got {recent_pnl}");
     }
 
     #[test]
