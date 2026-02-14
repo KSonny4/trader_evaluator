@@ -99,8 +99,10 @@ fn run_migrations_sync(conn: &mut rusqlite::Connection) -> Result<(), rusqlite::
         )
         .unwrap_or(0);
 
-    let migrations: Vec<(&str, &str)> =
-        vec![("001", include_str!("../migrations/001_initial.sql"))];
+    let migrations: Vec<(&str, &str)> = vec![
+        ("001", include_str!("../migrations/001_initial.sql")),
+        ("002", include_str!("../migrations/002_book_snapshots.sql")),
+    ];
 
     for (i, (_name, sql)) in migrations.iter().enumerate() {
         let version = (i + 1) as i64;
@@ -144,6 +146,8 @@ mod tests {
         assert!(tables.contains(&"follower_slippage_log".to_string()));
         assert!(tables.contains(&"risk_state".to_string()));
         assert!(tables.contains(&"trade_events".to_string()));
+        assert!(tables.contains(&"book_snapshots".to_string()));
+        assert!(tables.contains(&"fillability_results".to_string()));
     }
 
     #[tokio::test]

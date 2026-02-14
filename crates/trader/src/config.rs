@@ -11,6 +11,7 @@ pub struct TraderConfig {
     pub evaluator: EvaluatorConfig,
     pub trading: TradingConfig,
     pub risk: RiskConfig,
+    pub fillability: FillabilityConfig,
     #[allow(dead_code)]
     pub observability: ObservabilityConfig,
 }
@@ -77,6 +78,25 @@ pub struct PerWalletRiskConfig {
     pub weekly_loss_pct: f64,
     pub max_drawdown_pct: f64,
     pub min_copy_fidelity_pct: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FillabilityConfig {
+    pub enabled: bool,
+    pub window_secs: u64,
+    pub clob_ws_url: String,
+    pub max_concurrent_recordings: usize,
+}
+
+impl Default for FillabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_secs: 120,
+            clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+            max_concurrent_recordings: 20,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,7 +201,7 @@ use_proportional_sizing = true
 default_their_bankroll_usd = 5000.0
 mirror_delay_secs = 0
 slippage_default_cents = 1.0
-poll_interval_secs = 10
+poll_interval_ms = 100
 
 [risk.portfolio]
 max_total_exposure_pct = 15.0
@@ -195,6 +215,12 @@ daily_loss_pct = 2.0
 weekly_loss_pct = 5.0
 max_drawdown_pct = 15.0
 min_copy_fidelity_pct = 80.0
+
+[fillability]
+enabled = true
+window_secs = 120
+clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+max_concurrent_recordings = 20
 
 [observability]
 prometheus_port = 9095

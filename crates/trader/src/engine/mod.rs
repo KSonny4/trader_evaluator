@@ -1,10 +1,12 @@
 pub mod detector;
+pub mod fillability;
 pub mod mirror;
 pub mod settlement;
 pub mod watcher;
 
 use crate::config::TraderConfig;
 use crate::db::TraderDb;
+use crate::engine::fillability::FillabilityRecorder;
 use crate::polymarket::TraderPolymarketClient;
 use crate::risk::RiskManager;
 use crate::types::{TradingMode, WalletStatus};
@@ -44,6 +46,7 @@ pub struct WalletEngine {
     client: Arc<TraderPolymarketClient>,
     config: Arc<TraderConfig>,
     risk: Arc<RiskManager>,
+    fillability: Arc<FillabilityRecorder>,
     watchers: HashMap<String, WatcherHandle>,
     halted: Arc<AtomicBool>,
 }
@@ -55,11 +58,16 @@ impl WalletEngine {
         config: Arc<TraderConfig>,
         risk: Arc<RiskManager>,
     ) -> Self {
+        let fillability = Arc::new(FillabilityRecorder::new(
+            Arc::clone(&db),
+            config.fillability.clone(),
+        ));
         Self {
             db,
             client,
             config,
             risk,
+            fillability,
             watchers: HashMap::new(),
             halted: Arc::new(AtomicBool::new(false)),
         }
@@ -269,11 +277,22 @@ impl WalletEngine {
         let client = Arc::clone(&self.client);
         let config = Arc::clone(&self.config);
         let risk = Arc::clone(&self.risk);
+        let fillability = Arc::clone(&self.fillability);
         let halted = Arc::clone(&self.halted);
         let cancel_clone = cancel.clone();
 
         let handle = tokio::spawn(async move {
-            watcher::run_watcher(db, client, config, risk, wallet, halted, cancel_clone).await;
+            watcher::run_watcher(
+                db,
+                client,
+                config,
+                risk,
+                fillability,
+                wallet,
+                halted,
+                cancel_clone,
+            )
+            .await;
         });
 
         self.watchers.insert(addr, WatcherHandle { cancel, handle });
