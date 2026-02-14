@@ -7,6 +7,16 @@
         <p class="text-gray-600 text-sm">Loading status...</p>
     </div>
 
+    <!-- Live job progress: polls every 5s for near-real-time visibility -->
+    <div hx-get="/partials/jobs" hx-trigger="load, every 5s" hx-swap="innerHTML">
+        <p class="text-gray-600 text-sm">Loading jobs...</p>
+    </div>
+
+    <!-- Persona breakdown & ingestion stats: polls every 30s -->
+    <div hx-get="/partials/persona_breakdown" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <p class="text-gray-600 text-sm">Loading persona breakdown...</p>
+    </div>
+
     <!-- Async funnel: last run stats (wallets / markets / trades_raw processed) -->
     <div hx-get="/partials/async_funnel" hx-trigger="load, every 30s" hx-swap="innerHTML">
         <p class="text-gray-600 text-sm">Loading last run...</p>

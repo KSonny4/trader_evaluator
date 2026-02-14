@@ -14,6 +14,40 @@ pub struct FunnelCounts {
     pub wallets_ranked: i64,
 }
 
+/// Per-persona classification count (latest classification per wallet).
+pub struct PersonaBreakdownRow {
+    pub persona: String,
+    pub count: i64,
+}
+
+impl PersonaBreakdownRow {
+    /// Human-friendly persona name (DB stores SCREAMING_SNAKE_CASE).
+    pub fn display_name(&self) -> &str {
+        match self.persona.as_str() {
+            "INFORMED_SPECIALIST" => "Informed Specialist",
+            "CONSISTENT_GENERALIST" => "Consistent Generalist",
+            "PATIENT_ACCUMULATOR" => "Patient Accumulator",
+            other => other,
+        }
+    }
+
+    /// Tailwind badge classes for this persona.
+    pub fn badge_classes(&self) -> &str {
+        match self.persona.as_str() {
+            "INFORMED_SPECIALIST" => "bg-purple-900/50 text-purple-300",
+            "CONSISTENT_GENERALIST" => "bg-emerald-900/50 text-emerald-300",
+            "PATIENT_ACCUMULATOR" => "bg-blue-900/50 text-blue-300",
+            _ => "bg-gray-700 text-gray-300",
+        }
+    }
+}
+
+/// Ingestion pipeline stats.
+pub struct IngestionStats {
+    pub active_wallets: i64,
+    pub wallets_with_trades: i64,
+}
+
 /// Persona funnel counts for Strategy Bible §2 (drop-offs through Stage 1/2 to paper/follow-worthy).
 pub struct PersonaFunnelCounts {
     pub wallets_discovered: i64,
@@ -130,6 +164,22 @@ impl JobStatusRow {
                     json.get("total").and_then(serde_json::Value::as_i64),
                 ) {
                     return format!("{inserted} wallets inserted ({total} markets)");
+                }
+            }
+            "trades_ingestion" | "activity_ingestion" | "positions_snapshot" => {
+                if let (Some(wallets), Some(inserted)) = (
+                    json.get("wallets").and_then(serde_json::Value::as_i64),
+                    json.get("inserted").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{wallets} wallets ({inserted} inserted)");
+                }
+            }
+            "holders_snapshot" => {
+                if let (Some(markets), Some(inserted)) = (
+                    json.get("markets").and_then(serde_json::Value::as_i64),
+                    json.get("inserted").and_then(serde_json::Value::as_i64),
+                ) {
+                    return format!("{markets} markets ({inserted} inserted)");
                 }
             }
             "persona_classification" => {
@@ -812,5 +862,50 @@ mod tests {
             updated_at: None,
         };
         assert_eq!(job.progress_display(), "");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_trades_ingestion() {
+        let job = JobStatusRow {
+            job_name: "trades_ingestion".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"wallets":50,"inserted":15234}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "50 wallets (15234 inserted)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_activity_ingestion() {
+        let job = JobStatusRow {
+            job_name: "activity_ingestion".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"wallets":30,"inserted":500}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "30 wallets (500 inserted)");
+    }
+
+    #[test]
+    fn test_job_status_row_progress_display_holders_snapshot() {
+        let job = JobStatusRow {
+            job_name: "holders_snapshot".to_string(),
+            status: "idle".to_string(),
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            duration_ms: None,
+            metadata: Some(r#"{"markets":20,"inserted":400}"#.to_string()),
+            updated_at: None,
+        };
+        assert_eq!(job.progress_display(), "20 markets (400 inserted)");
     }
 }

@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
                     generation,
                     "fast-path tick received (ready for paper trading integration)"
                 );
-                // TODO: When trader microservice supports event-driven mode, trigger paper tick here
+                // TODO(#81): When trader microservice supports event-driven mode, trigger paper tick here
             }
         });
 

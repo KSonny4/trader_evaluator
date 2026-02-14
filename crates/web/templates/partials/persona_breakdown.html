@@ -1,0 +1,32 @@
+<div class="bg-gray-800/50 rounded-lg p-4 mb-6">
+    <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Persona Breakdown & Ingestion</h3>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Persona counts -->
+        <div>
+            <h4 class="text-xs text-gray-500 uppercase mb-2">Wallets by Persona</h4>
+            {% if personas.is_empty() %}
+            <p class="text-gray-600 text-sm">No personas classified yet.</p>
+            {% else %}
+            <div class="flex flex-wrap gap-2">
+                {% for row in personas %}
+                <span class="px-3 py-1 rounded text-sm font-medium {{ row.badge_classes() }}">
+                    {{ row.display_name() }}: {{ row.count }}
+                </span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        <!-- Ingestion stats -->
+        <div>
+            <h4 class="text-xs text-gray-500 uppercase mb-2">Ingestion Pipeline</h4>
+            <div class="flex flex-wrap gap-2">
+                <span class="px-3 py-1 rounded text-sm font-medium bg-cyan-900/50 text-cyan-300">
+                    Active wallets: {{ ingestion.active_wallets }}
+                </span>
+                <span class="px-3 py-1 rounded text-sm font-medium bg-amber-900/50 text-amber-300">
+                    With trades: {{ ingestion.wallets_with_trades }}
+                </span>
+            </div>
+        </div>
+    </div>
+</div>

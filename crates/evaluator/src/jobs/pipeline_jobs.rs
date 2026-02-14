@@ -2827,7 +2827,7 @@ mod tests {
             .unwrap();
         assert_eq!(inserted, 2, "should insert 2 new wallets");
 
-        // TODO: Verify that new_wallets list contains 0xnew1 and 0xnew2
+        // TODO(#81): Verify that new_wallets list contains 0xnew1 and 0xnew2
         // This will be validated when we add the spawn logic in next task
     }
 

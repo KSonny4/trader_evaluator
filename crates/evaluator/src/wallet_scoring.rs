@@ -171,7 +171,7 @@ pub fn score_input_from_features(
         hit_rate,
         profitable_markets: features.profitable_markets,
         total_markets: features.unique_markets,
-        avg_post_entry_drift_cents: 0.0, // TODO: compute from post-entry price movement
+        avg_post_entry_drift_cents: 0.0, // TODO(#81): compute from post-entry price movement
         noise_trade_ratio,
         wallet_age_days,
         is_public_leaderboard_top_500: is_leaderboard,
